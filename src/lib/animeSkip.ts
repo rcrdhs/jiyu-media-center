@@ -162,7 +162,7 @@ async function fetchAniSkipIntervals(
           source: 'aniskip' as const,
         }
       })
-      .filter((row): row is AnimeSkipInterval => Boolean(row))
+      .filter((row): row is NonNullable<typeof row> => row != null)
       .sort((a, b) => a.startTime - b.startTime)
 
     if (intervals.length > 0) {
