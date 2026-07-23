@@ -216,17 +216,34 @@ export function Player({
       ? localPlaylist
       : item.playlist && item.playlist.length > 0
         ? item.playlist
-        : [{ title: item.title, url: item.url, fileName: item.description, subtitleUrl: item.subtitleUrl }]
+        : [
+            {
+              title: item.title,
+              url: item.url,
+              fileName: item.description,
+              subtitleUrl: item.subtitleUrl,
+              subtitleKind: item.subtitleKind,
+            },
+          ]
   const activePlaylistItem = playlist[Math.min(playlistIndex, playlist.length - 1)] ?? {
     title: item.title,
     url: item.url,
     subtitleUrl: item.subtitleUrl,
+    subtitleKind: item.subtitleKind,
   }
   const hasPlaylist = playlist.length > 1
   // Prefer the active episode's subs only — never fall back to episode 1's URL.
   const subtitleUrl = hasPlaylist
     ? activePlaylistItem.subtitleUrl
     : (activePlaylistItem.subtitleUrl ?? item.subtitleUrl)
+  const subtitleKind = hasPlaylist
+    ? activePlaylistItem.subtitleKind
+    : (activePlaylistItem.subtitleKind ?? item.subtitleKind)
+  // Only advertise subtitle loading when a real .srt/.ass/.vtt came with the torrent.
+  // Embedded softsub probes stay silent until cues are actually ready.
+  const showSubsLoading = subsStatus === 'loading' && subtitleKind === 'file'
+  const showSubsControls =
+    Boolean(subtitleUrl) && (subtitleKind === 'file' || subsStatus === 'ready')
 
   useEffect(() => {
     const list =
@@ -769,7 +786,7 @@ export function Player({
 
     if (needsTorrent) {
       if (!window.signalDesktop?.torrentStream) {
-        setError('Torrent playback needs the Jiyu desktop app.')
+        setError('Playback needs the Jiyu desktop app.')
         return
       }
       setEpisodeLoading(true)
@@ -792,12 +809,13 @@ export function Player({
                 ...row,
                 url: result.url!,
                 subtitleUrl: result.subtitleUrl ?? result.playlist?.[0]?.subtitleUrl,
+                subtitleKind: result.subtitleKind ?? result.playlist?.[0]?.subtitleKind,
                 fileName: result.fileName,
               }
             }
             // Invalidate dead local URLs after the swarm swap.
             if (isEphemeralLocalStreamUrl(row.url)) {
-              return { ...row, url: '', subtitleUrl: undefined }
+              return { ...row, url: '', subtitleUrl: undefined, subtitleKind: undefined }
             }
             return row
           })
@@ -1484,7 +1502,7 @@ export function Player({
           break
         case 'c':
         case 'C':
-          if (subtitleUrl && subsStatus !== 'missing') {
+          if (showSubsControls && subsStatus !== 'missing') {
             e.preventDefault()
             toggleSubtitles()
           }
@@ -1520,7 +1538,7 @@ export function Player({
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [onClose, muted, volume, isTile, subtitleUrl, subsStatus])
+  }, [onClose, muted, volume, isTile, showSubsControls, subsStatus])
 
   useEffect(() => {
     if (isTile || isPip) return
@@ -1658,7 +1676,7 @@ export function Player({
                 {error ?? status}
                 {!error && engineLabel ? ` · ${engineLabel}` : ''}
                 {!error ? ` · ${muted ? 'Muted' : `${Math.round(volume * 100)}%`}` : ''}
-                {!error && subsStatus === 'loading' ? ' · Loading subtitles…' : ''}
+                {!error && showSubsLoading ? ' · Loading subtitles…' : ''}
                 {!error && subsStatus === 'ready' ? ` · Subs ${subsEnabled ? 'on' : 'off'}` : ''}
                 {awaitingAdd ? ' · Multi-view: pick another channel' : ''}
               </span>
@@ -1749,14 +1767,14 @@ export function Player({
                   }}
                 />
               </label>
-              {(subtitleUrl || subsStatus !== 'idle') && (
+              {showSubsControls && (
                 <button
                   type="button"
                   className={`ghost-btn control-btn${subsEnabled && subsStatus === 'ready' ? ' is-armed' : ''}`}
                   onClick={toggleSubtitles}
                   disabled={subsStatus === 'missing'}
                   title={
-                    subsStatus === 'loading'
+                    showSubsLoading
                       ? 'Loading subtitles…'
                       : subsStatus === 'missing'
                         ? 'No subtitles found for this stream'
@@ -1765,7 +1783,13 @@ export function Player({
                           : 'Show subtitles'
                   }
                 >
-                  {subsStatus === 'loading' ? 'Subs…' : subsStatus === 'missing' ? 'No Subs' : subsEnabled ? 'Subs On' : 'Subs Off'}
+                  {showSubsLoading
+                    ? 'Subs…'
+                    : subsStatus === 'missing'
+                      ? 'No Subs'
+                      : subsEnabled
+                        ? 'Subs On'
+                        : 'Subs Off'}
                 </button>
               )}
               {!inMultiview && (

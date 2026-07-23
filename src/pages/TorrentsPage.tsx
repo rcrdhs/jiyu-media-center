@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
 import { useCatalog } from '../context/CatalogContext'
 import { usePlayback } from '../context/PlaybackContext'
-import { deleteTorrentItemsForSource } from '../lib/torrentCatalogStore'
+import {
+  deleteTorrentItemsForSource,
+  loadTorrentCatalogMeta,
+} from '../lib/torrentCatalogStore'
 import {
   buildEpisodeChoices,
   buildSearchUrl,
@@ -97,10 +100,20 @@ export function TorrentsPage() {
       setPrevPage(outcome.prevPage)
       setSearchTemplate(outcome.searchTemplate)
       setScrapeError(outcome.error)
+      // Browse is a preview; shelves only update after sync. Kick one off when
+      // this site has nothing shelved yet (common for YTS after the API switch).
+      if (outcome.links.length > 0) {
+        const shelved =
+          loadTorrentCatalogMeta().bySource[source.id]?.count ?? 0
+        if (shelved === 0) {
+          setSyncingId(source.id)
+          void syncTorrentWebsite(source.id).finally(() => setSyncingId(null))
+        }
+      }
     } finally {
       setBrowsingId(null)
     }
-  }, [])
+  }, [syncTorrentWebsite])
 
   const browsePage = useCallback(
     async (url: string, source: TorrentSource, addToHistory = true) => {
@@ -197,7 +210,7 @@ export function TorrentsPage() {
       await window.signalDesktop.torrentStop?.()
       const result = await window.signalDesktop.torrentStream(uri)
       if (!result.ok || !result.url) {
-        setStreamError(result.error || 'Could not start torrent stream')
+        setStreamError(result.error || 'Could not start playback')
         return
       }
       const category = guessVodCategory(title || result.name || '', pageUrl || uri)
@@ -210,6 +223,7 @@ export function TorrentsPage() {
                 ...entry,
                 url: result.url!,
                 subtitleUrl: result.subtitleUrl ?? result.playlist?.[0]?.subtitleUrl,
+                subtitleKind: result.subtitleKind ?? result.playlist?.[0]?.subtitleKind,
                 fileName: result.fileName,
               }
             : entry,
@@ -219,11 +233,12 @@ export function TorrentsPage() {
       }
       const item: StreamItem = {
         id: `torrent-${result.infoHash ?? Date.now()}`,
-        title: title || result.name || result.fileName || 'Torrent stream',
+        title: title || result.name || result.fileName || 'Stream',
         description: result.fileName ?? '',
         category,
         url: result.url,
         subtitleUrl: result.subtitleUrl ?? result.playlist?.[0]?.subtitleUrl,
+        subtitleKind: result.subtitleKind ?? result.playlist?.[0]?.subtitleKind,
         source: 'torrent',
         sourceKind: 'torrent',
         transport: 'torrent',
@@ -264,7 +279,7 @@ export function TorrentsPage() {
       void browsePage(url, source, false)
       return
     }
-    setStreamError('Paste a magnet link, a .torrent link, or a web page address')
+    setStreamError('Paste a link or web page address')
   }
 
   async function stopAll() {
@@ -290,12 +305,11 @@ export function TorrentsPage() {
   return (
     <div className="page torrents-page">
       <header className="page-header">
-        <p className="eyebrow">Peer-to-peer</p>
-        <h1>Torrents</h1>
+        <p className="eyebrow">Sources</p>
+        <h1>Websites</h1>
         <p className="lede">
-          Add websites that list magnet or .torrent links. Jiyu extracts Movies, TV Series, and Anime
-          into those shelves permanently (sorted by newest), and you can still browse here. Only use
-          sites and content you have the right to access.
+          Add catalog sites to browse and fill Movies, TV Series, and Anime. Only use sites and
+          content you have the right to access.
           {torrentCount > 0 && (
             <>
               {' '}
@@ -309,7 +323,7 @@ export function TorrentsPage() {
 
       {!desktop && (
         <p className="toast toast-error">
-          Torrent streaming needs the desktop app — quit and relaunch Jiyu with{' '}
+          Website playback needs the desktop app — quit and relaunch Jiyu with{' '}
           <code>npm run dev:desktop</code>.
         </p>
       )}
@@ -323,7 +337,7 @@ export function TorrentsPage() {
           placeholder="Add a website (e.g. yts.mx or torlock.com)…"
           value={draftUrl}
           onChange={(e) => setDraftUrl(e.target.value)}
-          aria-label="Add a torrent website"
+          aria-label="Add a website"
         />
         <button type="submit" className="primary-btn guide-toolbar-btn" disabled={!draftUrl.trim()}>
           Add
@@ -444,7 +458,7 @@ export function TorrentsPage() {
           </form>
           {results.length > 0 && (
             <p className="fine-print">
-              {filteredResults.length} playable torrent link
+              {filteredResults.length} playable link
               {filteredResults.length === 1 ? '' : 's'}
             </p>
           )}
@@ -454,7 +468,7 @@ export function TorrentsPage() {
                 <div className="torrent-result-meta">
                   <strong>{r.title}</strong>
                   <span>
-                    {r.kind === 'magnet' ? 'Magnet' : 'Torrent file'} · {formatSize(r.sizeBytes)}
+                    {formatSize(r.sizeBytes)}
                     {r.seeders > 0 ? ` · ${r.seeders} seeds` : ''} · {r.sourceLabel}
                   </span>
                 </div>
@@ -558,17 +572,17 @@ export function TorrentsPage() {
         <form className="guide-toolbar" onSubmit={streamPastedTorrent}>
           <input
             className="search-input guide-search"
-            placeholder="magnet:… · https://…/file.torrent · or a movie page URL"
+            placeholder="Paste a link or page URL…"
             value={torrentDraft}
             onChange={(e) => setTorrentDraft(e.target.value)}
-            aria-label="Magnet, torrent, or page link"
+            aria-label="Link or page URL"
           />
           <button
             type="submit"
             className="primary-btn guide-toolbar-btn"
             disabled={!desktop || Boolean(preparing) || !torrentDraft.trim()}
           >
-            {isTorrentInput(torrentDraft.trim()) ? 'Stream torrent' : 'Open page'}
+            {isTorrentInput(torrentDraft.trim()) ? 'Play' : 'Open page'}
           </button>
         </form>
       </section>
@@ -576,7 +590,7 @@ export function TorrentsPage() {
       {active.length > 0 && (
         <section className="torrent-active">
           <div className="torrent-sources-head">
-            <h2>Active torrents</h2>
+            <h2>Active downloads</h2>
             <button type="button" className="ghost-btn" onClick={() => void stopAll()}>
               Stop all
             </button>

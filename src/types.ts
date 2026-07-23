@@ -55,6 +55,8 @@ export interface StreamItem {
   playlist?: StreamPlaylistItem[]
   /** WebVTT (or convertible) subtitle track for the active torrent video */
   subtitleUrl?: string
+  /** Companion subtitle file vs speculative embedded softsub extract */
+  subtitleKind?: 'file' | 'embedded'
 }
 
 export interface StreamPlaylistItem {
@@ -62,6 +64,8 @@ export interface StreamPlaylistItem {
   url: string
   fileName?: string
   subtitleUrl?: string
+  /** Companion subtitle file vs speculative embedded softsub extract */
+  subtitleKind?: 'file' | 'embedded'
   /** Magnet / .torrent to resolve when switching episodes (SubsPlease-style shows). */
   torrentUri?: string
 }
@@ -104,6 +108,7 @@ export interface TorrentStreamResult extends Partial<TorrentInfo> {
   ok: boolean
   url?: string
   subtitleUrl?: string
+  subtitleKind?: 'file' | 'embedded'
   fileName?: string
   audioTranscoded?: boolean
   playlist?: StreamPlaylistItem[]

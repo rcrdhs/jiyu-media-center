@@ -8,6 +8,7 @@ import { GlobalPlayer } from './components/GlobalPlayer'
 import { HomePage } from './pages/HomePage'
 import { SectionPage } from './pages/SectionPage'
 import { WatchPage } from './pages/WatchPage'
+import { ShowPage } from './pages/ShowPage'
 import { LibraryPage } from './pages/LibraryPage'
 import { BrowsePage } from './pages/BrowsePage'
 import { WebBrowserPage } from './pages/WebBrowserPage'
@@ -33,6 +34,7 @@ export default function App() {
                   <Routes>
                     <Route path="/" element={<HomePage />} />
                     <Route path="/section/:id" element={<SectionRoute />} />
+                    <Route path="/show/:id" element={<ShowPage />} />
                     <Route path="/watch/:id" element={<WatchPage />} />
                     <Route path="/library" element={<LibraryPage />} />
                     <Route path="/browse" element={<BrowsePage />} />

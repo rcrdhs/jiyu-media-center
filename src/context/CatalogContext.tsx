@@ -286,8 +286,8 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
   const syncTorrentWebsite = useCallback(
     async (sourceId: string) => {
       const source = loadTorrentSources().find((s) => s.id === sourceId)
-      if (!source) return { added: 0, error: 'Torrent website not found' }
-      setTorrentSyncMessage(`Syncing ${source.label}…`)
+      if (!source) return { added: 0, error: 'Website not found' }
+      setTorrentSyncMessage(`Updating ${source.label}…`)
       try {
         const result = await syncTorrentSource(source, (p) => setTorrentSyncMessage(p.message))
         await reloadTorrentCatalog()
@@ -298,7 +298,7 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
         )
         return { added: result.added, error: result.error }
       } catch (err) {
-        const message = err instanceof Error ? err.message : 'Torrent sync failed'
+        const message = err instanceof Error ? err.message : 'Catalog update failed'
         setTorrentSyncMessage(message)
         return { added: 0, error: message }
       }
@@ -309,24 +309,36 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
   const syncAllTorrentWebsites = useCallback(async () => {
     const list = loadTorrentSources()
     if (list.length === 0) return { added: 0, sources: 0 }
-    setTorrentSyncMessage('Syncing torrent websites…')
+    setTorrentSyncMessage('Updating website catalogs…')
     const results = await syncAllTorrentSources(list, (p) => setTorrentSyncMessage(p.message))
     await reloadTorrentCatalog()
     const added = results.reduce((sum, r) => sum + r.added, 0)
-    setTorrentSyncMessage(`Synced ${added.toLocaleString()} torrent titles`)
+    setTorrentSyncMessage(`Synced ${added.toLocaleString()} titles from websites`)
     return { added, sources: list.length }
   }, [reloadTorrentCatalog])
 
   // Background sync once when ready if websites exist but the catalog is
   // empty, or if it was built by an older scraper (bad titles/posters).
+  // Also sync any individual site that never made it onto the shelves
+  // (e.g. YTS added while Cloudflare blocked HTML, after other sites synced).
   useEffect(() => {
     if (!ready) return
     const websites = loadTorrentSources()
     if (websites.length === 0) return
     const meta = loadTorrentCatalogMeta()
-    if (torrentItems.length > 0 && meta.scraperVersion === TORRENT_SCRAPER_VERSION) return
-    void syncAllTorrentWebsites()
-    // Intentionally run once after initial load when the catalog is empty
+    const versionStale = meta.scraperVersion !== TORRENT_SCRAPER_VERSION
+    if (torrentItems.length === 0 || versionStale) {
+      void syncAllTorrentWebsites()
+      return
+    }
+    const unsynced = websites.filter((source) => (meta.bySource[source.id]?.count ?? 0) === 0)
+    if (unsynced.length === 0) return
+    void (async () => {
+      for (const source of unsynced) {
+        await syncTorrentWebsite(source.id)
+      }
+    })()
+    // Intentionally run once after initial load
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready])
 

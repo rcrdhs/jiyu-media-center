@@ -58,12 +58,15 @@ export function CatalogGrid({
     (item) => item.transport !== 'torrent' && item.sourceKind !== 'torrent',
   )
 
-  const onlineCount = items.filter((item) => getStatus(item.id) === 'online').length
-  const offlineCount = items.filter((item) => {
+  // Torrents are never HTTP-probed — they stay "idle" forever. Only count IPTV /
+  // direct streams in the health summary so Anime (mostly SubsPlease) doesn't
+  // show "120 pending · auto-check" for magnet titles.
+  const onlineCount = probeable.filter((item) => getStatus(item.id) === 'online').length
+  const offlineCount = probeable.filter((item) => {
     const s = getStatus(item.id)
     return s === 'offline' || s === 'timeout'
   }).length
-  const pendingCount = items.filter((item) => {
+  const pendingCount = probeable.filter((item) => {
     const s = getStatus(item.id)
     return s === 'idle' || s === 'checking'
   }).length
@@ -120,11 +123,16 @@ export function CatalogGrid({
             />
             Hide duplicates
           </label>
-          <span className="health-summary">
-            <em className="online">{onlineCount}</em> up · <em className="offline">{offlineCount}</em> down
-            {pendingCount > 0 ? ` · ${pendingCount} pending` : ''}
-            {autoCheck ? ' · auto-check' : ''}
-          </span>
+          {probeable.length > 0 ? (
+            <span className="health-summary">
+              <em className="online">{onlineCount}</em> up · <em className="offline">{offlineCount}</em>{' '}
+              down
+              {pendingCount > 0 ? ` · ${pendingCount} pending` : ''}
+              {autoCheck ? ' · auto-check' : ''}
+            </span>
+          ) : (
+            <span className="health-summary">No live streams to check</span>
+          )}
         </div>
       )}
 

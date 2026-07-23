@@ -5,6 +5,7 @@
  */
 
 import { stableTorrentItemId } from './torrentCatalogStore'
+import { getViewingQuality } from './viewingQuality'
 import type { StreamItem } from '../types'
 
 export interface TorrentSource {
@@ -262,9 +263,137 @@ export function isYtsUrl(pageUrl: string): boolean {
   }
 }
 
+/** True when the saved website label is a YTS / YIFY mirror (e.g. "yts.gg", "YTS"). */
+export function isYtsLabel(label: string): boolean {
+  return /\byts\b|\byify\b/i.test(label.trim())
+}
+
+/** Host or label identifies a YTS / YIFY site — use the JSON API, not HTML scrape. */
+export function isYtsSource(pageUrl: string, sourceLabel = ''): boolean {
+  return isYtsUrl(pageUrl) || isYtsApiUrl(pageUrl) || isYtsLabel(sourceLabel)
+}
+
 /** YTS / YIFY and its many mirror domains (yts.mx, en.yts-official.biz, …) */
 export function isYifyHost(hostname: string): boolean {
   return /(^|[.-])(yts|yify)([.-]|$)/i.test(hostname) || /yts-official|yifymovies/i.test(hostname)
+}
+
+const YTS_PAGE_SIZE = 20
+
+function isYtsApiUrl(pageUrl: string): boolean {
+  try {
+    const url = new URL(pageUrl)
+    // Path is enough: labeled mirrors may use hosts that don't contain "yts"
+    return /\/api\/v2\/(?:list_movies|movie_details)\.json$/i.test(url.pathname)
+  } catch {
+    return false
+  }
+}
+
+function ytsListApiUrl(origin: string, page: number, query?: string): string {
+  const url = new URL(`${origin}/api/v2/list_movies.json`)
+  url.searchParams.set('limit', String(YTS_PAGE_SIZE))
+  url.searchParams.set('page', String(Math.max(1, page)))
+  url.searchParams.set('sort_by', 'date_added')
+  url.searchParams.set('order_by', 'desc')
+  if (query?.trim()) url.searchParams.set('query_term', query.trim())
+  return url.toString()
+}
+
+function ytsDetailsApiUrl(origin: string, movieId: number): string {
+  const url = new URL(`${origin}/api/v2/movie_details.json`)
+  url.searchParams.set('movie_id', String(movieId))
+  // yts.gg returns an empty stub unless with_images is set
+  url.searchParams.set('with_images', 'true')
+  return url.toString()
+}
+
+function ytsMagnet(hash: string, title: string): string {
+  return `magnet:?xt=urn:btih:${hash}&dn=${encodeURIComponent(title)}`
+}
+
+interface YtsApiTorrent {
+  hash?: string
+  quality?: string
+  type?: string
+  seeds?: number
+  size_bytes?: number
+  date_uploaded_unix?: number
+}
+
+interface YtsApiMovie {
+  id?: number
+  url?: string
+  title?: string
+  title_long?: string
+  year?: number
+  rating?: number
+  genres?: string[]
+  summary?: string
+  description_full?: string
+  medium_cover_image?: string
+  large_cover_image?: string
+  small_cover_image?: string
+  torrents?: YtsApiTorrent[]
+  date_uploaded_unix?: number
+}
+
+function ytsMovieTitle(movie: YtsApiMovie): string {
+  return (
+    movie.title_long?.trim() ||
+    [movie.title?.trim(), movie.year ? `(${movie.year})` : ''].filter(Boolean).join(' ') ||
+    'Untitled'
+  )
+}
+
+function ytsReleasedAt(movie: YtsApiMovie): number | undefined {
+  const uploaded = movie.date_uploaded_unix ? movie.date_uploaded_unix * 1000 : undefined
+  const year = Number(movie.year)
+  // Prefer theatrical year so Movies sorts 2026 → 1950s, not by torrent upload day.
+  if (Number.isFinite(year) && year >= 1800 && year <= 2100) {
+    if (uploaded) {
+      const uploadedYear = new Date(uploaded).getUTCFullYear()
+      if (uploadedYear === year) return uploaded
+    }
+    return Date.UTC(year, 0, 1)
+  }
+  return uploaded
+}
+
+function ytsTorrentResults(
+  movie: YtsApiMovie,
+  sourceLabel: string,
+): { results: TorrentResult[]; bestUri?: string; releasedAt?: number } {
+  const title = ytsMovieTitle(movie)
+  const results: TorrentResult[] = []
+  let releasedAt = ytsReleasedAt(movie)
+
+  for (const torrent of movie.torrents ?? []) {
+    const hash = torrent.hash?.trim()
+    if (!hash) continue
+    const quality = torrent.quality?.trim() || 'unknown'
+    const type = torrent.type?.trim()
+    const label = `${title} [${quality}]${type ? ` [${type}]` : ''}`
+    const uri = ytsMagnet(hash, label)
+    const sizeBytes = Number(torrent.size_bytes) || 0
+    const seeders = Number(torrent.seeds) || 0
+    if (torrent.date_uploaded_unix) {
+      const ts = torrent.date_uploaded_unix * 1000
+      // Only let upload time refine sorting when we don't already have a year.
+      if (!movie.year && (!releasedAt || ts > releasedAt)) releasedAt = ts
+    }
+    results.push({
+      title: label,
+      uri,
+      kind: 'magnet',
+      sizeBytes,
+      seeders,
+      sourceLabel,
+    })
+  }
+
+  const pick = pickBestStream(results, 0, 1080)
+  return { results, bestUri: pick?.result.uri, releasedAt }
 }
 
 /** Infer media category from a listing page URL or surrounding text. */
@@ -721,6 +850,14 @@ export function parseEpisodeKey(title: string): string | null {
 
 /** Strip episode/quality noise so sibling catalog rows of the same show match. */
 export function normalizeShowKey(title: string): string {
+  return cleanShowDisplayTitle(title)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+}
+
+/** Human-readable show name from an EZTV / release title (drops SxxExx + quality). */
+export function cleanShowDisplayTitle(title: string): string {
   return title
     .replace(/\[[^\]]*\]/g, ' ')
     .replace(/\([^)]*\)/g, ' ')
@@ -731,8 +868,7 @@ export function normalizeShowKey(title: string): string {
       /\b(?:720p|1080p|2160p|480p|4k|uhd|hevc|h\.?265|h\.?264|x264|x265|web-?dl|bluray|eztv|proper|repack|extended|unrated)\b/gi,
       ' ',
     )
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
     .trim()
 }
 
@@ -751,7 +887,9 @@ export function buildEpisodeChoices(
   results: TorrentResult[],
   downlinkMbps: number,
   preferredQuality?: number,
+  options?: { minDistinctEpisodes?: number },
 ): EpisodeChoice[] {
+  const minDistinct = options?.minDistinctEpisodes ?? 2
   const byEpisode = new Map<string, TorrentResult[]>()
   for (const result of results) {
     const key = parseEpisodeKey(result.title)
@@ -761,8 +899,8 @@ export function buildEpisodeChoices(
     else byEpisode.set(key, [result])
   }
 
-  // Need at least two distinct episodes to bother with a show playlist.
-  if (byEpisode.size < 2) return []
+  // Player playlist needs multiple episodes; show pages can list a single ep.
+  if (byEpisode.size < minDistinct) return []
 
   const episodes: EpisodeChoice[] = []
   for (const [key, group] of byEpisode) {
@@ -786,6 +924,145 @@ export function buildEpisodeChoices(
   return episodes
 }
 
+/** Series / anime torrent cards open an episode list before playback. */
+export function isShowBrowseItem(item: Pick<StreamItem, 'category' | 'transport' | 'sourceKind'>): boolean {
+  return (
+    (item.category === 'series' || item.category === 'anime') &&
+    (item.transport === 'torrent' || item.sourceKind === 'torrent')
+  )
+}
+
+function isEpisodeReleaseRow(item: StreamItem): boolean {
+  if (!isShowBrowseItem(item)) return false
+  if (!(item.torrentUri && isTorrentInput(item.torrentUri))) return false
+  return Boolean(parseEpisodeKey(item.title))
+}
+
+/**
+ * Shelf view: one card per show. Episode magnets stay in the catalog for the
+ * episode list / player — this only collapses what the grid displays.
+ */
+export function collapseEpisodeRowsToShows(items: StreamItem[]): StreamItem[] {
+  const passthrough: StreamItem[] = []
+  const showCards = new Map<string, StreamItem>()
+  const episodeGroups = new Map<string, StreamItem[]>()
+
+  for (const item of items) {
+    if (!isShowBrowseItem(item)) {
+      passthrough.push(item)
+      continue
+    }
+    const key = `${item.torrentSourceId || item.source || 'torrent'}:${normalizeShowKey(item.title)}`
+    if (!key.endsWith(':') && normalizeShowKey(item.title).length >= 2 && isEpisodeReleaseRow(item)) {
+      const list = episodeGroups.get(key)
+      if (list) list.push(item)
+      else episodeGroups.set(key, [item])
+      continue
+    }
+    // Already a show-level card (EZTV /shows/…, SubsPlease show page, etc.)
+    const prev = showCards.get(key)
+    if (!prev || (item.releasedAt ?? 0) > (prev.releasedAt ?? 0) || (!prev.poster && item.poster)) {
+      showCards.set(key, {
+        ...item,
+        title: cleanShowDisplayTitle(item.title) || item.title,
+      })
+    }
+  }
+
+  for (const [key, group] of episodeGroups) {
+    if (showCards.has(key)) continue
+    let best = group[0]
+    for (const row of group) {
+      const betterPoster = !best.poster && row.poster
+      const newer = (row.releasedAt ?? 0) > (best.releasedAt ?? 0)
+      const sharper = parseQuality(row.title) > parseQuality(best.title)
+      if (betterPoster || newer || sharper) best = row
+    }
+    const showTitle = cleanShowDisplayTitle(best.title) || best.title
+    const epCount = new Set(group.map((row) => parseEpisodeKey(row.title)).filter(Boolean)).size
+    showCards.set(key, {
+      ...best,
+      title: showTitle,
+      description:
+        epCount > 0
+          ? `${epCount} episode${epCount === 1 ? '' : 's'} · ${best.source || 'torrent'}`
+          : best.description,
+      // Keep a magnet so /show/:id resolves; siblings still supply the full list.
+      detailUrl: best.detailUrl,
+    })
+  }
+
+  return [...passthrough, ...showCards.values()]
+}
+
+/**
+ * Resolve the episode list for a TV / anime show card (detail scrape) or a
+ * per-episode magnet row (sibling catalog grouping).
+ */
+export async function resolveShowEpisodes(
+  item: StreamItem,
+  catalog: StreamItem[],
+): Promise<{ episodes: EpisodeChoice[]; error?: string }> {
+  const preference = getViewingQuality()
+  const downlink = getConnectionDownlinkMbps()
+  const requestedQuality =
+    preference === 'auto'
+      ? isSubsPleaseUrl(item.detailUrl || item.url)
+        ? 720
+        : undefined
+      : preference
+
+  // Prefer catalog siblings first (EZTV latest-episode sync → one card per show).
+  const fromCatalog = buildCatalogEpisodeChoices(item, catalog, downlink, requestedQuality, {
+    minDistinctEpisodes: 1,
+  })
+  if (fromCatalog.length > 0) return { episodes: fromCatalog }
+
+  const uri = item.torrentUri ?? ''
+  if (uri && isTorrentInput(uri)) {
+    return {
+      episodes: [
+        {
+          key: parseEpisodeKey(item.title) || 'E01',
+          title: item.title,
+          torrentUri: uri,
+          quality: parseQuality(item.title),
+        },
+      ],
+    }
+  }
+
+  const detail = item.detailUrl || item.url
+  if (!detail || detail.startsWith('magnet:')) {
+    return { episodes: [], error: 'No episodes found for this title.' }
+  }
+  const outcome = await scrapePage(detail, item.source || 'torrent')
+  if (outcome.results.length === 0) {
+    return { episodes: [], error: outcome.error || 'No episodes found for this title.' }
+  }
+
+  const grouped = buildEpisodeChoices(outcome.results, downlink, requestedQuality, {
+    minDistinctEpisodes: 1,
+  })
+  if (grouped.length > 0) return { episodes: grouped }
+
+  // Packs / odd titles without SxxExx — still list every magnet.
+  const loose: EpisodeChoice[] = []
+  for (const result of outcome.results) {
+    if (!isTorrentInput(result.uri)) continue
+    loose.push({
+      key: parseEpisodeKey(result.title) || `R${loose.length + 1}`,
+      title: result.title,
+      torrentUri: result.uri,
+      quality: parseQuality(result.title),
+    })
+  }
+  return {
+    episodes: loose,
+    error: loose.length === 0 ? outcome.error || 'No playable episodes found.' : undefined,
+  }
+}
+
 /**
  * Build an episode playlist from other catalog rows of the same show.
  * Used for TV Series (EZTV-style per-episode magnets) and anime shelves.
@@ -795,6 +1072,7 @@ export function buildCatalogEpisodeChoices(
   catalog: StreamItem[],
   downlinkMbps: number,
   preferredQuality?: number,
+  options?: { minDistinctEpisodes?: number },
 ): EpisodeChoice[] {
   if (current.category !== 'series' && current.category !== 'anime') return []
   const showKey = normalizeShowKey(current.title)
@@ -816,7 +1094,7 @@ export function buildCatalogEpisodeChoices(
     siblings.push(current)
   }
 
-  if (siblings.length < 2) return []
+  if (siblings.length === 0) return []
 
   const asResults: TorrentResult[] = siblings.map((item) => ({
     title: item.title,
@@ -827,7 +1105,9 @@ export function buildCatalogEpisodeChoices(
     sourceLabel: item.source || 'catalog',
   }))
 
-  return buildEpisodeChoices(asResults, downlinkMbps, preferredQuality)
+  return buildEpisodeChoices(asResults, downlinkMbps, preferredQuality, {
+    minDistinctEpisodes: options?.minDistinctEpisodes ?? 2,
+  })
 }
 
 async function fetchText(url: string): Promise<{ ok: boolean; content: string; error: string }> {
@@ -878,7 +1158,11 @@ export function buildSearchUrl(template: string, query: string): string {
  * Work out how to search the whole site: a known route for sites we
  * recognize, otherwise the page's own search form (GET forms only).
  */
-function findSearchTemplate(doc: Document, pageUrl: string): string | null {
+function findSearchTemplate(
+  doc: Document,
+  pageUrl: string,
+  sourceLabel = '',
+): string | null {
   let pageOrigin: string
   try {
     pageOrigin = new URL(pageUrl).origin
@@ -889,6 +1173,11 @@ function findSearchTemplate(doc: Document, pageUrl: string): string | null {
   if (isTorlockUrl(pageUrl)) {
     // Search within Torlock's Movies category
     return `${pageOrigin}/movie/torrents/${QUERY_PATH_TOKEN}.html`
+  }
+
+  if (isYtsSource(pageUrl, sourceLabel)) {
+    // HTML browse routes are Cloudflare-guarded; search via the open JSON API
+    return ytsListApiUrl(pageOrigin, 1, QUERY_TOKEN)
   }
 
   for (const form of doc.querySelectorAll('form')) {
@@ -1119,19 +1408,219 @@ async function scrapeSubsPlease(pageUrl: string, sourceLabel: string): Promise<T
   }
 }
 
+/**
+ * YTS / YIFY HTML browse pages sit behind Cloudflare (403 "Just a moment..."),
+ * but `/api/v2/list_movies.json` and `/api/v2/movie_details.json` stay open.
+ * Every listing card points at the details API so quality picking still works.
+ */
+async function scrapeYtsPage(
+  pageUrl: string,
+  sourceLabel: string,
+): Promise<TorrentScrapeOutcome> {
+  let origin: string
+  let apiUrl: string
+  let page = 1
+  let query = ''
+
+  try {
+    const url = new URL(pageUrl)
+    origin = url.origin
+    if (isYtsApiUrl(pageUrl)) {
+      apiUrl = pageUrl
+      if (/list_movies\.json$/i.test(url.pathname)) {
+        page = Math.max(1, Number(url.searchParams.get('page')) || 1)
+        query = url.searchParams.get('query_term') || ''
+      }
+      if (/movie_details\.json$/i.test(url.pathname) && !url.searchParams.has('with_images')) {
+        url.searchParams.set('with_images', 'true')
+        apiUrl = url.toString()
+      }
+    } else if (/\/movies?\/[^/]+/i.test(url.pathname)) {
+      const slug = decodeURIComponent(url.pathname.split('/').filter(Boolean).pop() || '')
+      query = slug.replace(/-/g, ' ')
+      apiUrl = ytsListApiUrl(origin, 1, query)
+    } else {
+      // Friendly /browse-movies URLs (and site roots) map back to the list API
+      page = Math.max(1, Number(url.searchParams.get('page')) || 1)
+      query = url.searchParams.get('query') || url.searchParams.get('query_term') || ''
+      apiUrl = ytsListApiUrl(origin, page, query || undefined)
+    }
+  } catch {
+    return emptyOutcome(pageUrl, sourceLabel, 'invalid YTS URL')
+  }
+
+  const failed = (error: string): TorrentScrapeOutcome => ({
+    results: [],
+    links: [],
+    pageTitle: sourceLabel,
+    pageUrl: apiUrl,
+    nextPage: null,
+    prevPage: null,
+    searchTemplate: ytsListApiUrl(origin, 1, QUERY_TOKEN),
+    error: `${sourceLabel}: ${error}`,
+  })
+
+  const { ok, content, error: fetchError } = await fetchText(apiUrl)
+  if (!ok) return failed(fetchError || 'could not reach the YTS API')
+
+  let movies: YtsApiMovie[] = []
+  try {
+    const json = JSON.parse(content) as {
+      status?: string
+      data?: { movies?: YtsApiMovie[]; movie?: YtsApiMovie; movie_count?: number }
+    }
+    if (json.data?.movie && json.data.movie.id) {
+      movies = [json.data.movie]
+    } else if (Array.isArray(json.data?.movies)) {
+      movies = json.data.movies
+    }
+  } catch {
+    return failed('unexpected response from the YTS API')
+  }
+  if (movies.length === 0) return failed('no movies returned')
+
+  const results: TorrentResult[] = []
+  const links: TorrentPageLink[] = []
+  let isDetails = /movie_details\.json/i.test(apiUrl)
+
+  // HTML /movies/<slug> lookups go through list_movies?query_term=… — if we
+  // can pin a single title, treat it like a detail page (magnets only).
+  if (!isDetails && query && movies.length >= 1) {
+    const needle = query.toLowerCase().replace(/[^a-z0-9]+/g, '')
+    const exact = movies.find((movie) => {
+      const slug = (movie.url || '').split('/').filter(Boolean).pop()?.toLowerCase() || ''
+      const hay = `${movie.title || ''} ${movie.title_long || ''} ${slug}`
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '')
+      return hay.includes(needle) || needle.includes(hay)
+    })
+    if (exact) {
+      movies = [exact]
+      isDetails = true
+    }
+  }
+
+  for (const movie of movies) {
+    const movieId = Number(movie.id) || 0
+    const title = ytsMovieTitle(movie)
+    const { results: torrentResults, releasedAt } = ytsTorrentResults(movie, sourceLabel)
+
+    // Detail pages expose quality magnets (same as opening a YTS movie HTML
+    // page). Browse/search stays card-only like /browse-movies.
+    if (isDetails) {
+      results.push(...torrentResults)
+      continue
+    }
+    if (!movieId) continue
+
+    const genres = Array.isArray(movie.genres) ? movie.genres.slice(0, 3).join(' · ') : ''
+    const rating = typeof movie.rating === 'number' && movie.rating > 0 ? `${movie.rating}/10` : ''
+    const summary = [movie.year ? String(movie.year) : '', rating, genres].filter(Boolean).join(' · ')
+    const poster =
+      movie.medium_cover_image || movie.large_cover_image || movie.small_cover_image || undefined
+    links.push({
+      title: title.slice(0, 180),
+      // Details API — same click-to-play path as opening a YTS movie HTML page
+      url: ytsDetailsApiUrl(origin, movieId),
+      summary: summary || movie.summary || movie.description_full || 'Movie',
+      poster,
+      category: 'movies',
+      releasedAt,
+    })
+  }
+
+  const listPage = /list_movies\.json/i.test(apiUrl) ? page : 1
+  const nextPage =
+    !isDetails && movies.length >= YTS_PAGE_SIZE
+      ? ytsListApiUrl(origin, listPage + 1, query || undefined)
+      : null
+  const prevPage =
+    !isDetails && listPage > 1 ? ytsListApiUrl(origin, listPage - 1, query || undefined) : null
+
+  // Show familiar site URLs in the UI (API URLs still power next/prev/search).
+  let displayUrl = apiUrl
+  if (!isDetails) {
+    displayUrl = `${origin}/browse-movies`
+    if (query) displayUrl = `${origin}/browse-movies?query=${encodeURIComponent(query)}`
+    if (listPage > 1) {
+      displayUrl += `${displayUrl.includes('?') ? '&' : '?'}page=${listPage}`
+    }
+  } else if (movies[0]?.url) {
+    displayUrl = movies[0].url
+  }
+
+  return {
+    results,
+    links,
+    pageTitle: query
+      ? `${sourceLabel} — “${query}”`
+      : isDetails
+        ? ytsMovieTitle(movies[0])
+        : `${sourceLabel} — latest movies (page ${listPage})`,
+    pageUrl: displayUrl,
+    nextPage,
+    prevPage,
+    searchTemplate: ytsListApiUrl(origin, 1, QUERY_TOKEN),
+    error:
+      results.length === 0 && links.length === 0
+        ? `${sourceLabel}: no playable torrents found`
+        : null,
+  }
+}
+
 /** EZTV and its mirrors (eztvx.to, eztv.re, eztv1.xyz, …) — TV shows only. */
 export function isEztvUrl(pageUrl: string): boolean {
   try {
-    return /(^|\.)eztv[a-z0-9]*\.[a-z]+$/i.test(new URL(pageUrl).hostname)
+    return isEztvHost(new URL(pageUrl).hostname)
   } catch {
     return false
   }
 }
 
-const EZTV_PAGE_SIZE = 100
+export function isEztvHost(hostname: string): boolean {
+  return /(^|\.)eztv[a-z0-9]*\.[a-z.]+$/i.test(hostname.replace(/^www\./i, ''))
+}
 
-function eztvApiUrl(origin: string, page: number): string {
-  return `${origin}/api/get-torrents?limit=${EZTV_PAGE_SIZE}&page=${page}`
+/** True when the saved website label is an EZTV mirror (e.g. "eztvx.to"). */
+export function isEztvLabel(label: string): boolean {
+  return /\beztv/i.test(label.trim())
+}
+
+/** Host or label identifies EZTV — always shelve under TV Series. */
+export function isEztvSource(pageUrl: string, sourceLabel = ''): boolean {
+  return isEztvUrl(pageUrl) || isEztvLabel(sourceLabel)
+}
+
+const EZTV_PAGE_SIZE = 100
+/** Show List ALL catalogue — ~100 shows per AJAX page. */
+const EZTV_SHOWLIST_MAX_PAGES = 250
+
+function eztvApiUrl(origin: string, page: number, imdbId?: string): string {
+  const base = `${origin}/api/get-torrents?limit=${EZTV_PAGE_SIZE}&page=${page}`
+  return imdbId ? `${base}&imdb_id=${encodeURIComponent(imdbId)}` : base
+}
+
+/** Full Show List catalogue (the site's ALL tab), not Trending / Airing. */
+function eztvShowlistAjaxUrl(origin: string, page: number): string {
+  return `${origin}/showlist/ajax/?page=${page}&letter=all&status=all`
+}
+
+export function isEztvShowUrl(pageUrl: string): boolean {
+  try {
+    const url = new URL(pageUrl)
+    return isEztvHost(url.hostname) && /\/shows\/\d+/i.test(url.pathname)
+  } catch {
+    return false
+  }
+}
+
+export function isEztvShowlistUrl(pageUrl: string): boolean {
+  try {
+    const url = new URL(pageUrl)
+    return isEztvHost(url.hostname) && /\/showlist\b/i.test(url.pathname)
+  } catch {
+    return false
+  }
 }
 
 interface EztvApiTorrent {
@@ -1147,14 +1636,272 @@ interface EztvApiTorrent {
   peers: number
   date_released_unix: number
   size_bytes: string
+  imdb_id?: string
+}
+
+interface EztvShowlistShow {
+  title_id: number | string
+  title_seo: string
+  title: string
+  title_list: string
+  thumb_small?: string
+  poster?: string
+  air_status?: string
+  air_days?: string
+  rating?: string
+  num_votes?: string
+}
+
+function eztvPosterUrl(origin: string, show: EztvShowlistShow): string | undefined {
+  const thumb = (show.thumb_small || '').trim()
+  if (thumb) {
+    if (thumb.startsWith('//')) return `https:${thumb}`
+    if (/^https?:\/\//i.test(thumb)) return thumb
+    return `${origin}${thumb.startsWith('/') ? '' : '/'}${thumb}`
+  }
+  const poster = (show.poster || '').trim()
+  if (!poster) return undefined
+  if (poster.startsWith('//')) return `https:${poster}`
+  if (/^https?:\/\//i.test(poster)) return poster
+  // Site serves catalogue art under /ezimg/thumbs/<file>
+  return `${origin}/ezimg/thumbs/${poster.replace(/^\/+/, '')}`
+}
+
+function eztvFailed(
+  sourceLabel: string,
+  pageUrl: string,
+  error: string,
+  prevPage: string | null = null,
+): TorrentScrapeOutcome {
+  return {
+    results: [],
+    links: [],
+    pageTitle: sourceLabel,
+    pageUrl,
+    nextPage: null,
+    prevPage,
+    searchTemplate: null,
+    error: `${sourceLabel}: ${error}`,
+  }
+}
+
+function mapEztvTorrents(
+  torrents: EztvApiTorrent[],
+  sourceLabel: string,
+): { results: TorrentResult[]; links: TorrentPageLink[] } {
+  const results: TorrentResult[] = []
+  const links: TorrentPageLink[] = []
+  for (const t of torrents) {
+    if (!t.magnet_url || !/^magnet:\?/i.test(t.magnet_url)) continue
+    const title = (t.title || '').replace(/\s*(?:\[eztv\]|EZTV)\s*$/i, '').trim()
+    if (!title) continue
+    const sizeBytes = Number(t.size_bytes) || 0
+    const seeders = Number(t.seeds) || 0
+    const releasedAt = t.date_released_unix ? t.date_released_unix * 1000 : undefined
+    const screenshot = t.small_screenshot || t.large_screenshot || ''
+    const poster = screenshot
+      ? screenshot.startsWith('//')
+        ? `https:${screenshot}`
+        : screenshot
+      : undefined
+    const season = Number(t.season) || 0
+    const episode = Number(t.episode) || 0
+    const epTag =
+      season > 0 && episode > 0
+        ? `S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`
+        : ''
+    const summary = [epTag, formatSize(sizeBytes), seeders > 0 ? `${seeders} seeds` : '']
+      .filter(Boolean)
+      .join(' · ')
+
+    results.push({ title, uri: t.magnet_url, kind: 'magnet', sizeBytes, seeders, sourceLabel })
+    links.push({
+      title: title.slice(0, 180),
+      url: t.magnet_url,
+      summary,
+      poster,
+      category: 'series',
+      releasedAt,
+      torrentUri: t.magnet_url,
+    })
+  }
+  return { results, links }
 }
 
 /**
- * EZTV's HTML pages sit behind a Cloudflare challenge, but its JSON API is
- * open. Every listing "page" is an API page of the latest episode torrents,
- * each of which already carries its magnet link.
+ * EZTV Show List ALL catalogue via /showlist/ajax/ (letter=all&status=all).
+ * Each card is a show; magnets resolve at play time from the show page → IMDb API.
  */
-async function scrapeEztvPage(
+async function scrapeEztvShowlistPage(
+  pageUrl: string,
+  sourceLabel: string,
+): Promise<TorrentScrapeOutcome> {
+  let origin: string
+  let page = 1
+  try {
+    const url = new URL(pageUrl)
+    origin = url.origin
+    page = Math.max(1, Number(url.searchParams.get('page')) || 1)
+  } catch {
+    return eztvFailed(sourceLabel, pageUrl, 'invalid show list URL')
+  }
+  const apiUrl = eztvShowlistAjaxUrl(origin, page)
+
+  const { ok, content, error: fetchError } = await fetchText(apiUrl)
+  if (!ok) return eztvFailed(sourceLabel, apiUrl, fetchError || 'could not reach EZTV show list')
+
+  let shows: EztvShowlistShow[]
+  let hasMore = false
+  try {
+    const json = JSON.parse(content) as { shows?: EztvShowlistShow[]; has_more?: boolean }
+    shows = Array.isArray(json.shows) ? json.shows : []
+    hasMore = Boolean(json.has_more)
+  } catch {
+    return eztvFailed(sourceLabel, apiUrl, 'unexpected response from EZTV show list')
+  }
+  if (shows.length === 0 && page === 1) {
+    return eztvFailed(sourceLabel, apiUrl, 'no shows returned')
+  }
+
+  const links: TorrentPageLink[] = []
+  for (const show of shows) {
+    const id = String(show.title_id || '').trim()
+    const seo = String(show.title_seo || '').trim()
+    const title = (show.title_list || show.title || '').trim()
+    if (!id || !title) continue
+    const showPath = seo ? `/shows/${id}/${seo}/` : `/shows/${id}/`
+    const status = (show.air_status || '').trim()
+    const days = (show.air_days || '').trim()
+    const rating = (show.rating || '').trim()
+    const summary = [
+      status === 'airing' && days ? `Airing: ${days}` : status ? status : '',
+      rating ? `${rating}★` : '',
+    ]
+      .filter(Boolean)
+      .join(' · ')
+    links.push({
+      title: title.slice(0, 180),
+      url: `${origin}${showPath}`,
+      summary,
+      poster: eztvPosterUrl(origin, show),
+      category: 'series',
+    })
+  }
+
+  return {
+    results: [],
+    links,
+    pageTitle: `${sourceLabel} — all shows (page ${page})`,
+    pageUrl: apiUrl,
+    nextPage: hasMore ? eztvShowlistAjaxUrl(origin, page + 1) : null,
+    prevPage: page > 1 ? eztvShowlistAjaxUrl(origin, page - 1) : null,
+    searchTemplate: null,
+    error: links.length === 0 ? `${sourceLabel}: no shows found` : null,
+  }
+}
+
+/**
+ * Show detail: read IMDb id from the show page, then pull magnets from the
+ * open get-torrents API (HTML magnet buttons are JS/Cloudflare-guarded).
+ */
+async function resolveImdbIdFromTitle(title: string): Promise<string> {
+  const q = title.trim()
+  if (!q) return ''
+  try {
+    const response = await fetch(
+      `https://api.tvmaze.com/singlesearch/shows?q=${encodeURIComponent(q)}`,
+    )
+    if (!response.ok) return ''
+    const json = (await response.json()) as { externals?: { imdb?: string | null } }
+    const imdb = json.externals?.imdb || ''
+    const digits = imdb.replace(/^tt/i, '')
+    return /^\d+$/.test(digits) ? digits : ''
+  } catch {
+    return ''
+  }
+}
+
+async function scrapeEztvShowDetail(
+  pageUrl: string,
+  sourceLabel: string,
+): Promise<TorrentScrapeOutcome> {
+  let origin: string
+  let showTitle = ''
+  try {
+    const url = new URL(pageUrl)
+    origin = url.origin
+    const slug = url.pathname.split('/').filter(Boolean).pop() || ''
+    showTitle = decodeURIComponent(slug).replace(/-/g, ' ').trim()
+  } catch {
+    return eztvFailed(sourceLabel, pageUrl, 'invalid show URL')
+  }
+
+  let imdbId = ''
+  const page = await fetchText(pageUrl)
+  if (page.ok) {
+    const imdbMatch =
+      page.content.match(/imdb\.com\/title\/tt(\d+)/i) ||
+      page.content.match(/\btt(\d{7,8})\b/i) ||
+      page.content.match(/["']imdb_id["']\s*:\s*["']?(\d+)/i)
+    imdbId = imdbMatch?.[1] || ''
+    const heading =
+      page.content.match(/<h1[^>]*>([^<]+)/i)?.[1] ||
+      page.content.match(/<title>([^|<]+)/i)?.[1] ||
+      ''
+    if (heading.trim()) showTitle = heading.replace(/\s*Torrent Download.*$/i, '').trim()
+  }
+  if (!imdbId && showTitle) {
+    imdbId = await resolveImdbIdFromTitle(showTitle)
+  }
+  if (!imdbId) {
+    return eztvFailed(
+      sourceLabel,
+      pageUrl,
+      page.error || 'could not find IMDb id for this show',
+    )
+  }
+
+  const allTorrents: EztvApiTorrent[] = []
+  for (let page = 1; page <= 40; page++) {
+    const apiUrl = eztvApiUrl(origin, page, imdbId)
+    const api = await fetchText(apiUrl)
+    if (!api.ok) {
+      if (page === 1) {
+        return eztvFailed(sourceLabel, apiUrl, api.error || 'could not reach the EZTV API')
+      }
+      break
+    }
+    let torrents: EztvApiTorrent[]
+    try {
+      const json = JSON.parse(api.content) as { torrents?: EztvApiTorrent[] }
+      torrents = Array.isArray(json.torrents) ? json.torrents : []
+    } catch {
+      if (page === 1) return eztvFailed(sourceLabel, apiUrl, 'unexpected response from the EZTV API')
+      break
+    }
+    if (torrents.length === 0) break
+    allTorrents.push(...torrents)
+    if (torrents.length < EZTV_PAGE_SIZE) break
+  }
+
+  const { results, links } = mapEztvTorrents(allTorrents, sourceLabel)
+  return {
+    results,
+    links,
+    pageTitle: sourceLabel,
+    pageUrl,
+    nextPage: null,
+    prevPage: null,
+    searchTemplate: null,
+    error: results.length === 0 ? `${sourceLabel}: no playable torrents for this show` : null,
+  }
+}
+
+/**
+ * Latest-episode feed (open JSON API). Used for Browse; shelf sync prefers
+ * the Show List ALL catalogue instead.
+ */
+async function scrapeEztvLatestPage(
   pageUrl: string,
   sourceLabel: string,
 ): Promise<TorrentScrapeOutcome> {
@@ -1171,63 +1918,26 @@ async function scrapeEztvPage(
   }
   const apiUrl = eztvApiUrl(origin, page)
 
-  const failed = (error: string): TorrentScrapeOutcome => ({
-    results: [],
-    links: [],
-    pageTitle: sourceLabel,
-    pageUrl: apiUrl,
-    nextPage: null,
-    prevPage: page > 1 ? eztvApiUrl(origin, page - 1) : null,
-    searchTemplate: null,
-    error: `${sourceLabel}: ${error}`,
-  })
-
   const { ok, content, error: fetchError } = await fetchText(apiUrl)
-  if (!ok) return failed(fetchError || 'could not reach the EZTV API')
+  if (!ok) {
+    return eztvFailed(
+      sourceLabel,
+      apiUrl,
+      fetchError || 'could not reach the EZTV API',
+      page > 1 ? eztvApiUrl(origin, page - 1) : null,
+    )
+  }
 
   let torrents: EztvApiTorrent[]
   try {
     const json = JSON.parse(content) as { torrents?: EztvApiTorrent[] }
     torrents = Array.isArray(json.torrents) ? json.torrents : []
   } catch {
-    return failed('unexpected response from the EZTV API')
+    return eztvFailed(sourceLabel, apiUrl, 'unexpected response from the EZTV API')
   }
-  if (torrents.length === 0) return failed('no torrents returned')
+  if (torrents.length === 0) return eztvFailed(sourceLabel, apiUrl, 'no torrents returned')
 
-  const results: TorrentResult[] = []
-  const links: TorrentPageLink[] = []
-  for (const t of torrents) {
-    if (!t.magnet_url || !/^magnet:\?/i.test(t.magnet_url)) continue
-    const title = (t.title || '').replace(/\s*(?:\[eztv\]|EZTV)\s*$/i, '').trim()
-    if (!title) continue
-    const sizeBytes = Number(t.size_bytes) || 0
-    const seeders = Number(t.seeds) || 0
-    const releasedAt = t.date_released_unix ? t.date_released_unix * 1000 : undefined
-    const screenshot = t.small_screenshot || t.large_screenshot || ''
-    const poster = screenshot ? (screenshot.startsWith('//') ? `https:${screenshot}` : screenshot) : undefined
-    const season = Number(t.season) || 0
-    const episode = Number(t.episode) || 0
-    const epTag =
-      season > 0 && episode > 0
-        ? `S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`
-        : ''
-    const summary = [epTag, formatSize(sizeBytes), seeders > 0 ? `${seeders} seeds` : '']
-      .filter(Boolean)
-      .join(' · ')
-
-    results.push({ title, uri: t.magnet_url, kind: 'magnet', sizeBytes, seeders, sourceLabel })
-    links.push({
-      title: title.slice(0, 180),
-      // Magnet doubles as a stable unique key; playback uses torrentUri
-      url: t.magnet_url,
-      summary,
-      poster,
-      category: 'series',
-      releasedAt,
-      torrentUri: t.magnet_url,
-    })
-  }
-
+  const { results, links } = mapEztvTorrents(torrents, sourceLabel)
   return {
     results,
     links,
@@ -1240,13 +1950,45 @@ async function scrapeEztvPage(
   }
 }
 
+async function scrapeEztvPage(
+  pageUrl: string,
+  sourceLabel: string,
+): Promise<TorrentScrapeOutcome> {
+  if (isEztvShowUrl(pageUrl)) return scrapeEztvShowDetail(pageUrl, sourceLabel)
+  if (isEztvShowlistUrl(pageUrl)) {
+    const showlist = await scrapeEztvShowlistPage(pageUrl, sourceLabel)
+    if (showlist.links.length > 0) return showlist
+    // Cloudflare can still block the Show List AJAX; keep Series usable via
+    // the open latest-episodes API until the browser clearance succeeds.
+    try {
+      const origin = new URL(pageUrl).origin
+      const latest = await scrapeEztvLatestPage(eztvApiUrl(origin, 1), sourceLabel)
+      if (latest.links.length > 0) {
+        return {
+          ...latest,
+          error:
+            `${sourceLabel}: Show List blocked (${showlist.error || '403'}); using latest episodes instead`,
+        }
+      }
+    } catch {
+      /* keep original showlist error */
+    }
+    return showlist
+  }
+  return scrapeEztvLatestPage(pageUrl, sourceLabel)
+}
+
 /** Fetch any source/detail page and extract playable plus ordinary links. */
 export async function scrapePage(
   pageUrl: string,
   sourceLabel: string,
 ): Promise<TorrentScrapeOutcome> {
   if (isSubsPleaseUrl(pageUrl)) return scrapeSubsPlease(pageUrl, sourceLabel)
-  if (isEztvUrl(pageUrl)) return scrapeEztvPage(pageUrl, sourceLabel)
+  // EZTV HTML (including /showlist/) is Cloudflare-blocked; use the JSON API.
+  if (isEztvSource(pageUrl, sourceLabel)) return scrapeEztvPage(pageUrl, sourceLabel)
+  // YTS HTML is Cloudflare-blocked; use the JSON API (same pattern as EZTV).
+  // Match by host, API path, or a source label that contains "yts" / "yify".
+  if (isYtsSource(pageUrl, sourceLabel)) return scrapeYtsPage(pageUrl, sourceLabel)
   const { ok, content, error: fetchError } = await fetchText(pageUrl)
   if (!ok) {
     return {
@@ -1265,7 +2007,7 @@ export async function scrapePage(
   const results = scrapeTorrentLinks(content, sourceLabel, pageUrl)
   const links = scrapePageLinks(content, pageUrl)
   const { nextPage, prevPage } = findPagination(doc, pageUrl)
-  const searchTemplate = findSearchTemplate(doc, pageUrl)
+  const searchTemplate = findSearchTemplate(doc, pageUrl, sourceLabel)
   const scrapeError =
     results.length === 0 && links.length === 0
       ? `${sourceLabel}: no readable links found (the page may require JavaScript or block automated loading)`
@@ -1285,14 +2027,16 @@ export function scrapeWebsite(source: TorrentSource): Promise<TorrentScrapeOutco
     sourceUrl.hash = ''
     return scrapePage(sourceUrl.toString(), source.label)
   }
-  if (isYtsUrl(source.url)) {
-    const sourceUrl = new URL(source.url)
-    // Plain /browse-movies defaults to latest-first on yts.mx and its
-    // mirrors; query params differ between mirrors so don't rely on them.
-    sourceUrl.pathname = '/browse-movies'
-    sourceUrl.search = ''
-    sourceUrl.hash = ''
-    return scrapePage(sourceUrl.toString(), source.label)
+  if (isYtsSource(source.url, source.label)) {
+    const origin = new URL(source.url).origin
+    // /browse-movies is Cloudflare-guarded on yts.gg and mirrors; the JSON
+    // list API returns the same catalog with magnets included.
+    return scrapePage(ytsListApiUrl(origin, 1), source.label)
+  }
+  if (isEztvSource(source.url, source.label)) {
+    const origin = new URL(source.url).origin
+    // Show List ALL catalogue (not Trending / Airing). Magnets resolve per show.
+    return scrapePage(eztvShowlistAjaxUrl(origin, 1), source.label)
   }
   return scrapePage(source.url, source.label)
 }
@@ -1330,24 +2074,24 @@ export function catalogFeedsForSource(source: TorrentSource): CatalogFeed[] {
         },
       ]
     }
-    if (isYtsUrl(source.url)) {
+    if (isYtsSource(source.url, source.label)) {
       return [
         {
-          url: `${origin}/browse-movies`,
+          url: ytsListApiUrl(origin, 1),
           category: 'movies',
           // YIFY/YTS is movies-only — expand deeply across listing pages
           maxPages: 50,
         },
       ]
     }
-    if (isEztvUrl(source.url)) {
+    if (isEztvSource(source.url, source.label)) {
       return [
         {
-          // EZTV's HTML is Cloudflare-guarded; its open JSON API lists the
-          // latest episode torrents (100 per page), magnets included.
-          url: `${origin}/api/get-torrents?limit=100&page=1`,
+          // Show List ALL tab via /showlist/ajax/ (~100 shows/page, ~20k total).
+          // Always map into TV Series — never Movies / Anime.
+          url: eztvShowlistAjaxUrl(origin, 1),
           category: 'series',
-          maxPages: 20,
+          maxPages: EZTV_SHOWLIST_MAX_PAGES,
         },
       ]
     }
@@ -1374,13 +2118,16 @@ export function linkToCatalogItem(
 ): StreamItem {
   // EZTV is exclusively episodic television. Force its entries into TV
   // Series even if generic URL/title inference would choose another shelf.
-  const category = isEztvUrl(source.url)
+  // YTS / YIFY is movies-only — every title belongs on the Movies shelf.
+  const category = isEztvSource(source.url, source.label)
     ? 'series'
     : isSubsPleaseUrl(source.url)
       ? 'anime'
-      : link.category ??
-      fallbackCategory ??
-      inferTorrentCategory(link.url, link.title, link.summary)
+      : isYtsSource(source.url, source.label)
+        ? 'movies'
+        : link.category ??
+          fallbackCategory ??
+          inferTorrentCategory(link.url, link.title, link.summary)
   return {
     id: stableTorrentItemId(link.url),
     title: link.title,

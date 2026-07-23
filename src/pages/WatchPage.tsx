@@ -155,6 +155,7 @@ export function WatchPage() {
                     ...entry,
                     url: result.url!,
                     subtitleUrl: result.subtitleUrl ?? result.playlist?.[0]?.subtitleUrl,
+                    subtitleKind: result.subtitleKind ?? result.playlist?.[0]?.subtitleKind,
                     fileName: result.fileName,
                   }
                 : entry,
@@ -169,6 +170,7 @@ export function WatchPage() {
             description: result.fileName ?? item!.description,
             url: result.url,
             subtitleUrl: result.subtitleUrl ?? result.playlist?.[0]?.subtitleUrl,
+            subtitleKind: result.subtitleKind ?? result.playlist?.[0]?.subtitleKind,
             playlist,
             torrentUri: uri,
             transport: 'direct',

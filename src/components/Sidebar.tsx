@@ -110,7 +110,7 @@ export function Sidebar() {
           className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
           onClick={onNavClick}
         >
-          Torrents
+          Websites
         </NavLink>
         <NavLink
           to="/multiview"

@@ -11,7 +11,7 @@ import {
   vodCategoryLabel,
   type ContinueWatchingEntry,
 } from '../lib/continueWatching'
-import { resolveCatalogPoster } from '../lib/posterFallback'
+import { isWeakPosterUrl, resolveCatalogPoster } from '../lib/posterFallback'
 
 function ContinueCard({
   entry,
@@ -27,8 +27,9 @@ function ContinueCard({
   const { getById } = useCatalog()
   const item = getById(entry.id)
   const [fallbackPoster, setFallbackPoster] = useState('')
-  const catalogPoster = item?.poster || entry.poster || ''
-  const poster = catalogPoster || fallbackPoster
+  const rawPoster = item?.poster || entry.poster || ''
+  const catalogPoster = isWeakPosterUrl(rawPoster) ? '' : rawPoster
+  const poster = catalogPoster || fallbackPoster || rawPoster
   const title = item?.title || entry.title
   const percent = progressPercent(entry)
   const posterCategory = item?.category || entry.category
@@ -82,9 +83,12 @@ function ContinueCard({
 
 export function ContinueWatching({
   category,
+  /** Section shelves use a short gold title; Home labels the shelf name. */
+  variant = 'home',
 }: {
   /** When set, only show titles from this shelf. */
   category?: ContinueWatchingEntry['category']
+  variant?: 'home' | 'section'
 }) {
   const location = useLocation()
   const [entries, setEntries] = useState(() => listContinueWatching())
@@ -114,23 +118,29 @@ export function ContinueWatching({
   }
 
   const heading =
-    category === 'movies'
-      ? 'Continue watching · Movies'
-      : category === 'series'
-        ? 'Continue watching · Series'
-        : category === 'anime'
-          ? 'Continue watching · Anime'
-          : 'Continue watching'
+    variant === 'section'
+      ? 'Continue watching ·'
+      : category === 'movies'
+        ? 'Continue watching · Movies'
+        : category === 'series'
+          ? 'Continue watching · Series'
+          : category === 'anime'
+            ? 'Continue watching · Anime'
+            : 'Continue watching'
 
   return (
     <section className="section-block continue-watching">
       <div className="section-head">
         <h2 className="continue-watching-title">{heading}</h2>
-        <p>
-          {category
-            ? `Pick up where you left off in ${category === 'movies' ? 'movies' : category}.`
-            : 'Pick up where you left off.'}
-        </p>
+        {variant === 'home' && (
+          <p>
+            {category
+              ? `Pick up where you left off in ${
+                  category === 'movies' ? 'movies' : category === 'series' ? 'TV series' : category
+                }.`
+              : 'Pick up where you left off.'}
+          </p>
+        )}
       </div>
       <div className="continue-row">
         {shown.map((entry) => (

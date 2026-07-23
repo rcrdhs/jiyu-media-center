@@ -5,7 +5,9 @@ import { useCatalog } from '../context/CatalogContext'
 import { CatalogGrid } from '../components/CatalogGrid'
 import { ContinueWatching } from '../components/ContinueWatching'
 import { useMainScrollRestore } from '../hooks/useMainScrollRestore'
+import { isVodCategory } from '../lib/continueWatching'
 import { getSectionSourcePrefs, setSectionSourcePrefs } from '../lib/sectionPrefs'
+import { collapseEpisodeRowsToShows, isYtsLabel } from '../lib/torrents'
 import { getMainStage, getSectionView, setSectionView } from '../lib/viewState'
 import type { CategoryId, StreamItem } from '../types'
 
@@ -26,7 +28,25 @@ function sourceRank(item: StreamItem, torrentFirst: boolean): number {
 
 function isYtsItem(item: StreamItem): boolean {
   const source = `${item.source ?? ''} ${(item.tags ?? []).join(' ')}`
-  return /\b(?:yts|yify)(?:[-.]|$)/i.test(source)
+  return isYtsLabel(source)
+}
+
+/**
+ * Sort key for newest → earliest. Prefer a year in the title (theatrical
+ * release) over torrent upload timestamps that may be stored in releasedAt.
+ */
+function releaseSortKey(item: StreamItem): number {
+  const yearMatch = /\b((?:19|20)\d{2})\b/.exec(item.title)
+  if (yearMatch) {
+    const year = Number(yearMatch[1])
+    if (item.releasedAt && item.releasedAt > 0) {
+      const releasedYear = new Date(item.releasedAt).getUTCFullYear()
+      if (releasedYear === year) return item.releasedAt
+    }
+    return Date.UTC(year, 0, 1)
+  }
+  if (item.releasedAt && item.releasedAt > 0) return item.releasedAt
+  return 0
 }
 
 function sortSectionItems(
@@ -36,16 +56,21 @@ function sortSectionItems(
   category: CategoryId,
 ) {
   return [...items].sort((a, b) => {
-    // YTS/YIFY provides consistently named movie entries with real posters,
-    // so keep those ahead of other movie sources.
+    // Movies: always newest release → earliest (theatrical year / added date).
     if (category === 'movies') {
+      const date = releaseSortKey(b) - releaseSortKey(a)
+      if (date !== 0) return date
       const ytsRank = Number(isYtsItem(b)) - Number(isYtsItem(a))
       if (ytsRank !== 0) return ytsRank
+      const rank = sourceRank(a, torrentFirst) - sourceRank(b, torrentFirst)
+      if (rank !== 0) return rank
+      return a.title.localeCompare(b.title, undefined, { sensitivity: 'base' })
     }
+
     const rank = sourceRank(a, torrentFirst) - sourceRank(b, torrentFirst)
     if (rank !== 0) return rank
     if (newestFirst) {
-      const date = (b.releasedAt ?? 0) - (a.releasedAt ?? 0)
+      const date = releaseSortKey(b) - releaseSortKey(a)
       if (date !== 0) return date
     }
     return a.title.localeCompare(b.title, undefined, { sensitivity: 'base' })
@@ -66,7 +91,8 @@ export function SectionPage() {
   const [listReady, setListReady] = useState(false)
   const [sourcePrefs, setSourcePrefsState] = useState(getSectionSourcePrefs)
 
-  const items = byCategory((meta?.id ?? 'series') as CategoryId)
+  const categoryId = (meta?.id ?? 'series') as CategoryId
+  const items = byCategory(categoryId)
 
   const filtered = useMemo(() => {
     let list = items
@@ -77,6 +103,10 @@ export function SectionPage() {
           item.transport === 'torrent' ||
           item.sourceKind === 'builtin',
       )
+    }
+    // TV Series / Anime: one shelf card per show (not every SxxExx release).
+    if (categoryId === 'series' || categoryId === 'anime') {
+      list = collapseEpisodeRowsToShows(list)
     }
     const q = query.trim().toLowerCase()
     if (q) {
@@ -93,11 +123,11 @@ export function SectionPage() {
         list,
         sourcePrefs.torrentFirst,
         sourcePrefs.newestFirst,
-        (meta?.id ?? 'series') as CategoryId,
+        categoryId,
       )
     }
     return list
-  }, [items, query, showSourceTools, sourcePrefs, meta?.id])
+  }, [items, query, showSourceTools, sourcePrefs, categoryId])
 
   const effectiveVisible = Math.min(
     Math.max(visible, PAGE),
@@ -177,7 +207,7 @@ export function SectionPage() {
           {torrentCount > 0 && showSourceTools && (
             <span className="lede-note">
               {' '}
-              · {torrentCount.toLocaleString()} torrent titles in catalog
+              · {torrentCount.toLocaleString()} titles from websites
             </span>
           )}
           {meta.id !== 'anime' && englishOnly && (
@@ -190,43 +220,50 @@ export function SectionPage() {
         {torrentSyncMessage && showSourceTools && (
           <p className="fine-print">{torrentSyncMessage}</p>
         )}
-        <div className="section-tools">
+      </header>
+
+      {isVodCategory(meta.id) && (
+        <ContinueWatching category={meta.id} variant="section" />
+      )}
+
+      <div className="section-tools">
+        <input
+          className="search-input"
+          type="search"
+          placeholder={`Search ${meta.label.toLowerCase()}…`}
+          value={query}
+          onChange={(e) => {
+            setQuery(e.target.value)
+            setVisible(PAGE)
+          }}
+        />
+        <label className="check-toggle tool-toggle">
           <input
-            className="search-input"
-            type="search"
-            placeholder={`Search ${meta.label.toLowerCase()}…`}
-            value={query}
-            onChange={(e) => {
-              setQuery(e.target.value)
-              setVisible(PAGE)
-            }}
+            type="checkbox"
+            checked={autoCheck}
+            onChange={(e) => setAutoCheck(e.target.checked)}
           />
-          <label className="check-toggle tool-toggle">
-            <input
-              type="checkbox"
-              checked={autoCheck}
-              onChange={(e) => setAutoCheck(e.target.checked)}
-            />
-            Auto-check visible streams
-          </label>
-          {showSourceTools && (
-            <>
-              <label className="check-toggle tool-toggle">
-                <input
-                  type="checkbox"
-                  checked={sourcePrefs.hideIptv}
-                  onChange={(e) => updateSourcePrefs({ hideIptv: e.target.checked })}
-                />
-                Hide IPTV / M3U
-              </label>
-              <label className="check-toggle tool-toggle">
-                <input
-                  type="checkbox"
-                  checked={sourcePrefs.torrentFirst}
-                  onChange={(e) => updateSourcePrefs({ torrentFirst: e.target.checked })}
-                />
-                Torrents first
-              </label>
+          Auto-check visible streams
+        </label>
+        {showSourceTools && (
+          <>
+            <label className="check-toggle tool-toggle">
+              <input
+                type="checkbox"
+                checked={sourcePrefs.hideIptv}
+                onChange={(e) => updateSourcePrefs({ hideIptv: e.target.checked })}
+              />
+              Playlists last
+            </label>
+            <label className="check-toggle tool-toggle">
+              <input
+                type="checkbox"
+                checked={sourcePrefs.torrentFirst}
+                onChange={(e) => updateSourcePrefs({ torrentFirst: e.target.checked })}
+              />
+              Websites first
+            </label>
+            {meta.id !== 'movies' && (
               <label className="check-toggle tool-toggle">
                 <input
                   type="checkbox"
@@ -235,16 +272,15 @@ export function SectionPage() {
                 />
                 Newest first
               </label>
-            </>
-          )}
-        </div>
-      </header>
+            )}
+          </>
+        )}
+      </div>
 
-      <ContinueWatching category={meta.id} />
       <CatalogGrid
         items={shown}
         autoCheck={autoCheck}
-        emptyHint={`No ${meta.label.toLowerCase()} streams yet. Import an M3U in Library, or add a torrent website under Torrents to fill this shelf.`}
+        emptyHint={`No ${meta.label.toLowerCase()} titles yet. Import a playlist in Library, or add a website under Websites to fill this shelf.`}
       />
       {remaining > 0 && (
         <div ref={sentinelRef} className="infinite-scroll-sentinel" aria-hidden>

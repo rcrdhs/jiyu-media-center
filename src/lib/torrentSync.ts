@@ -16,7 +16,7 @@ import type { StreamItem } from '../types'
  * Bump whenever a site adapter changes how titles/posters are extracted, so
  * already-synced shelves are rebuilt automatically on the next launch.
  */
-export const TORRENT_SCRAPER_VERSION = 5
+export const TORRENT_SCRAPER_VERSION = 11
 
 export interface TorrentSyncProgress {
   sourceId: string
@@ -77,8 +77,9 @@ export async function syncTorrentSource(
         }
       }
       url = outcome.nextPage
-      // Soft pause so sites aren't hammered
-      await new Promise((r) => setTimeout(r, 120))
+      // Soft pause so sites aren't hammered (EZTV showlist AJAX can be snappier)
+      const pauseMs = /\/showlist\/ajax\//i.test(feed.url) ? 60 : 120
+      await new Promise((r) => setTimeout(r, pauseMs))
     }
   }
 

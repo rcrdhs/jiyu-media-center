@@ -22,6 +22,216 @@ let webBrowserView = null
 let webBrowserAttached = false
 let webBrowserVisible = false
 
+/**
+ * Hidden BrowserWindow used to clear Cloudflare challenges for scrape fetches.
+ * Shares the in-app browser session so a manual visit can unlock the same cookies.
+ */
+/** @type {BrowserWindow | null} */
+let scrapeWindow = null
+/** @type {Set<string>} */
+const scrapeWarmedOrigins = new Set()
+
+function looksLikeCloudflareChallenge(content, title = '') {
+  const sample = `${title}\n${String(content || '').slice(0, 2500)}`
+  return (
+    /just a moment|cf-browser-verification|attention required|checking your browser|enable javascript and cookies to continue|cdn-cgi\/challenge/i.test(
+      sample,
+    ) ||
+    (/cloudflare/i.test(sample) && /performing security verification|challenge-platform/i.test(sample))
+  )
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function destroyScrapeWindow() {
+  if (!scrapeWindow || scrapeWindow.isDestroyed()) {
+    scrapeWindow = null
+    return
+  }
+  try {
+    scrapeWindow.destroy()
+  } catch {
+    /* ignore */
+  }
+  scrapeWindow = null
+}
+
+function ensureScrapeWindow() {
+  if (scrapeWindow && !scrapeWindow.isDestroyed()) return scrapeWindow
+
+  // Reuse the same partition as the in-app web browser so Cloudflare clearance
+  // from a normal visit also unlocks background scrapes.
+  const scrapeSession = session.fromPartition('persist:jiyu-web')
+  scrapeWindow = new BrowserWindow({
+    show: false,
+    width: 1100,
+    height: 800,
+    title: 'Jiyu — website check',
+    autoHideMenuBar: true,
+    paintWhenInitiallyHidden: true,
+    webPreferences: {
+      session: scrapeSession,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+      backgroundThrottling: false,
+    },
+  })
+  scrapeWindow.webContents.setUserAgent(BROWSER_UA)
+  scrapeWindow.webContents.setBackgroundThrottling(false)
+  scrapeWindow.on('closed', () => {
+    scrapeWindow = null
+  })
+  return scrapeWindow
+}
+
+async function originAjaxUnlocked(origin) {
+  const win = ensureScrapeWindow()
+  if (/eztv/i.test(origin)) {
+    return Boolean(
+      await win.webContents.executeJavaScript(
+        `fetch(${JSON.stringify(`${origin}/showlist/ajax/?page=1&letter=all&status=all`)}, {
+          credentials: 'include',
+          headers: { Accept: 'application/json' },
+        }).then(async (r) => {
+          if (!r.ok) return false
+          const text = await r.text()
+          try {
+            const json = JSON.parse(text)
+            return Array.isArray(json.shows) && json.shows.length > 0
+          } catch {
+            return false
+          }
+        }).catch(() => false)`,
+        true,
+      ),
+    )
+  }
+  const title = win.webContents.getTitle()
+  return !looksLikeCloudflareChallenge('', title) && !/just a moment/i.test(title)
+}
+
+async function warmScrapeOrigin(origin, { allowVisible = true } = {}) {
+  if (scrapeWarmedOrigins.has(origin)) return true
+  const win = ensureScrapeWindow()
+  const warmUrl = /eztv/i.test(origin) ? `${origin}/showlist/` : `${origin}/`
+
+  const waitForClearance = async (attempts) => {
+    for (let i = 0; i < attempts; i++) {
+      if (await originAjaxUnlocked(origin)) return true
+      const title = win.webContents.getTitle()
+      const hasUi = await win.webContents.executeJavaScript(
+        `Boolean(document.querySelector('#showlist-table, .letter-filter, a.thread_link, body')) && !/just a moment/i.test(document.title || '')`,
+        true,
+      ).catch(() => false)
+      if (hasUi && !looksLikeCloudflareChallenge('', title) && (await originAjaxUnlocked(origin))) {
+        return true
+      }
+      await sleep(500)
+    }
+    return false
+  }
+
+  try {
+    await win.loadURL(warmUrl, { userAgent: BROWSER_UA })
+  } catch {
+    /* load errors are handled by the wait loop */
+  }
+
+  if (await waitForClearance(40)) {
+    scrapeWarmedOrigins.add(origin)
+    if (win.isVisible()) win.hide()
+    return true
+  }
+
+  // Interactive Cloudflare checks need a visible window once.
+  if (allowVisible) {
+    win.setTitle('Jiyu — complete the security check, then this window will close')
+    win.show()
+    win.focus()
+    if (await waitForClearance(120)) {
+      scrapeWarmedOrigins.add(origin)
+      win.hide()
+      return true
+    }
+    win.hide()
+  }
+  return false
+}
+
+/**
+ * Fetch URL text through a real Chromium session (needed for Cloudflare-guarded
+ * EZTV HTML / showlist AJAX). Callers should try plain fetch first.
+ */
+async function fetchViaScrapeBrowser(targetUrl) {
+  let origin
+  try {
+    origin = new URL(targetUrl).origin
+  } catch {
+    return { ok: false, status: 0, content: '', error: 'Invalid page URL' }
+  }
+
+  const win = ensureScrapeWindow()
+  const warmed = await warmScrapeOrigin(origin, { allowVisible: true })
+  if (!warmed) {
+    return {
+      ok: false,
+      status: 403,
+      content: '',
+      error:
+        'Cloudflare blocked this site. Open it once in Jiyu’s Web Browser tab, finish the check, then sync again.',
+    }
+  }
+
+  const script = `fetch(${JSON.stringify(targetUrl)}, {
+    credentials: 'include',
+    headers: { Accept: 'application/json,text/html,*/*;q=0.8' },
+  }).then(async (r) => ({
+    ok: r.ok,
+    status: r.status,
+    content: await r.text(),
+  })).catch((err) => ({
+    ok: false,
+    status: 0,
+    content: '',
+    error: err instanceof Error ? err.message : String(err),
+  }))`
+
+  let result = await win.webContents.executeJavaScript(script, true)
+  if (
+    result &&
+    typeof result === 'object' &&
+    (!result.ok || looksLikeCloudflareChallenge(result.content))
+  ) {
+    scrapeWarmedOrigins.delete(origin)
+    const rewarmed = await warmScrapeOrigin(origin, { allowVisible: true })
+    if (rewarmed) {
+      result = await win.webContents.executeJavaScript(script, true)
+    }
+  }
+
+  if (!result || typeof result !== 'object') {
+    return { ok: false, status: 0, content: '', error: 'Browser fetch returned nothing' }
+  }
+  if (looksLikeCloudflareChallenge(result.content)) {
+    return {
+      ok: false,
+      status: result.status || 403,
+      content: result.content || '',
+      error:
+        'Cloudflare blocked this site. Open it once in Jiyu’s Web Browser tab, finish the check, then sync again.',
+    }
+  }
+  return {
+    ok: Boolean(result.ok),
+    status: result.status || 0,
+    content: result.content || '',
+    error: result.ok ? '' : result.error || `Server returned ${result.status}`,
+  }
+}
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1440,
@@ -50,6 +260,7 @@ function createWindow() {
 
   win.on('closed', () => {
     destroyWebBrowser()
+    destroyScrapeWindow()
     if (mainWindow === win) mainWindow = null
   })
 
@@ -511,13 +722,21 @@ ipcMain.handle('app:quit', () => {
   app.quit()
 })
 
-// Fetch an HTML page as if from a real browser (for torrent-site scraping)
+// Fetch an HTML/JSON page as if from a real browser (for torrent-site scraping).
+// Plain fetch first; Cloudflare-guarded hosts fall back to an offscreen Chromium session.
 ipcMain.handle('page:fetchHtml', async (_event, url) => {
   try {
     if (typeof url !== 'string' || !/^https?:\/\//i.test(url.trim())) {
       return { ok: false, status: 0, content: '', error: 'Invalid page URL' }
     }
     const target = url.trim()
+    let host = ''
+    try {
+      host = new URL(target).hostname
+    } catch {
+      return { ok: false, status: 0, content: '', error: 'Invalid page URL' }
+    }
+
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 30_000)
     let response
@@ -527,7 +746,7 @@ ipcMain.handle('page:fetchHtml', async (_event, url) => {
         signal: controller.signal,
         headers: {
           'User-Agent': BROWSER_UA,
-          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          Accept: 'text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8',
           'Accept-Language': 'en-US,en;q=0.9',
           'Upgrade-Insecure-Requests': '1',
         },
@@ -537,21 +756,33 @@ ipcMain.handle('page:fetchHtml', async (_event, url) => {
     }
 
     const content = await response.text()
-    if (!response.ok) {
-      return {
-        ok: false,
-        status: response.status,
-        content,
-        error: `Server returned ${response.status}`,
-      }
+    const challenged = looksLikeCloudflareChallenge(content)
+    if (response.ok && !challenged) {
+      return { ok: true, status: response.status, content, error: '' }
     }
-    return { ok: true, status: response.status, content, error: '' }
-  } catch (err) {
+
+    // Cloudflare often answers 403/503 with a challenge page for EZTV HTML/AJAX.
+    const hostIsEztv = /(^|\.)eztv[a-z0-9]*\.[a-z.]+$/i.test(host.replace(/^www\./i, ''))
+    if (challenged || (hostIsEztv && !response.ok)) {
+      return await fetchViaScrapeBrowser(target)
+    }
+
     return {
       ok: false,
-      status: 0,
-      content: '',
-      error: err instanceof Error ? err.message : String(err),
+      status: response.status,
+      content,
+      error: `Server returned ${response.status}`,
+    }
+  } catch (err) {
+    try {
+      return await fetchViaScrapeBrowser(String(url || '').trim())
+    } catch {
+      return {
+        ok: false,
+        status: 0,
+        content: '',
+        error: err instanceof Error ? err.message : String(err),
+      }
     }
   }
 })
@@ -930,6 +1161,8 @@ const subtitleJobs = new Map()
 const subtitleSources = new Map()
 /** @type {Map<string, { kill: () => void }>} */
 const subtitleExtractors = new Map()
+/** @type {Map<string, 'file' | 'embedded'>} */
+const subtitleKinds = new Map()
 
 function localTorrentSourceOk(source) {
   return /^http:\/\/127\.0\.0\.1:\d+\//.test(source)
@@ -1374,11 +1607,19 @@ async function materializeSubtitleUrl(torrent, videoFile, options = {}) {
   const start = options.start !== false
   await getTranscodeServer()
   const cacheKey = `${torrent.infoHash}:${videoFile.path || videoFile.name}`
-  if (subtitleCache.has(cacheKey)) return cachedSubtitleUrl(cacheKey)
+  if (subtitleCache.has(cacheKey)) {
+    return {
+      subtitleUrl: cachedSubtitleUrl(cacheKey),
+      subtitleKind: subtitleKinds.get(cacheKey) || 'file',
+    }
+  }
 
   const companion = findCompanionSubtitle(torrent, videoFile)
   const sourceFile = companion || (EMBEDDED_SUBS_RE.test(videoFile.name) ? videoFile : null)
-  if (!sourceFile) return undefined
+  if (!sourceFile) return { subtitleUrl: undefined, subtitleKind: undefined }
+
+  const subtitleKind = companion ? 'file' : 'embedded'
+  subtitleKinds.set(cacheKey, subtitleKind)
 
   if (companion) {
     try {
@@ -1390,7 +1631,7 @@ async function materializeSubtitleUrl(torrent, videoFile, options = {}) {
 
   subtitleSources.set(cacheKey, sourceFile)
   if (start) startProgressiveSubtitleExtract(sourceFile, cacheKey)
-  return cachedSubtitleUrl(cacheKey)
+  return { subtitleUrl: cachedSubtitleUrl(cacheKey), subtitleKind }
 }
 
 function handleAudioTranscode(req, res, source) {
@@ -1885,17 +2126,23 @@ ipcMain.handle('torrent:stream', async (_event, input) => {
     abortSubtitleExtractors(null)
 
     const playlist = await Promise.all(
-      playlistFiles.map(async (entry) => ({
-        title: entry.name.replace(/\.[^.]+$/, ''),
-        fileName: entry.name,
-        url: await torrentFilePlaybackUrl(torrent, entry),
+      playlistFiles.map(async (entry) => {
         // Register the sub URL but do NOT start extraction yet — remux needs
         // the opening pieces first or episode switches hang on Buffering.
-        subtitleUrl: await torrentSubtitleUrl(torrent, entry, { start: false }),
-      })),
+        const subs = await torrentSubtitleUrl(torrent, entry, { start: false })
+        return {
+          title: entry.name.replace(/\.[^.]+$/, ''),
+          fileName: entry.name,
+          url: await torrentFilePlaybackUrl(torrent, entry),
+          subtitleUrl: subs.subtitleUrl,
+          // 'file' = companion .srt/.ass/.vtt; 'embedded' = softsub probe inside mkv/mp4
+          subtitleKind: subs.subtitleKind,
+        }
+      }),
     )
     const playbackUrl = playlist[0].url
     const subtitleUrl = playlist[0].subtitleUrl
+    const subtitleKind = playlist[0].subtitleKind
     const audioTranscoded = AUDIO_TRANSCODE_RE.test(file.name)
 
     // Drop other torrents in the background so the next play stays lean.
@@ -1915,6 +2162,7 @@ ipcMain.handle('torrent:stream', async (_event, input) => {
       ok: true,
       url: playbackUrl,
       subtitleUrl,
+      subtitleKind,
       fileName: file.name,
       audioTranscoded,
       playlist,

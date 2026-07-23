@@ -3,7 +3,8 @@ import { Link, useLocation } from 'react-router-dom'
 import { useStreamHealth } from '../context/StreamHealthContext'
 import { getMainStage, setMainScroll } from '../lib/viewState'
 import { isYouTubeUrl } from '../lib/webBrowser'
-import { resolveCatalogPoster } from '../lib/posterFallback'
+import { isWeakPosterUrl, resolveCatalogPoster } from '../lib/posterFallback'
+import { isShowBrowseItem } from '../lib/torrents'
 import { CardPreview } from './CardPreview'
 import type { StreamHealthState, StreamItem } from '../types'
 
@@ -32,12 +33,13 @@ export function MediaCard({ item }: MediaCardProps) {
   const [previewDone, setPreviewDone] = useState(false)
   const [fallbackPoster, setFallbackPoster] = useState('')
   const hoverTimer = useRef<number | null>(null)
-  const poster = item.poster || fallbackPoster
+  const catalogPoster = isWeakPosterUrl(item.poster) ? '' : item.poster || ''
+  const poster = catalogPoster || fallbackPoster || item.poster || ''
 
   useEffect(() => {
     let cancelled = false
     setFallbackPoster('')
-    if (item.poster) return
+    if (catalogPoster) return
     if (item.category !== 'anime' && item.category !== 'movies' && item.category !== 'series') {
       return
     }
@@ -47,7 +49,7 @@ export function MediaCard({ item }: MediaCardProps) {
     return () => {
       cancelled = true
     }
-  }, [item.id, item.title, item.poster, item.category])
+  }, [item.id, item.title, item.poster, item.category, catalogPoster])
 
   const canPreview =
     !isTorrent &&
@@ -88,7 +90,7 @@ export function MediaCard({ item }: MediaCardProps) {
       onMouseLeave={onLeave}
     >
       <Link
-        to={`/watch/${item.id}`}
+        to={isShowBrowseItem(item) ? `/show/${item.id}` : `/watch/${item.id}`}
         className="media-card"
         state={{ from: `${location.pathname}${location.search}` }}
         title={
