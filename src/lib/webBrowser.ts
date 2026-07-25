@@ -97,6 +97,33 @@ export function toAutoplayUrl(raw: string): string {
   return target
 }
 
+/**
+ * Stop sites (YouTube) from calling the Fullscreen API inside the in-app browser.
+ * Jiyu’s own Full button fullscreens the outer tile, not the guest page.
+ */
+export const BLOCK_GUEST_FULLSCREEN_SCRIPT = `(() => {
+  try {
+    const reject = () => Promise.reject(new DOMException('Fullscreen blocked in Jiyu', 'NotAllowedError'));
+    const patch = (proto, key) => {
+      try {
+        if (proto && typeof proto[key] === 'function') proto[key] = reject;
+      } catch (_) {}
+    };
+    patch(Element.prototype, 'requestFullscreen');
+    patch(Element.prototype, 'webkitRequestFullscreen');
+    patch(Element.prototype, 'webkitRequestFullScreen');
+    patch(HTMLElement.prototype, 'webkitRequestFullScreen');
+    // Exit if something already went fullscreen before the patch.
+    try {
+      if (document.fullscreenElement) document.exitFullscreen();
+      if (document.webkitFullscreenElement) document.webkitExitFullscreen();
+    } catch (_) {}
+    return 'blocked';
+  } catch (_) {
+    return 'error';
+  }
+})();`
+
 /** Only start playback if paused — never click controls that toggle pause */
 export const AUTOPLAY_SCRIPT = `(() => {
   try {
@@ -125,10 +152,64 @@ export const AUTOPLAY_SCRIPT = `(() => {
   }
 })();`
 
+/**
+ * PiP is opened from an explicit user click — play with sound when possible.
+ * Falls back to muted play, then unmutes after playback starts.
+ */
+export const AUTOPLAY_WITH_SOUND_SCRIPT = `(() => {
+  try {
+    const video = document.querySelector('video');
+    if (!video) {
+      const large = document.querySelector('button.ytp-large-play-button');
+      if (large && large.getAttribute('aria-hidden') !== 'true') {
+        large.click();
+        return 'large-play-click';
+      }
+      return 'no-video';
+    }
+    const unmute = () => {
+      try {
+        video.muted = false;
+        video.volume = 1;
+        const muteBtn = document.querySelector('.ytp-mute-button[aria-pressed="true"], .ytp-mute-button[title*="Unmute"]');
+        if (muteBtn) muteBtn.click();
+      } catch (_) {}
+    };
+    if (!video.paused && !video.ended && video.readyState > 1) {
+      unmute();
+      return 'already-playing';
+    }
+    video.muted = true;
+    const p = video.play();
+    if (p && typeof p.then === 'function') {
+      p.then(() => unmute()).catch(() => {});
+    } else {
+      unmute();
+    }
+    return 'play-with-sound';
+  } catch (_) {
+    return 'error';
+  }
+})();`
+
 /** True inside the Electron shell (preload bridge or Electron UA). */
 export function isDesktopApp() {
   if (window.signalDesktop?.isDesktop || window.signalDesktop?.browserNavigate) return true
   return /Electron/i.test(navigator.userAgent)
+}
+
+export type WebSearchKind = 'youtube' | 'web'
+
+/** Build a YouTube results URL or a general web search URL. */
+export function buildSearchUrl(query: string, kind: WebSearchKind): string {
+  const q = query.trim()
+  if (!q) {
+    return kind === 'youtube' ? 'https://www.youtube.com/' : 'https://duckduckgo.com/'
+  }
+  if (kind === 'youtube') {
+    return `https://www.youtube.com/results?search_query=${encodeURIComponent(q)}`
+  }
+  return `https://duckduckgo.com/?q=${encodeURIComponent(q)}`
 }
 
 export function normalizeWebUrl(raw: string): string {
@@ -138,7 +219,7 @@ export function normalizeWebUrl(raw: string): string {
     if (/^[\w.-]+\.[a-z]{2,}([/:?]|$)/i.test(target)) {
       target = `https://${target}`
     } else {
-      target = `https://www.youtube.com/results?search_query=${encodeURIComponent(target)}`
+      target = buildSearchUrl(target, 'web')
     }
   }
   return target

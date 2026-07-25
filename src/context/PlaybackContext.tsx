@@ -116,11 +116,14 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
 
       if (!shouldAdd) {
         const mode: PlaybackMode = options?.forceFull ? 'full' : m === 'pip' ? 'pip' : 'full'
-        // Remember what was playing before a Guide (forceFull) takeover
-        const resumeItem =
-          options?.forceFull && prevPrimary && prevPrimary.id !== next.id
+        // Only Guide takeovers should restore the prior PiP on Back. A normal
+        // forceFull watch (Sports, Movies, …) replaces PiP — don't bounce back.
+        const fromGuide = options?.returnTo === '/guide'
+        const resumeItem = options?.forceFull
+          ? fromGuide && prevPrimary && prevPrimary.id !== next.id
             ? prevPrimary
-            : prev.resumeItem
+            : null
+          : prev.resumeItem
 
         return {
           slots: [next],

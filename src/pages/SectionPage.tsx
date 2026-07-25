@@ -280,7 +280,7 @@ export function SectionPage() {
       <CatalogGrid
         items={shown}
         autoCheck={autoCheck}
-        emptyHint={`No ${meta.label.toLowerCase()} titles yet. Import a playlist in Library, or add a website under Websites to fill this shelf.`}
+        emptyHint={`No ${meta.label.toLowerCase()} titles yet. Import a playlist or add a website in Library to fill this shelf.`}
       />
       {remaining > 0 && (
         <div ref={sentinelRef} className="infinite-scroll-sentinel" aria-hidden>

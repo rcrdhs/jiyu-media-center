@@ -135,13 +135,22 @@ declare global {
         entries: Array<{ id: string; url: string }>,
         timeoutMs?: number,
       ) => Promise<Array<{ id: string } & StreamProbeResult>>
+      resolveVimeoLiveHls?: (
+        input: string,
+      ) => Promise<{ ok: boolean; url?: string; title?: string; error?: string }>
       catalogList?: () => Promise<DesktopPlaylistSource[]>
       catalogPut?: (source: DesktopPlaylistSource) => Promise<boolean>
       catalogDelete?: (id: string) => Promise<boolean>
       catalogClear?: () => Promise<boolean>
       catalogReplaceAll?: (sources: DesktopPlaylistSource[]) => Promise<boolean>
+      torrentSourcesList?: () => Promise<
+        Array<{ id: string; label: string; url: string }>
+      >
+      torrentSourcesSave?: (
+        sources: Array<{ id: string; label: string; url: string }>,
+      ) => Promise<boolean>
       browserShow?: (bounds: BrowserBounds) => Promise<boolean>
-      browserHide?: () => Promise<boolean>
+      browserHide?: (options?: { blank?: boolean }) => Promise<boolean>
       browserSetBounds?: (bounds: BrowserBounds) => Promise<boolean>
       browserNavigate?: (url: string) => Promise<{ ok: boolean; url?: string; error?: string }>
       browserGoBack?: () => Promise<boolean>
@@ -149,8 +158,11 @@ declare global {
       browserReload?: () => Promise<boolean>
       browserOpenExternalCurrent?: () => Promise<boolean>
       browserOpenPanel?: (url: string) => Promise<{ ok: boolean; url?: string; error?: string }>
+      browserExecute?: (code: string) => Promise<{ ok: boolean; result?: unknown; error?: string }>
+      browserGetNav?: () => Promise<BrowserNavState & { visible?: boolean }>
       onBrowserNav?: (callback: (state: BrowserNavState) => void) => () => void
       quit?: () => Promise<void>
+      getVersion?: () => Promise<string>
       fetchHtml?: (url: string) => Promise<PlaylistFetchResult>
       torrentStream?: (magnet: string) => Promise<TorrentStreamResult>
       torrentStatus?: (infoHash?: string) => Promise<{ ok: boolean; torrents: TorrentInfo[]; error?: string }>

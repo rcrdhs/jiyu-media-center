@@ -14,6 +14,7 @@ import {
   isSubsPleaseUrl,
   labelQuality,
   loadTorrentSources,
+  loadTorrentSourcesAsync,
   normalizeShowKey,
   normalizeWebsiteUrl,
   parseEpisodeKey,
@@ -29,15 +30,31 @@ import { guessVodCategory } from '../lib/continueWatching'
 import { getViewingQuality } from '../lib/viewingQuality'
 import type { StreamItem, StreamPlaylistItem, TorrentInfo } from '../types'
 
-export function TorrentsPage() {
+type TorrentsPageProps = {
+  /** When true, render as a Library subsection (no page chrome). */
+  embedded?: boolean
+}
+
+export function TorrentsPage({ embedded = false }: TorrentsPageProps) {
   const { play } = usePlayback()
   const { syncTorrentWebsite, reloadTorrentCatalog, torrentSyncMessage, torrentCount } =
     useCatalog()
   const desktop = Boolean(window.signalDesktop?.torrentStream)
+  const returnTo = embedded ? '/library' : '/torrents'
 
   const [sources, setSources] = useState<TorrentSource[]>(loadTorrentSources)
   const [draftUrl, setDraftUrl] = useState('')
   const [syncingId, setSyncingId] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    void loadTorrentSourcesAsync().then((rows) => {
+      if (!cancelled) setSources(rows)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const [browsingId, setBrowsingId] = useState<string | null>(null)
   const [activeSourceId, setActiveSourceId] = useState<string | null>(null)
@@ -246,7 +263,7 @@ export function TorrentsPage() {
         detailUrl: pageUrl || undefined,
         playlist,
       }
-      play(item, { forceFull: true, returnTo: '/torrents' })
+      play(item, { forceFull: true, returnTo })
       void refreshActive()
     } finally {
       setPreparing(null)
@@ -302,24 +319,48 @@ export function TorrentsPage() {
     )
   }, [pageLinks, pageQuery])
 
+  const heading = (
+    <>
+      {embedded ? (
+        <header className="page-header library-websites-header" id="websites">
+          <h2>Websites</h2>
+          <p className="lede">
+            Add catalog sites to browse and fill Movies, TV Series, and Anime. Only use sites and
+            content you have the right to access.
+            {torrentCount > 0 && (
+              <>
+                {' '}
+                <span className="count-chip">
+                  {torrentCount.toLocaleString()} title{torrentCount === 1 ? '' : 's'} in catalog
+                </span>
+              </>
+            )}
+          </p>
+        </header>
+      ) : (
+        <header className="page-header">
+          <p className="eyebrow">Sources</p>
+          <h1>Websites</h1>
+          <p className="lede">
+            Add catalog sites to browse and fill Movies, TV Series, and Anime. Only use sites and
+            content you have the right to access.
+            {torrentCount > 0 && (
+              <>
+                {' '}
+                <span className="count-chip">
+                  {torrentCount.toLocaleString()} title{torrentCount === 1 ? '' : 's'} in catalog
+                </span>
+              </>
+            )}
+          </p>
+        </header>
+      )}
+    </>
+  )
+
   return (
-    <div className="page torrents-page">
-      <header className="page-header">
-        <p className="eyebrow">Sources</p>
-        <h1>Websites</h1>
-        <p className="lede">
-          Add catalog sites to browse and fill Movies, TV Series, and Anime. Only use sites and
-          content you have the right to access.
-          {torrentCount > 0 && (
-            <>
-              {' '}
-              <span className="count-chip">
-                {torrentCount.toLocaleString()} title{torrentCount === 1 ? '' : 's'} in catalog
-              </span>
-            </>
-          )}
-        </p>
-      </header>
+    <div className={embedded ? 'library-websites torrents-page' : 'page torrents-page'}>
+      {heading}
 
       {!desktop && (
         <p className="toast toast-error">

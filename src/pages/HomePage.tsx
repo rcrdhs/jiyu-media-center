@@ -16,8 +16,10 @@ export function HomePage() {
   const [homeQuery, setHomeQuery] = useState('')
 
   const localChannels = useMemo(() => resolveLocalChannels(items), [items])
-  const tvjChannel = localChannels[0] ?? LOCAL_CHANNELS[0]
+  const tvjChannel = localChannels.find((c) => c.id === 'local-tvj') ?? LOCAL_CHANNELS[0]
+  const cvmChannel = localChannels.find((c) => c.id === 'local-cvm') ?? LOCAL_CHANNELS[1]
   const tvjPlayingElsewhere = playingItem?.id === tvjChannel.id && mode !== 'off'
+  const cvmPlayingElsewhere = playingItem?.id === cvmChannel.id && mode !== 'off'
 
   const searchHits = useMemo(() => {
     const q = homeQuery.trim().toLowerCase()
@@ -58,14 +60,6 @@ export function HomePage() {
               value={homeQuery}
               onChange={(e) => setHomeQuery(e.target.value)}
             />
-          </div>
-          <div className="hero-actions">
-            <Link className="primary-btn" to="/browse">
-              Browse sources
-            </Link>
-            <Link className="ghost-btn" to="/library">
-              Import playlist
-            </Link>
           </div>
         </div>
         <div className="hero-panel" aria-hidden>
@@ -129,15 +123,19 @@ export function HomePage() {
 
       <section className="section-block">
         <div className="section-head">
-          <h2>Local channel</h2>
-          <p>TVJ live now — CVM and Nationwide appear here when they’re live on YouTube.</p>
+          <h2>Local channels</h2>
         </div>
-        {!tvjPlayingElsewhere ? (
-          <LocalChannelLive item={tvjChannel} />
-        ) : (
+        {(tvjPlayingElsewhere || cvmPlayingElsewhere) && (
           <p className="fine-print local-channel-note">
-            TVJ is playing in the corner — browse or search for another stream below.
+            {(tvjPlayingElsewhere ? tvjChannel.title : cvmChannel.title) +
+              ' is playing in the corner — browse or search for another stream below.'}
           </p>
+        )}
+        {(!tvjPlayingElsewhere || !cvmPlayingElsewhere) && (
+          <div className="local-channel-live-row">
+            {!tvjPlayingElsewhere && <LocalChannelLive item={tvjChannel} />}
+            {!cvmPlayingElsewhere && <LocalChannelLive item={cvmChannel} />}
+          </div>
         )}
         <LocalYoutubeLiveNow />
         <CatalogGrid items={localChannels} autoCheck showToolbar autoHideUnresponsive={false} />

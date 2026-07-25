@@ -38,10 +38,11 @@ export const LOCAL_CHANNELS: StreamItem[] = [
   {
     id: 'local-tvj',
     title: 'TVJ',
-    description: 'Television Jamaica — local live channel.',
+    description: 'Television Jamaica — local live (not always 24/7).',
     category: 'news',
-    url: 'https://59d39900b8b2b.streamlock.net/tvj/tvj/playlist.m3u8',
-    poster: 'https://images.unsplash.com/photo-1598899134739-24c46f58b8c0?w=640&q=80',
+    // Streamlock host is dead. Public HLS from iptv-org Jamaica list (univtec).
+    url: 'https://vod2live.univtec.com/manifest/a99a1804-dc83-411f-8c1c-b62f08cdfa59.m3u8',
+    poster: 'https://i.imgur.com/R4PoC3L.png',
     tags: ['local', 'jamaica', 'live', 'hls'],
     source: 'Local channel',
     language: 'en',
@@ -49,11 +50,14 @@ export const LOCAL_CHANNELS: StreamItem[] = [
   {
     id: 'local-cvm',
     title: 'CVM',
-    description: 'CVM Television — local live channel.',
+    description: 'CVM Television — local live 24×7.',
     category: 'news',
-    url: 'https://59d39900b8b2b.streamlock.net/cvm/cvm/playlist.m3u8',
-    poster: 'https://images.unsplash.com/photo-1574375927938-d5a98e8ffe85?w=640&q=80',
-    tags: ['local', 'jamaica', 'live', 'hls'],
+    // No stable public m3u8 (iptv-org empty; moveonjoy dead). Official site embeds
+    // Vimeo event 4401057 — desktop resolves a fresh tokenized HLS URL on probe/play.
+    url: 'https://vimeo.com/event/4401057',
+    poster:
+      'https://static.wikia.nocookie.net/logopedia/images/c/c5/CVM_Television_logo_2023.webp/revision/latest/scale-to-width-down/640?cb=20231225060123',
+    tags: ['local', 'jamaica', 'live', 'hls', 'vimeo'],
     source: 'Local channel',
     language: 'en',
   },
@@ -98,7 +102,11 @@ export function resolveLocalChannel(seed: StreamItem, catalog: StreamItem[]): St
     let n = 0
     if (item.id !== seed.id) n += 4
     if (item.url !== seed.url) n += 2
-    if (/streamlock\.net/i.test(item.url)) n -= 8
+    // Prefer working public HLS / YouTube over dead Streamlock mirrors.
+    if (/youtube\.com|youtu\.be/i.test(item.url)) n += 12
+    if (/vimeo\.com\/event\//i.test(item.url)) n += 18
+    if (/vod2live\.univtec\.com|immergo\.tv|akamaized\.net/i.test(item.url)) n += 18
+    if (/streamlock\.net|moveonjoy\.com|vimeocdn\.com\/exp=/i.test(item.url)) n -= 20
     if (item.tags?.some((t) => /imported|iptv/i.test(t))) n += 3
     if (/imported|iptv/i.test(item.source ?? '')) n += 2
     if (/720|1080|hd/i.test(item.title)) n += 1
@@ -107,6 +115,18 @@ export function resolveLocalChannel(seed: StreamItem, catalog: StreamItem[]): St
   }
 
   const best = [...matches].sort((a, b) => score(b) - score(a))[0] ?? seed
+  // Built-in YouTube / Vimeo seeds win over dead Streamlock / expired CDN mirrors.
+  if (
+    (/youtube\.com|youtu\.be|vimeo\.com\/event\//i.test(seed.url) &&
+      /streamlock\.net|moveonjoy\.com|vimeocdn\.com\/exp=/i.test(best.url)) ||
+    (/vimeo\.com\/event\//i.test(seed.url) && /youtube\.com|youtu\.be/i.test(best.url))
+  ) {
+    return {
+      ...seed,
+      poster: best.poster || seed.poster,
+      tags: [...new Set([...(seed.tags ?? []), 'local'])],
+    }
+  }
   // Keep stream URL/title from the best catalog match, but hide playlist source chrome
   return {
     ...best,
@@ -180,35 +200,5 @@ export const BUILTIN_CATALOG: StreamItem[] = [
     poster: 'https://upload.wikimedia.org/wikipedia/commons/thumb/e/e8/Elephants_Dream_s5_both.jpg/480px-Elephants_Dream_s5_both.jpg',
     tags: ['mp4', 'demo'],
     source: 'Google sample bucket',
-  },
-  {
-    id: 'sports-forBigger',
-    title: 'Arena Warmup Reel',
-    description: 'Placeholder sports shelf feed — swap for your league/provider HLS.',
-    category: 'sports',
-    url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4',
-    poster: 'https://images.unsplash.com/photo-1461896833974-bf75c996cb68?w=640&q=80',
-    tags: ['demo'],
-    source: 'Sample MP4',
-  },
-  {
-    id: 'sports-jump',
-    title: 'Court Side Cuts',
-    description: 'Second sports placeholder for multi-item browsing.',
-    category: 'sports',
-    url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4',
-    poster: 'https://images.unsplash.com/photo-1517649763962-0c623066027e?w=640&q=80',
-    tags: ['demo'],
-    source: 'Sample MP4',
-  },
-  {
-    id: 'news-apple',
-    title: 'Apple HLS Advanced Stream',
-    description: 'Reliable multi-bitrate HLS — useful news-shelf player check.',
-    category: 'news',
-    url: 'https://devstreaming-cdn.apple.com/videos/streaming/examples/img_bipbop_adv_example_fmp4/master.m3u8',
-    poster: 'https://images.unsplash.com/photo-1504711434969-e33886168f5c?w=640&q=80',
-    tags: ['hls', 'live-ready'],
-    source: 'Apple HLS examples',
   },
 ]

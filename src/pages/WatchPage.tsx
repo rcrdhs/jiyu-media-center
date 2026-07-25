@@ -6,6 +6,7 @@ import { usePlayback } from '../context/PlaybackContext'
 import {
   getContinueEntry,
   streamItemFromContinueEntry,
+  type ContinueWatchingEntry,
 } from '../lib/continueWatching'
 import {
   getConnectionDownlinkMbps,
@@ -16,10 +17,43 @@ import {
   parseEpisodeKey,
   pickBestStream,
   scrapePage,
+  type EpisodeChoice,
 } from '../lib/torrents'
 import { getViewingQuality } from '../lib/viewingQuality'
 import { isYouTubeUrl } from '../lib/webBrowser'
+import { isVimeoLiveEventUrl, resolveVimeoLiveHls } from '../lib/vimeoLive'
 import type { StreamItem, StreamPlaylistItem } from '../types'
+
+/** Prefer the saved continue episode over “latest episode” / URI heuristics. */
+function resolveContinueEpisodeIndex(
+  episodes: EpisodeChoice[],
+  saved: ContinueWatchingEntry | null,
+): number | null {
+  if (!saved || saved.currentTime < 5 || episodes.length === 0) return null
+  const max = episodes.length - 1
+
+  if (saved.episodeTitle) {
+    const savedKey = parseEpisodeKey(saved.episodeTitle)
+    if (savedKey) {
+      const byKey = episodes.findIndex((ep) => ep.key === savedKey)
+      if (byKey >= 0) return byKey
+    }
+    const byTitle = episodes.findIndex(
+      (ep) =>
+        ep.title === saved.episodeTitle ||
+        ep.title.includes(saved.episodeTitle!) ||
+        saved.episodeTitle!.includes(ep.title),
+    )
+    if (byTitle >= 0) return byTitle
+  }
+
+  if (saved.torrentUri) {
+    const byUri = episodes.findIndex((ep) => ep.torrentUri === saved.torrentUri)
+    if (byUri >= 0) return byUri
+  }
+
+  return Math.min(Math.max(0, saved.playlistIndex), max)
+}
 
 export function WatchPage() {
   const { id } = useParams<{ id: string }>()
@@ -58,6 +92,26 @@ export function WatchPage() {
     async function start() {
       setError(null)
 
+      // CVM (and similar): Vimeo live event → fresh tokenized HLS
+      if (isVimeoLiveEventUrl(item!.url)) {
+        const resolved = await resolveVimeoLiveHls(item!.url)
+        if (cancelled) return
+        if (!resolved.ok) {
+          setError(resolved.error || 'Could not resolve Vimeo live stream')
+          return
+        }
+        play(
+          {
+            ...item!,
+            url: resolved.url,
+            description: resolved.title || item!.description,
+            tags: [...new Set([...(item!.tags ?? []), 'hls', 'vimeo'])],
+          },
+          { forceFull: true, returnTo },
+        )
+        return
+      }
+
       // Torrent catalog entries store a detail page / magnet — resolve at play time
       if (item!.transport === 'torrent' || item!.sourceKind === 'torrent') {
         if (!window.signalDesktop?.torrentStream) {
@@ -86,14 +140,8 @@ export function WatchPage() {
 
             if (episodes.length > 1) {
               const saved = getContinueEntry(item!.id)
-              if (saved && saved.currentTime >= 5) {
-                startEpisodeIndex = Math.min(
-                  Math.max(0, saved.playlistIndex),
-                  episodes.length - 1,
-                )
-              } else {
-                startEpisodeIndex = episodes.length - 1
-              }
+              startEpisodeIndex =
+                resolveContinueEpisodeIndex(episodes, saved) ?? episodes.length - 1
               const chosen = episodes[startEpisodeIndex]
               uri = chosen.torrentUri
               title = chosen.title || title
@@ -122,13 +170,19 @@ export function WatchPage() {
               requestedQuality,
             )
             if (episodes.length > 1) {
-              const currentKey = parseEpisodeKey(item!.title)
-              const byKey = currentKey
-                ? episodes.findIndex((ep) => ep.key === currentKey)
-                : -1
-              const byUri = episodes.findIndex((ep) => ep.torrentUri === uri)
-              startEpisodeIndex =
-                byKey >= 0 ? byKey : byUri >= 0 ? byUri : episodes.length - 1
+              const saved = getContinueEntry(item!.id)
+              const continuedIndex = resolveContinueEpisodeIndex(episodes, saved)
+              if (continuedIndex != null) {
+                startEpisodeIndex = continuedIndex
+              } else {
+                const currentKey = parseEpisodeKey(item!.title)
+                const byKey = currentKey
+                  ? episodes.findIndex((ep) => ep.key === currentKey)
+                  : -1
+                const byUri = episodes.findIndex((ep) => ep.torrentUri === uri)
+                startEpisodeIndex =
+                  byKey >= 0 ? byKey : byUri >= 0 ? byUri : episodes.length - 1
+              }
               const chosen = episodes[startEpisodeIndex]
               uri = chosen.torrentUri
               title = chosen.title || title

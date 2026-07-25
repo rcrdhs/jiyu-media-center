@@ -256,9 +256,20 @@ export function Player({
     const maxIndex = Math.max(0, (list?.length ?? 1) - 1)
     let nextIndex = 0
     if (list && list.length > 0) {
-      const byUrl = list.findIndex((entry) => entry.url && entry.url === item.url)
-      if (byUrl >= 0) nextIndex = byUrl
-      else if (saved) nextIndex = Math.min(Math.max(0, saved.playlistIndex), maxIndex)
+      // Resume must win over URL matching — remux URLs are ephemeral and can
+      // point at whichever episode was started first in WatchPage.
+      if (saved && saved.currentTime >= 5) {
+        if (saved.episodeTitle) {
+          const byTitle = list.findIndex((entry) => entry.title === saved.episodeTitle)
+          if (byTitle >= 0) nextIndex = byTitle
+          else nextIndex = Math.min(Math.max(0, saved.playlistIndex), maxIndex)
+        } else {
+          nextIndex = Math.min(Math.max(0, saved.playlistIndex), maxIndex)
+        }
+      } else {
+        const byUrl = list.findIndex((entry) => entry.url && entry.url === item.url)
+        if (byUrl >= 0) nextIndex = byUrl
+      }
     }
     setPlaylistIndex(nextIndex)
     // Open the episode drawer for multi-episode titles so the list is obvious.
@@ -996,6 +1007,12 @@ export function Player({
   }
 
   useEffect(() => {
+    if (isPip && document.fullscreenElement) {
+      void document.exitFullscreen().catch(() => undefined)
+    }
+  }, [isPip])
+
+  useEffect(() => {
     if (isTile || isPip) return
     const video = videoRef.current
     const shell = shellRef.current
@@ -1077,8 +1094,26 @@ export function Player({
       if (!cancelled) setPaused(true)
     }
     const onEnded = () => {
+      // Torrent remux pipes sometimes fire `ended` mid-episode when the buffer
+      // stalls. Only auto-advance when the playhead is actually near the end.
+      const playhead = effectivePlayhead(video)
+      const reported =
+        Number.isFinite(video.duration) && video.duration !== Infinity && video.duration > 0
+          ? video.duration + timelineOffsetRef.current
+          : 0
+      const saved = getContinueEntry(item.id)
+      const knownDuration =
+        reported >= 5 * 60
+          ? reported
+          : saved?.duration && saved.duration >= 5 * 60
+            ? saved.duration
+            : reported
+      const nearEnd =
+        (knownDuration >= 5 * 60 && playhead / knownDuration >= 0.9) ||
+        (knownDuration < 5 * 60 && playhead >= 15 * 60)
+
       saveContinueProgress()
-      if (!cancelled && playlistIndex < playlist.length - 1) {
+      if (!cancelled && nearEnd && playlistIndex < playlist.length - 1) {
         // Re-resolve torrent URLs — don't just bump the index onto a dead remux link.
         void selectPlaylistItemRef.current(playlistIndex + 1)
       }

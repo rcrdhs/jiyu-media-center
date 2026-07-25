@@ -116,24 +116,50 @@ export function MediaCard({ item }: MediaCardProps) {
         </div>
         <div className="media-card-body">
           <h3>{item.title}</h3>
-          {item.description && !/^https?:\/\//i.test(item.description.trim()) && (
-            <p>{item.description}</p>
-          )}
-          {item.tags && item.tags.length > 0 && (
-            <ul className="tag-row">
-              {item.tags
-                .filter(
-                  (tag) =>
-                    !/^https?:\/\//i.test(tag) &&
-                    !/^#?\d+$/.test(tag) &&
-                    tag.toLowerCase() !== 'torrent',
-                )
-                .slice(0, 3)
-                .map((tag) => (
+          {(() => {
+            const sourceKey = (item.source || '').trim()
+            let description = (item.description || '').trim()
+            if (!description || /^https?:\/\//i.test(description)) return null
+            // Strip website / release-group names from card copy (SubsPlease, eztvx.to, …).
+            if (sourceKey) {
+              const escaped = sourceKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+              description = description
+                .replace(new RegExp(`(^|[·|,\\-–—\\s]+)${escaped}(?=$|[·|,\\-–—\\s]+)`, 'ig'), ' · ')
+                .replace(/\s*·\s*·\s*/g, ' · ')
+                .replace(/^[·\s,|\-–—]+|[·\s,|\-–—]+$/g, '')
+                .replace(/\s+/g, ' ')
+                .trim()
+            }
+            description = description
+              .replace(/\bsubsplease\b/gi, '')
+              .replace(/\s*·\s*·\s*/g, ' · ')
+              .replace(/^[·\s,|\-–—]+|[·\s,|\-–—]+$/g, '')
+              .trim()
+            if (!description) return null
+            if (/\.(to|com|org|net|gg|ch|re|ag|tv|io|xyz)\b/i.test(description)) return null
+            return <p>{description}</p>
+          })()}
+          {(() => {
+            const sourceKey = (item.source || '').trim().toLowerCase()
+            const visibleTags = (item.tags ?? []).filter((tag) => {
+              const t = tag.trim()
+              if (!t) return false
+              if (/^https?:\/\//i.test(t) || /^#?\d+$/.test(t)) return false
+              if (t.toLowerCase() === 'torrent' || t.toLowerCase() === 'subsplease') return false
+              // Never show the website / playlist source on cards (e.g. eztvx.to).
+              if (sourceKey && t.toLowerCase() === sourceKey) return false
+              if (/\.(to|com|org|net|gg|ch|re|ag|tv|io|xyz)\b/i.test(t)) return false
+              return true
+            })
+            if (visibleTags.length === 0) return null
+            return (
+              <ul className="tag-row">
+                {visibleTags.slice(0, 3).map((tag) => (
                   <li key={tag}>{tag}</li>
                 ))}
-            </ul>
-          )}
+              </ul>
+            )
+          })()}
         </div>
       </Link>
       {!isTorrent && (

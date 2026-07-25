@@ -9,8 +9,14 @@ const { promisify } = require('util')
 const gunzipAsync = promisify(zlib.gunzip)
 
 const isDev = !app.isPackaged
-const STREAM_UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 JiyuMedia/0.1'
+/** Keep in lockstep with package.json (also injected into the UI as __JIYU_VERSION__). */
+let APP_VERSION = '0.3.0'
+try {
+  APP_VERSION = require('../package.json').version || APP_VERSION
+} catch {
+  /* packaged layouts still expose app.getVersion() below */
+}
+const STREAM_UA = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 JiyuMedia/${APP_VERSION}`
 const BROWSER_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
 const DEV_URL = 'http://localhost:5173'
@@ -446,13 +452,35 @@ function showWebBrowser(bounds) {
   return true
 }
 
-function hideWebBrowser() {
+function hideWebBrowser(options = {}) {
+  const blank = Boolean(options && options.blank)
   if (!webBrowserView) {
     webBrowserVisible = false
     return
   }
   try {
     webBrowserView.setVisible(false)
+  } catch {
+    /* ignore */
+  }
+  // Pause media when hiding. Only blank on explicit close — blanking kills the
+  // session and made Expand from PiP look like a 30s reload to about:blank.
+  try {
+    const contents = webBrowserView.webContents
+    if (contents && !contents.isDestroyed()) {
+      void contents
+        .executeJavaScript(
+          `(() => { try { document.querySelectorAll('video,audio').forEach((m) => { m.pause(); m.muted = true; }); } catch (_) {} })();`,
+          true,
+        )
+        .catch(() => {})
+      if (blank) {
+        const current = contents.getURL()
+        if (current && current !== 'about:blank') {
+          void contents.loadURL('about:blank')
+        }
+      }
+    }
   } catch {
     /* ignore */
   }
@@ -491,11 +519,67 @@ async function loadDevUrl(win, attempt = 0) {
 app.whenReady().then(() => {
   recoverCatalogFromLegacyApps()
 
+  // Block popup windows + guest HTML-fullscreen (YouTube auto-max on play).
+  app.on('web-contents-created', (_event, contents) => {
+    contents.setWindowOpenHandler(() => ({ action: 'deny' }))
+    contents.on('enter-html-full-screen', () => {
+      if (contents.getType?.() !== 'webview') return
+      try {
+        if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isFullScreen()) {
+          mainWindow.setFullScreen(false)
+        }
+      } catch {
+        /* ignore */
+      }
+      void contents
+        .executeJavaScript(
+          `(() => { try { document.exitFullscreen?.(); document.webkitExitFullscreen?.(); } catch (_) {} })();`,
+          true,
+        )
+        .catch(() => {})
+    })
+  })
+
+  try {
+    APP_VERSION = app.getVersion() || APP_VERSION
+  } catch {
+    /* keep package.json fallback */
+  }
+  if (typeof app.setAboutPanelOptions === 'function') {
+    app.setAboutPanelOptions({
+      applicationName: 'Jiyu',
+      version: APP_VERSION,
+      copyright: 'Jiyu',
+    })
+  }
+
   // Many IPTV CDNs reject Electron's default UA or empty clients
   session.defaultSession.webRequest.onBeforeSendHeaders((details, callback) => {
     const headers = { ...details.requestHeaders, 'User-Agent': STREAM_UA }
     if (!headers.Accept) headers.Accept = '*/*'
+    // CVM Vimeo live: player config + CDN segments expect the official site origin
+    if (/vimeocdn\.com|player\.vimeo\.com|vimeo\.com\/live\//i.test(details.url || '')) {
+      headers.Referer = 'https://site.cvmtv.com/'
+      headers.Origin = 'https://site.cvmtv.com'
+    }
     callback({ requestHeaders: headers })
+  })
+
+  // Vimeo HLS returns ACAO: https://vimeo.com — rewrite so hls.js in the app can preview/play
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    const url = details.url || ''
+    if (!/vimeocdn\.com|player\.vimeo\.com/i.test(url)) {
+      callback({})
+      return
+    }
+    const responseHeaders = { ...(details.responseHeaders || {}) }
+    for (const key of Object.keys(responseHeaders)) {
+      if (key.toLowerCase() === 'access-control-allow-origin') {
+        delete responseHeaders[key]
+      }
+    }
+    responseHeaders['Access-Control-Allow-Origin'] = ['*']
+    callback({ responseHeaders })
   })
 
   createWindow()
@@ -505,12 +589,35 @@ app.whenReady().then(() => {
   })
 })
 
+ipcMain.handle('app:getVersion', async () => APP_VERSION)
+
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
 function catalogPath() {
   return path.join(app.getPath('userData'), 'playlist-sources.json')
+}
+
+function torrentSourcesPath() {
+  return path.join(app.getPath('userData'), 'torrent-sources.json')
+}
+
+function readTorrentSourcesFile() {
+  try {
+    const file = torrentSourcesPath()
+    if (!fs.existsSync(file)) return null
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'))
+    return Array.isArray(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function writeTorrentSourcesFile(sources) {
+  const file = torrentSourcesPath()
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.writeFileSync(file, JSON.stringify(Array.isArray(sources) ? sources : [], null, 2), 'utf8')
 }
 
 /** Recover playlists after Signal → Jiyu rename (old Electron userData folder). */
@@ -585,6 +692,13 @@ ipcMain.handle('catalog:replaceAll', async (_event, sources) => {
   return true
 })
 
+ipcMain.handle('torrentSources:list', async () => readTorrentSourcesFile() ?? [])
+
+ipcMain.handle('torrentSources:save', async (_event, sources) => {
+  writeTorrentSourcesFile(sources)
+  return true
+})
+
 ipcMain.handle('dialog:openPlaylist', async () => {
   const result = await dialog.showOpenDialog({
     title: 'Import M3U playlist(s)',
@@ -613,8 +727,8 @@ ipcMain.handle('browser:show', async (_event, bounds) => {
   return showWebBrowser(bounds)
 })
 
-ipcMain.handle('browser:hide', async () => {
-  hideWebBrowser()
+ipcMain.handle('browser:hide', async (_event, options) => {
+  hideWebBrowser(options || {})
   return true
 })
 
@@ -631,10 +745,12 @@ ipcMain.handle('browser:navigate', async (_event, url) => {
   if (!view) return { ok: false, error: 'Browser unavailable' }
   if (!webBrowserAttached || !webBrowserVisible) showWebBrowser()
   try {
-    // Don't await forever — YouTube SPA navigations can hang the promise
-    const loadPromise = view.webContents.loadURL(target)
-    const timeout = new Promise((resolve) => setTimeout(resolve, 8000))
-    await Promise.race([loadPromise.catch(() => null), timeout])
+    // Start navigation immediately — do not wait for YouTube to finish loading
+    // (loadURL can take many seconds and made PiP feel broken/slow).
+    void view.webContents.loadURL(target).catch((err) => {
+      if (err && (err.code === 'ERR_ABORTED' || /ERR_ABORTED/.test(String(err)))) return
+      console.warn('[browser:navigate]', err instanceof Error ? err.message : err)
+    })
     return { ok: true, url: target }
   } catch (err) {
     if (err && (err.code === 'ERR_ABORTED' || /ERR_ABORTED/.test(String(err)))) {
@@ -714,6 +830,40 @@ ipcMain.handle('browser:openExternalCurrent', async () => {
   const url = webBrowserView?.webContents.getURL()
   if (url && /^https?:\/\//i.test(url)) await shell.openExternal(url)
   return true
+})
+
+ipcMain.handle('browser:execute', async (_event, code) => {
+  if (!webBrowserView || webBrowserView.webContents.isDestroyed()) {
+    return { ok: false, error: 'Browser unavailable' }
+  }
+  try {
+    const result = await webBrowserView.webContents.executeJavaScript(String(code || ''), true)
+    return { ok: true, result }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
+})
+
+ipcMain.handle('browser:getNav', async () => {
+  if (!webBrowserView || webBrowserView.webContents.isDestroyed()) {
+    return {
+      url: '',
+      title: 'Web browser',
+      canGoBack: false,
+      canGoForward: false,
+      loading: false,
+      visible: false,
+    }
+  }
+  const contents = webBrowserView.webContents
+  return {
+    url: contents.getURL(),
+    title: contents.getTitle(),
+    canGoBack: navCanGoBack(contents),
+    canGoForward: navCanGoForward(contents),
+    loading: contents.isLoading(),
+    visible: webBrowserVisible,
+  }
 })
 
 ipcMain.handle('desktop:isDesktop', async () => true)
@@ -810,7 +960,7 @@ ipcMain.handle('playlist:fetchUrl', async (_event, url) => {
         'User-Agent':
           /youtube\.com|youtu\.be/i.test(target)
             ? 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
-            : 'JiyuMedia/0.1 (IPTV; M3U)',
+            : `JiyuMedia/${APP_VERSION} (IPTV; M3U)`,
         Accept: /youtube\.com|youtu\.be/i.test(target)
           ? 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
           : 'application/vnd.apple.mpegurl, audio/x-mpegurl, application/xml, text/xml, text/plain, */*',
@@ -860,9 +1010,141 @@ ipcMain.handle('playlist:fetchUrl', async (_event, url) => {
   }
 })
 
+/** CVM (and similar) Vimeo live events — CDN m3u8 links are tokenized/short-lived. */
+const vimeoLiveHlsCache = new Map()
+
+function parseVimeoEventId(input) {
+  const raw = String(input || '').trim()
+  if (!raw) return null
+  if (/^\d{5,}$/.test(raw)) return raw
+  try {
+    const u = new URL(raw)
+    if (!/vimeo\.com$/i.test(u.hostname) && !/\.vimeo\.com$/i.test(u.hostname)) return null
+    const m = u.pathname.match(/\/event\/(\d+)/i)
+    return m?.[1] || null
+  } catch {
+    return null
+  }
+}
+
+async function resolveVimeoLiveEventHls(eventId) {
+  const id = String(eventId || '').trim()
+  if (!/^\d{5,}$/.test(id)) {
+    return { ok: false, error: 'Invalid Vimeo event id' }
+  }
+
+  const cached = vimeoLiveHlsCache.get(id)
+  if (cached && cached.expires > Date.now() && cached.url) {
+    return { ok: true, url: cached.url, title: cached.title || '', cached: true }
+  }
+
+  const ua = BROWSER_UA
+  const viewer = await fetch('https://vimeo.com/_next/viewer', {
+    headers: { 'User-Agent': ua, Accept: 'application/json' },
+  }).then((r) => r.json())
+
+  if (!viewer?.jwt) {
+    return { ok: false, error: 'Could not get Vimeo viewer token' }
+  }
+
+  const eventRes = await fetch(`https://api.vimeo.com/live_events/${id}`, {
+    headers: {
+      'User-Agent': ua,
+      Authorization: `jwt ${viewer.jwt}`,
+      Accept: 'application/vnd.vimeo.*+json;version=3.4.2',
+    },
+  })
+  const event = await eventRes.json().catch(() => null)
+  if (!eventRes.ok || !event) {
+    return { ok: false, error: event?.error || `Vimeo event HTTP ${eventRes.status}` }
+  }
+
+  const clip = event.streamable_clip
+  const videoId = String(clip?.uri || '')
+    .split('/')
+    .filter(Boolean)
+    .pop()
+  if (!videoId) {
+    return { ok: false, error: 'Vimeo event has no live clip right now' }
+  }
+
+  let hlsUrl = ''
+  try {
+    const embedUrl = clip.player_embed_url || ''
+    const h = embedUrl ? new URL(embedUrl).searchParams.get('h') : null
+    const configUrl = `https://player.vimeo.com/video/${videoId}/config${h ? `?h=${h}` : ''}`
+    const configRes = await fetch(configUrl, {
+      headers: {
+        'User-Agent': ua,
+        Accept: 'application/json',
+        Referer: 'https://site.cvmtv.com/',
+        Origin: 'https://site.cvmtv.com',
+      },
+    })
+    const config = await configRes.json().catch(() => null)
+    const hls = config?.request?.files?.hls
+    const cdnKey = hls?.default_cdn || Object.keys(hls?.cdns || {})[0]
+    hlsUrl = hls?.cdns?.[cdnKey]?.avc_url || hls?.cdns?.[cdnKey]?.url || ''
+  } catch {
+    /* fall through to play API */
+  }
+
+  if (!hlsUrl) {
+    const playRes = await fetch(
+      `https://api.vimeo.com/videos/${videoId}?fields=play.hls.link,name`,
+      {
+        headers: {
+          'User-Agent': ua,
+          Authorization: `jwt ${viewer.jwt}`,
+          Accept: 'application/vnd.vimeo.*+json;version=3.4.2',
+        },
+      },
+    )
+    const play = await playRes.json().catch(() => null)
+    hlsUrl = play?.play?.hls?.link || ''
+  }
+
+  if (!hlsUrl || !/^https?:\/\//i.test(hlsUrl)) {
+    return { ok: false, error: 'No HLS URL in Vimeo live config' }
+  }
+
+  const title = event.stream_title || event.title || clip.name || ''
+  // Tokenized CDN links typically last a few hours; refresh early.
+  vimeoLiveHlsCache.set(id, {
+    url: hlsUrl,
+    title,
+    expires: Date.now() + 4 * 60 * 1000,
+  })
+  return { ok: true, url: hlsUrl, title, cached: false }
+}
+
 async function probeHttpStream(rawUrl, timeoutMs = 2500) {
   const started = Date.now()
   let target = String(rawUrl || '').trim()
+  const vimeoEventId = parseVimeoEventId(target)
+  if (vimeoEventId) {
+    try {
+      const resolved = await resolveVimeoLiveEventHls(vimeoEventId)
+      if (!resolved.ok || !resolved.url) {
+        return {
+          ok: false,
+          state: 'offline',
+          status: 0,
+          latencyMs: Date.now() - started,
+          error: resolved.error || 'Vimeo live resolve failed',
+        }
+      }
+      target = resolved.url
+    } catch (err) {
+      return {
+        ok: false,
+        state: 'offline',
+        status: 0,
+        latencyMs: Date.now() - started,
+        error: err instanceof Error ? err.message : String(err),
+      }
+    }
+  }
   if (!/^https?:\/\//i.test(target)) target = `http://${target}`
   if (!/^https?:\/\//i.test(target)) {
     return {
@@ -876,7 +1158,7 @@ async function probeHttpStream(rawUrl, timeoutMs = 2500) {
 
   const headers = {
     'User-Agent':
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 JiyuMedia/0.1',
+      `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 JiyuMedia/${APP_VERSION}`,
     Accept: '*/*',
   }
 
@@ -973,6 +1255,15 @@ async function probeHttpStream(rawUrl, timeoutMs = 2500) {
 
 ipcMain.handle('stream:probe', async (_event, url, timeoutMs) => {
   return probeHttpStream(url, typeof timeoutMs === 'number' ? timeoutMs : 2500)
+})
+
+ipcMain.handle('vimeo:resolveLiveHls', async (_event, input) => {
+  try {
+    const eventId = parseVimeoEventId(input) || String(input || '').trim()
+    return await resolveVimeoLiveEventHls(eventId)
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
 })
 
 ipcMain.handle('stream:probeMany', async (_event, entries, timeoutMs) => {

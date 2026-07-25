@@ -10,6 +10,12 @@ export interface LocalYoutubeLiveTarget {
 /** Shown under Home → Local when the channel is live on YouTube */
 export const LOCAL_YOUTUBE_LIVE_TARGETS: LocalYoutubeLiveTarget[] = [
   {
+    id: 'tvj-live',
+    label: 'TVJ',
+    detail: 'Television Jamaica is live on YouTube',
+    url: 'https://www.youtube.com/@TelevisionJamaica/live',
+  },
+  {
     id: 'cvm-live',
     label: 'CVM',
     detail: 'CVM TV News is live on YouTube',

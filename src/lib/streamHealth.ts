@@ -1,9 +1,33 @@
 import type { StreamItem, StreamProbeResult } from '../types'
+import { isYouTubeUrl } from './webBrowser'
+import { isYouTubeLiveNow } from './youtubeLive'
 
 /** Fast fail — unresponsive streams shouldn't stall the whole shelf */
 export const DEFAULT_TIMEOUT_MS = 2500
 export const DEFAULT_CONCURRENCY = 20
 const CHUNK_SIZE = 16
+
+async function probeYouTubeLive(url: string): Promise<StreamProbeResult> {
+  const started = Date.now()
+  try {
+    const live = await isYouTubeLiveNow(url)
+    return {
+      ok: live,
+      state: live ? 'online' : 'offline',
+      status: live ? 200 : 0,
+      latencyMs: Date.now() - started,
+      error: live ? '' : 'Not live on YouTube right now',
+    }
+  } catch (err) {
+    return {
+      ok: false,
+      state: 'offline',
+      status: 0,
+      latencyMs: Date.now() - started,
+      error: err instanceof Error ? err.message : String(err),
+    }
+  }
+}
 
 async function probeInBrowser(url: string, timeoutMs: number): Promise<StreamProbeResult> {
   const started = Date.now()
@@ -51,6 +75,7 @@ export async function probeStreamUrl(
   url: string,
   timeoutMs = DEFAULT_TIMEOUT_MS,
 ): Promise<StreamProbeResult> {
+  if (isYouTubeUrl(url)) return probeYouTubeLive(url)
   if (window.signalDesktop?.probeStream) {
     return window.signalDesktop.probeStream(url, timeoutMs)
   }
@@ -77,15 +102,15 @@ export async function probeStreamItems(
     const slice = items.slice(offset, offset + CHUNK_SIZE)
     const entries = slice.map((item) => ({ id: item.id, url: item.url }))
 
-    let chunk: ProbeProgress[]
-    if (window.signalDesktop?.probeStreams) {
-      chunk = await window.signalDesktop.probeStreams(entries, timeoutMs)
-    } else {
-      chunk = await mapPool(entries, options?.concurrency ?? DEFAULT_CONCURRENCY, async (entry) => {
-        const probe = await probeInBrowser(entry.url, timeoutMs)
-        return { id: entry.id, ...probe }
-      })
-    }
+    const chunk = await mapPool(entries, options?.concurrency ?? DEFAULT_CONCURRENCY, async (entry) => {
+      if (isYouTubeUrl(entry.url)) {
+        return { id: entry.id, ...(await probeYouTubeLive(entry.url)) }
+      }
+      if (window.signalDesktop?.probeStream) {
+        return { id: entry.id, ...(await window.signalDesktop.probeStream(entry.url, timeoutMs)) }
+      }
+      return { id: entry.id, ...(await probeInBrowser(entry.url, timeoutMs)) }
+    })
 
     all.push(...chunk)
     options?.onChunk?.(chunk)

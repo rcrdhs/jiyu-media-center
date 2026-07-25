@@ -43,25 +43,70 @@ const SUBSPLEASE_SOURCE: TorrentSource = {
   url: 'https://subsplease.org/shows/',
 }
 
-export function loadTorrentSources(): TorrentSource[] {
+function normalizeTorrentSourceList(parsed: unknown): TorrentSource[] {
+  const sources: TorrentSource[] = Array.isArray(parsed)
+    ? parsed.filter(
+        (s): s is TorrentSource =>
+          Boolean(s && typeof s === 'object' && typeof (s as TorrentSource).url === 'string'),
+      )
+    : []
+  if (!sources.some((source) => isSubsPleaseUrl(source.url))) {
+    sources.push(SUBSPLEASE_SOURCE)
+  }
+  return sources
+}
+
+function readTorrentSourcesLocal(): TorrentSource[] {
   try {
     const raw = localStorage.getItem(SOURCES_KEY)
-    const parsed = raw ? JSON.parse(raw) : []
-    const sources: TorrentSource[] = Array.isArray(parsed)
-      ? parsed.filter((s) => s && typeof s.url === 'string')
-      : []
-    if (!sources.some((source) => isSubsPleaseUrl(source.url))) {
-      sources.push(SUBSPLEASE_SOURCE)
-      localStorage.setItem(SOURCES_KEY, JSON.stringify(sources))
-    }
-    return sources
+    return normalizeTorrentSourceList(raw ? JSON.parse(raw) : [])
   } catch {
     return [SUBSPLEASE_SOURCE]
   }
 }
 
+export function loadTorrentSources(): TorrentSource[] {
+  const sources = readTorrentSourcesLocal()
+  try {
+    localStorage.setItem(SOURCES_KEY, JSON.stringify(sources))
+  } catch {
+    /* ignore */
+  }
+  return sources
+}
+
+/** Merge Electron-disk website list when Chromium localStorage was lost. */
+export async function loadTorrentSourcesAsync(): Promise<TorrentSource[]> {
+  const current = readTorrentSourcesLocal()
+  const api = window.signalDesktop
+  if (!api?.torrentSourcesList || !api.torrentSourcesSave) return current
+  try {
+    const disk = normalizeTorrentSourceList(await api.torrentSourcesList())
+    const currentUrls = new Set(current.map((s) => s.url.trim().toLowerCase()))
+    const extras = disk.filter((s) => !currentUrls.has(s.url.trim().toLowerCase()))
+    const merged =
+      current.length <= 1 && disk.length > current.length ? disk : [...current, ...extras]
+    const next = normalizeTorrentSourceList(merged)
+    try {
+      localStorage.setItem(SOURCES_KEY, JSON.stringify(next))
+    } catch {
+      /* ignore */
+    }
+    await api.torrentSourcesSave(next)
+    return next
+  } catch {
+    return current
+  }
+}
+
 export function saveTorrentSources(sources: TorrentSource[]) {
-  localStorage.setItem(SOURCES_KEY, JSON.stringify(sources))
+  const next = normalizeTorrentSourceList(sources)
+  try {
+    localStorage.setItem(SOURCES_KEY, JSON.stringify(next))
+  } catch {
+    /* Chromium storage can be unavailable after profile corruption */
+  }
+  void window.signalDesktop?.torrentSourcesSave?.(next)
 }
 
 export function isMagnetLink(text: string): boolean {
@@ -983,10 +1028,7 @@ export function collapseEpisodeRowsToShows(items: StreamItem[]): StreamItem[] {
     showCards.set(key, {
       ...best,
       title: showTitle,
-      description:
-        epCount > 0
-          ? `${epCount} episode${epCount === 1 ? '' : 's'} · ${best.source || 'torrent'}`
-          : best.description,
+      description: epCount > 0 ? `${epCount} episode${epCount === 1 ? '' : 's'}` : best.description,
       // Keep a magnet so /show/:id resolves; siblings still supply the full list.
       detailUrl: best.detailUrl,
     })
@@ -1355,7 +1397,7 @@ async function scrapeSubsPlease(pageUrl: string, sourceLabel: string): Promise<T
       links.push({
         title,
         url: absolute,
-        summary: 'Anime · SubsPlease · 720p preferred',
+        summary: 'Anime · 720p preferred',
         poster: imageByShow.get(title.toLowerCase()),
         category: 'anime',
       })
@@ -2131,11 +2173,12 @@ export function linkToCatalogItem(
   return {
     id: stableTorrentItemId(link.url),
     title: link.title,
-    description: link.summary || `${source.label} torrent`,
+    description: link.summary || '',
     category,
     url: link.url,
     poster: link.poster,
-    tags: [category, source.label],
+    // Category only on the card — source site stays on `source`, not in tags.
+    tags: [category],
     source: source.label,
     sourceKind: 'torrent',
     transport: 'torrent',

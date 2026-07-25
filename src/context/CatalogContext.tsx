@@ -8,6 +8,7 @@ import {
   type ReactNode,
 } from 'react'
 import { BUILTIN_CATALOG } from '../data/catalog'
+import { DEFAULT_PLAYLISTS } from '../data/defaultPlaylists'
 import { normalizeIptvPlaylistUrl } from '../lib/iptv'
 import {
   getEnglishOnlyPref,
@@ -17,6 +18,7 @@ import {
 } from '../lib/language'
 import { dedupeStreams, getHideDuplicatesPref, setHideDuplicatesPref } from '../lib/dedupe'
 import { countM3UEntries, parseM3U } from '../lib/m3u'
+import { POPULAR_NEWS_LIMIT, preparePlaylistContent } from '../lib/popularNews'
 import {
   clearPlaylistSources,
   deletePlaylistSource,
@@ -82,12 +84,12 @@ async function fetchPlaylistContent(url: string): Promise<string> {
   if (window.signalDesktop?.fetchPlaylist) {
     const result = await window.signalDesktop.fetchPlaylist(trimmed)
     if (!result.ok) throw new Error(result.error || `Fetch failed (${result.status})`)
-    return result.content
+    return preparePlaylistContent(trimmed, result.content)
   }
 
   const response = await fetch(trimmed, { redirect: 'follow' })
   if (!response.ok) throw new Error(`Fetch failed (${response.status})`)
-  return await response.text()
+  return preparePlaylistContent(trimmed, await response.text())
 }
 
 export function CatalogProvider({ children }: { children: ReactNode }) {
@@ -114,8 +116,14 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const reloadTorrentCatalog = useCallback(async () => {
-    const rows = await listTorrentCatalog()
-    setTorrentItems(rows)
+    try {
+      const rows = await listTorrentCatalog()
+      setTorrentItems(rows)
+    } catch (err) {
+      // IndexedDB can throw UnknownError when Chromium's QuotaManager is corrupted
+      console.error('Torrent catalog unavailable (storage may need a reset):', err)
+      setTorrentItems([])
+    }
   }, [])
 
   useEffect(() => {
@@ -123,6 +131,60 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
     ;(async () => {
       try {
         await migrateLegacyPlaylist(countM3UEntries)
+        // Seed curated public playlists (e.g. IPTV-Org Sports / News) if missing
+        const existing = await listPlaylistSources()
+
+        // Shrink a previously imported full news list down to the popular cap
+        for (const row of existing) {
+          if (cancelled) break
+          if (row.id !== 'builtin-iptv-org-news' && !/categories\/news\.m3u/i.test(row.url || '')) {
+            continue
+          }
+          if (row.itemCount <= POPULAR_NEWS_LIMIT) continue
+          const content = preparePlaylistContent(row.url, row.content)
+          const itemCount = countM3UEntries(content)
+          if (itemCount === 0 || itemCount === row.itemCount) continue
+          const next = { ...row, content, itemCount, addedAt: Date.now() }
+          await putPlaylistSource(next)
+          const idx = existing.findIndex((r) => r.id === row.id)
+          if (idx >= 0) existing[idx] = next
+        }
+
+        for (const seed of DEFAULT_PLAYLISTS) {
+          if (cancelled) break
+          const already = existing.some(
+            (row) =>
+              row.id === seed.id ||
+              (row.url &&
+                normalizeIptvPlaylistUrl(row.url) === normalizeIptvPlaylistUrl(seed.url)),
+          )
+          if (already) continue
+          try {
+            const content = await fetchPlaylistContent(seed.url)
+            const itemCount = countM3UEntries(content)
+            if (itemCount === 0) continue
+            await putPlaylistSource({
+              id: seed.id,
+              kind: 'url',
+              label: seed.label,
+              url: seed.url,
+              content,
+              addedAt: Date.now(),
+              itemCount,
+            })
+            existing.push({
+              id: seed.id,
+              kind: 'url',
+              label: seed.label,
+              url: seed.url,
+              content,
+              addedAt: Date.now(),
+              itemCount,
+            })
+          } catch (err) {
+            console.error(`Default playlist failed (${seed.label}):`, err)
+          }
+        }
         if (!cancelled) {
           await reload()
           await reloadTorrentCatalog()

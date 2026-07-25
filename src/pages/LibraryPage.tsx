@@ -1,9 +1,16 @@
-import { useRef, useState, type ChangeEvent, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { fetchPlaylistContent, useCatalog } from '../context/CatalogContext'
 import { useEpg } from '../context/EpgContext'
 import { buildXtreamPlaylistUrl, normalizeIptvPlaylistUrl, type IptvOutput } from '../lib/iptv'
 import { probeStreamUrl } from '../lib/streamHealth'
+import {
+  getViewingQuality,
+  setViewingQuality,
+  type ViewingQuality,
+} from '../lib/viewingQuality'
 import type { CategoryId, StreamHealthState } from '../types'
+import { TorrentsPage } from './TorrentsPage'
 
 const SECTIONS: { id: CategoryId; label: string }[] = [
   { id: 'sports', label: 'Sports' },
@@ -26,6 +33,8 @@ export function LibraryPage() {
     refreshAllRemote,
     hideDuplicates,
     setHideDuplicates,
+    englishOnly,
+    setEnglishOnly,
   } = useCatalog()
   const {
     manualUrl,
@@ -37,6 +46,7 @@ export function LibraryPage() {
     error: epgError,
     data: epgData,
   } = useEpg()
+  const [quality, setQuality] = useState<ViewingQuality>(getViewingQuality)
   const [message, setMessage] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [paste, setPaste] = useState('')
@@ -50,6 +60,15 @@ export function LibraryPage() {
   const [progress, setProgress] = useState<string | null>(null)
   const [sourceHealth, setSourceHealth] = useState<Record<string, StreamHealthState>>({})
   const fileRef = useRef<HTMLInputElement>(null)
+  const [searchParams] = useSearchParams()
+
+  useEffect(() => {
+    if (searchParams.get('section') !== 'websites') return
+    const el = document.getElementById('websites')
+    if (el) {
+      requestAnimationFrame(() => el.scrollIntoView({ behavior: 'smooth', block: 'start' }))
+    }
+  }, [searchParams])
 
   function reportOk(text: string) {
     setError(null)
@@ -258,67 +277,202 @@ export function LibraryPage() {
     <div className="page">
       <header className="page-header">
         <p className="eyebrow">Library</p>
-        <h1>Streams & IPTV</h1>
+        <h1>Streams, IPTV &amp; websites</h1>
         <p className="lede">
-          Add as many M3U links and IPTV providers as you want — each one is a separate source and
-          they all stay active together. No need to replace the previous list.
+          Add M3U / IPTV sources and catalog websites — each stays active together. No need to
+          replace the previous list.
         </p>
       </header>
 
       <div className="library-grid">
-        <section className="panel">
-          <h2>Preferences &amp; EPG</h2>
-          <label className="check-toggle">
-            <input
-              type="checkbox"
-              checked={hideDuplicates}
-              onChange={(e) => setHideDuplicates(e.target.checked)}
-            />
-            Hide duplicated streams
-          </label>
-          <p className="fine-print">
-            Collapses same-title / same-URL entries across playlists (default on).
-          </p>
-          <label className="field-label" htmlFor="epg-url">
-            EPG / XMLTV URL
-          </label>
-          <form
-            className="iptv-form"
-            onSubmit={(e) => {
-              e.preventDefault()
-              setManualUrl(epgDraft)
-              void refreshEpg(epgDraft.trim() || undefined).then(() => {
-                if (epgDraft.trim()) reportOk('EPG URL saved — guide refreshing')
-                else reportOk('Manual EPG URL cleared')
-              })
-            }}
-          >
-            <input
-              id="epg-url"
+        <div className="library-side">
+          <section className="panel">
+            <h2>Preferences &amp; EPG</h2>
+            <label className="field-label" htmlFor="viewing-quality">
+              Viewing quality
+            </label>
+            <select
+              id="viewing-quality"
               className="url-input"
-              type="url"
-              placeholder="https://example.com/epg.xml"
-              value={epgDraft}
-              onChange={(e) => setEpgDraft(e.target.value)}
-              spellCheck={false}
-            />
-            <div className="hero-actions">
-              <button type="submit" className="primary-btn" disabled={epgLoading}>
-                {epgLoading ? 'Loading…' : 'Save & load'}
-              </button>
-            </div>
-          </form>
-          <p className="fine-print">
-            Active: {activeUrl || 'none'}
-            {discoveredUrls.length > 0
-              ? ` · ${discoveredUrls.length} url-tvg from playlists`
-              : ''}
-            {epgData ? ` · ${epgData.programmes.length.toLocaleString()} programmes` : ''}
-          </p>
-          {epgError && <p className="toast toast-error">{epgError}</p>}
-        </section>
+              value={quality === 'auto' ? 'auto' : String(quality)}
+              onChange={(event) => {
+                const raw = event.target.value
+                const next: ViewingQuality =
+                  raw === '720' ? 720 : raw === '1080' ? 1080 : raw === '2160' ? 2160 : 'auto'
+                setQuality(next)
+                setViewingQuality(next)
+              }}
+              aria-label="Preferred viewing quality"
+            >
+              <option value="auto">Auto (internet speed)</option>
+              <option value="720">720p</option>
+              <option value="1080">1080p</option>
+              <option value="2160">4K</option>
+            </select>
+            <label className="check-toggle">
+              <input
+                type="checkbox"
+                checked={englishOnly}
+                onChange={(e) => setEnglishOnly(e.target.checked)}
+              />
+              English only
+              <span className="optional-tag">except Anime</span>
+            </label>
+            <label className="check-toggle">
+              <input
+                type="checkbox"
+                checked={hideDuplicates}
+                onChange={(e) => setHideDuplicates(e.target.checked)}
+              />
+              Hide duplicates
+            </label>
+            <p className="fine-print">
+              Collapses same-title / same-URL entries across playlists (default on).
+            </p>
+            <label className="field-label" htmlFor="epg-url">
+              EPG / XMLTV URL
+            </label>
+            <form
+              className="iptv-form"
+              onSubmit={(e) => {
+                e.preventDefault()
+                setManualUrl(epgDraft)
+                void refreshEpg(epgDraft.trim() || undefined).then(() => {
+                  if (epgDraft.trim()) reportOk('EPG URL saved — guide refreshing')
+                  else reportOk('Manual EPG URL cleared')
+                })
+              }}
+            >
+              <input
+                id="epg-url"
+                className="url-input"
+                type="url"
+                placeholder="https://example.com/epg.xml"
+                value={epgDraft}
+                onChange={(e) => setEpgDraft(e.target.value)}
+                spellCheck={false}
+              />
+              <div className="hero-actions">
+                <button type="submit" className="primary-btn" disabled={epgLoading}>
+                  {epgLoading ? 'Loading…' : 'Save & load'}
+                </button>
+              </div>
+            </form>
+            <p className="fine-print">
+              Active: {activeUrl || 'none'}
+              {discoveredUrls.length > 0
+                ? ` · ${discoveredUrls.length} url-tvg from playlists`
+                : ''}
+              {epgData ? ` · ${epgData.programmes.length.toLocaleString()} programmes` : ''}
+            </p>
+            {epgError && <p className="toast toast-error">{epgError}</p>}
+          </section>
 
-        <section className="panel">
+          <section className="panel">
+            <h2>Shelf counts</h2>
+            <ul className="count-list">
+              {SECTIONS.map((s) => (
+                <li key={s.id}>
+                  <span>{s.label}</span>
+                  <strong>{byCategory(s.id).length.toLocaleString()}</strong>
+                </li>
+              ))}
+              <li>
+                <span>Imported total</span>
+                <strong>{importedCount.toLocaleString()}</strong>
+              </li>
+              <li>
+                <span>Active sources</span>
+                <strong>{sources.length.toLocaleString()}</strong>
+              </li>
+            </ul>
+
+            <div className="sources-head">
+              <h2>Sources ({sources.length})</h2>
+              <div className="sources-head-actions">
+                {remoteSourceCount > 0 && (
+                  <button
+                    type="button"
+                    className="ghost-btn"
+                    disabled={busy}
+                    onClick={() => void onRefreshAll()}
+                  >
+                    Refresh all remote
+                  </button>
+                )}
+                {importedCount > 0 && (
+                  <button
+                    type="button"
+                    className="ghost-btn"
+                    disabled={busy}
+                    onClick={() => {
+                      void clearImported().then(() => reportOk('Cleared all imported sources'))
+                    }}
+                  >
+                    Clear {importedCount.toLocaleString()} imported
+                  </button>
+                )}
+              </div>
+            </div>
+            {sources.length === 0 ? (
+              <p className="fine-print">
+                No imported sources yet. Add several links above — they all stack.
+              </p>
+            ) : (
+              <ul className="source-list">
+                {sources.map((source) => (
+                  <li key={source.id}>
+                    <div>
+                      <strong title={source.label}>{source.label}</strong>
+                      <span>
+                        {source.kind.toUpperCase()} · {source.itemCount.toLocaleString()} entries
+                        {sourceHealth[source.id] ? ` · ${sourceHealth[source.id]}` : ''}
+                      </span>
+                    </div>
+                    <div className="source-actions">
+                      {source.url && (
+                        <>
+                          <button
+                            type="button"
+                            className="text-btn"
+                            disabled={busy || sourceHealth[source.id] === 'checking'}
+                            onClick={() => void onCheckSource(source.id, source.url)}
+                          >
+                            Check
+                          </button>
+                          <button
+                            type="button"
+                            className="text-btn"
+                            disabled={busy}
+                            onClick={() => void onRefresh(source.id)}
+                          >
+                            Refresh
+                          </button>
+                        </>
+                      )}
+                      <button
+                        type="button"
+                        className="text-btn"
+                        disabled={busy}
+                        onClick={() =>
+                          void removeSource(source.id).then(() => reportOk('Removed source'))
+                        }
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <p className="fine-print">
+              Use only IPTV services and streams you subscribe to or otherwise have the right to
+              watch.
+            </p>
+          </section>
+        </div>
+
+        <section className="panel library-import">
           <h2>IPTV providers</h2>
           <p>
             Enter a panel host, open playlist URL, or <code>get.php</code> link. Username and
@@ -346,7 +500,7 @@ export function LibraryPage() {
                 <input
                   id="iptv-user"
                   className="url-input"
-                  placeholder="Leave blank if not required"
+                  placeholder="Optional"
                   value={iptvUser}
                   onChange={(e) => setIptvUser(e.target.value)}
                   disabled={busy || !ready}
@@ -361,7 +515,7 @@ export function LibraryPage() {
                   id="iptv-pass"
                   type="password"
                   className="url-input"
-                  placeholder="Leave blank if not required"
+                  placeholder="Optional"
                   value={iptvPass}
                   onChange={(e) => setIptvPass(e.target.value)}
                   disabled={busy || !ready}
@@ -427,18 +581,6 @@ export function LibraryPage() {
             <button type="button" className="primary-btn" onClick={importFromDesktop} disabled={busy || !ready}>
               Choose playlist file(s)
             </button>
-            {importedCount > 0 && (
-              <button
-                type="button"
-                className="ghost-btn"
-                disabled={busy}
-                onClick={() => {
-                  void clearImported().then(() => reportOk('Cleared all imported sources'))
-                }}
-              >
-                Clear all imported
-              </button>
-            )}
           </div>
           <input
             ref={fileRef}
@@ -467,81 +609,11 @@ export function LibraryPage() {
           {message && <p className="toast">{message}</p>}
           {error && <p className="toast toast-error">{error}</p>}
         </section>
-
-        <section className="panel">
-          <h2>Shelf counts</h2>
-          <ul className="count-list">
-            {SECTIONS.map((s) => (
-              <li key={s.id}>
-                <span>{s.label}</span>
-                <strong>{byCategory(s.id).length.toLocaleString()}</strong>
-              </li>
-            ))}
-            <li>
-              <span>Imported total</span>
-              <strong>{importedCount.toLocaleString()}</strong>
-            </li>
-            <li>
-              <span>Active sources</span>
-              <strong>{sources.length.toLocaleString()}</strong>
-            </li>
-          </ul>
-
-          <div className="sources-head">
-            <h2>Sources ({sources.length})</h2>
-            {remoteSourceCount > 0 && (
-              <button type="button" className="ghost-btn" disabled={busy} onClick={() => void onRefreshAll()}>
-                Refresh all remote
-              </button>
-            )}
-          </div>
-          {sources.length === 0 ? (
-            <p className="fine-print">No imported sources yet. Add several links above — they all stack.</p>
-          ) : (
-            <ul className="source-list">
-              {sources.map((source) => (
-                <li key={source.id}>
-                  <div>
-                    <strong title={source.label}>{source.label}</strong>
-                    <span>
-                      {source.kind.toUpperCase()} · {source.itemCount.toLocaleString()} entries
-                      {sourceHealth[source.id] ? ` · ${sourceHealth[source.id]}` : ''}
-                    </span>
-                  </div>
-                  <div className="source-actions">
-                    {source.url && (
-                      <>
-                        <button
-                          type="button"
-                          className="text-btn"
-                          disabled={busy || sourceHealth[source.id] === 'checking'}
-                          onClick={() => void onCheckSource(source.id, source.url)}
-                        >
-                          Check
-                        </button>
-                        <button type="button" className="text-btn" disabled={busy} onClick={() => void onRefresh(source.id)}>
-                          Refresh
-                        </button>
-                      </>
-                    )}
-                    <button
-                      type="button"
-                      className="text-btn"
-                      disabled={busy}
-                      onClick={() => void removeSource(source.id).then(() => reportOk('Removed source'))}
-                    >
-                      Remove
-                    </button>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-          <p className="fine-print">
-            Use only IPTV services and streams you subscribe to or otherwise have the right to watch.
-          </p>
-        </section>
       </div>
+
+      <section className="panel library-websites-panel">
+        <TorrentsPage embedded />
+      </section>
     </div>
   )
 }
