@@ -1,8 +1,22 @@
-import { useWebBrowser } from '../context/WebBrowserContext'
+import { useEffect, useState } from 'react'
+import { getPipLayout, useWebBrowser } from '../context/WebBrowserContext'
 
 /** Floating chrome for web-browser PiP (native WebContentsView draws the page). */
 export function WebBrowserPip() {
   const { mode, nav, expandFromPip, closeBrowser, fullscreen, toggleFullscreen } = useWebBrowser()
+  const [layout, setLayout] = useState(() =>
+    typeof window === 'undefined'
+      ? { width: 320, margin: 12, stageHeight: 180, chromeHeight: 36, chromeY: 0 }
+      : getPipLayout(),
+  )
+
+  useEffect(() => {
+    if (mode !== 'pip' || fullscreen) return
+    const sync = () => setLayout(getPipLayout())
+    sync()
+    window.addEventListener('resize', sync)
+    return () => window.removeEventListener('resize', sync)
+  }, [mode, fullscreen])
 
   if (fullscreen && mode === 'pip') {
     return (
@@ -20,7 +34,15 @@ export function WebBrowserPip() {
   if (mode !== 'pip') return null
 
   return (
-    <div className="web-browser-pip">
+    <div
+      className="web-browser-pip"
+      style={{
+        width: layout.width,
+        height: layout.chromeHeight,
+        right: layout.margin,
+        bottom: layout.margin + layout.stageHeight,
+      }}
+    >
       <div className="web-browser-pip-bar">
         <button
           type="button"

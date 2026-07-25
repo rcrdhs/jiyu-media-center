@@ -16,7 +16,7 @@ import type { StreamItem } from '../types'
  * Bump whenever a site adapter changes how titles/posters are extracted, so
  * already-synced shelves are rebuilt automatically on the next launch.
  */
-export const TORRENT_SCRAPER_VERSION = 11
+export const TORRENT_SCRAPER_VERSION = 14
 
 export interface TorrentSyncProgress {
   sourceId: string
@@ -57,7 +57,7 @@ export async function syncTorrentSource(
         label: source.label,
         page: pages,
         added: byId.size,
-        message: `Syncing ${source.label} · ${feed.category} · page ${page}`,
+        message: `Updating catalog · ${feed.category} · page ${page}`,
       })
       const outcome = await scrapePage(url, source.label)
       if (outcome.error && outcome.links.length === 0) {
@@ -102,7 +102,7 @@ export async function syncTorrentSource(
     label: source.label,
     page: pages,
     added: items.length,
-    message: `Synced ${items.length.toLocaleString()} titles from ${source.label}`,
+    message: `Synced ${items.length.toLocaleString()} titles to the catalog`,
   })
 
   return {

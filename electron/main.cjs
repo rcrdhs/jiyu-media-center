@@ -879,10 +879,17 @@ ipcMain.handle('page:fetchHtml', async (_event, url) => {
     if (typeof url !== 'string' || !/^https?:\/\//i.test(url.trim())) {
       return { ok: false, status: 0, content: '', error: 'Invalid page URL' }
     }
-    const target = url.trim()
+    let target = url.trim()
     let host = ''
     try {
-      host = new URL(target).hostname
+      const parsed = new URL(target)
+      host = parsed.hostname
+      // Apex torlock.com has an invalid cert in Chromium; prefer www.
+      if (/^torlock\.com$/i.test(host)) {
+        parsed.hostname = 'www.torlock.com'
+        target = parsed.toString()
+        host = parsed.hostname
+      }
     } catch {
       return { ok: false, status: 0, content: '', error: 'Invalid page URL' }
     }

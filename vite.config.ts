@@ -25,6 +25,10 @@ export default defineConfig({
     host: 'localhost',
     port: 5173,
     strictPort: true,
+    watch: {
+      // Scratch HTML under scripts/ must not trigger full page reloads.
+      ignored: ['**/scripts/**'],
+    },
   },
   build: {
     outDir: 'dist',

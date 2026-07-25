@@ -29,6 +29,8 @@ import {
   type PlaylistKind,
   type PlaylistSource,
 } from '../lib/playlistStore'
+import { appendActivity } from '../lib/activityLog'
+import { maskActivityMessage } from '../lib/sourceMask'
 import { listTorrentCatalog, loadTorrentCatalogMeta } from '../lib/torrentCatalogStore'
 import { isSubsPleaseUrl, loadTorrentSources } from '../lib/torrents'
 import {
@@ -349,19 +351,24 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
     async (sourceId: string) => {
       const source = loadTorrentSources().find((s) => s.id === sourceId)
       if (!source) return { added: 0, error: 'Website not found' }
-      setTorrentSyncMessage(`Updating ${source.label}…`)
+      setTorrentSyncMessage('Updating catalog…')
       try {
-        const result = await syncTorrentSource(source, (p) => setTorrentSyncMessage(p.message))
-        await reloadTorrentCatalog()
-        setTorrentSyncMessage(
-          result.error
-            ? result.error
-            : `Added ${result.added.toLocaleString()} titles from ${source.label}`,
+        const result = await syncTorrentSource(source, (p) =>
+          setTorrentSyncMessage(maskActivityMessage(p.message)),
         )
+        await reloadTorrentCatalog()
+        const summary = result.error
+          ? maskActivityMessage(result.error)
+          : `Added ${result.added.toLocaleString()} titles to the catalog`
+        setTorrentSyncMessage(summary)
+        appendActivity(result.error ? 'error' : 'sync', summary)
         return { added: result.added, error: result.error }
       } catch (err) {
-        const message = err instanceof Error ? err.message : 'Catalog update failed'
+        const message = maskActivityMessage(
+          err instanceof Error ? err.message : 'Catalog update failed',
+        )
         setTorrentSyncMessage(message)
+        appendActivity('error', message)
         return { added: 0, error: message }
       }
     },
@@ -371,11 +378,15 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
   const syncAllTorrentWebsites = useCallback(async () => {
     const list = loadTorrentSources()
     if (list.length === 0) return { added: 0, sources: 0 }
-    setTorrentSyncMessage('Updating website catalogs…')
-    const results = await syncAllTorrentSources(list, (p) => setTorrentSyncMessage(p.message))
+    setTorrentSyncMessage('Updating catalog…')
+    const results = await syncAllTorrentSources(list, (p) =>
+      setTorrentSyncMessage(maskActivityMessage(p.message)),
+    )
     await reloadTorrentCatalog()
     const added = results.reduce((sum, r) => sum + r.added, 0)
-    setTorrentSyncMessage(`Synced ${added.toLocaleString()} titles from websites`)
+    const summary = `Synced ${added.toLocaleString()} titles to the catalog`
+    setTorrentSyncMessage(summary)
+    appendActivity('sync', summary)
     return { added, sources: list.length }
   }, [reloadTorrentCatalog])
 

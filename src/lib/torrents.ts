@@ -300,6 +300,74 @@ function isTorlockUrl(pageUrl: string): boolean {
   }
 }
 
+/** Apex torlock.com often fails TLS in Electron — always use www. */
+function normalizeTorlockOrigin(originOrUrl: string): string {
+  try {
+    const u = new URL(originOrUrl)
+    if (/(^|\.)torlock\.com$/i.test(u.hostname)) {
+      u.protocol = 'https:'
+      u.hostname = 'www.torlock.com'
+      return u.origin
+    }
+    return u.origin
+  } catch {
+    return 'https://www.torlock.com'
+  }
+}
+
+function isTorlockTorznabUrl(pageUrl: string): boolean {
+  try {
+    const u = new URL(pageUrl)
+    return isTorlockUrl(pageUrl) && /\/torznab\/api\/?$/i.test(u.pathname)
+  } catch {
+    return false
+  }
+}
+
+/** Torlock Torznab categories (from /torznab/api?t=caps). */
+const TORLOCK_CAT = {
+  movies: 2000,
+  series: 5000,
+  anime: 5070,
+} as const
+
+const TORLOCK_PAGE_SIZE = 100
+
+function torlockTorznabUrl(
+  origin: string,
+  category: keyof typeof TORLOCK_CAT,
+  offset = 0,
+): string {
+  const u = new URL('/torznab/api', normalizeTorlockOrigin(origin))
+  u.searchParams.set('t', 'search')
+  u.searchParams.set('cat', String(TORLOCK_CAT[category]))
+  u.searchParams.set('q', '')
+  u.searchParams.set('limit', String(TORLOCK_PAGE_SIZE))
+  u.searchParams.set('offset', String(Math.max(0, offset)))
+  return u.toString()
+}
+
+function torlockCategoryFromUrl(pageUrl: string): keyof typeof TORLOCK_CAT | null {
+  try {
+    const cat = new URL(pageUrl).searchParams.get('cat')
+    if (cat === String(TORLOCK_CAT.movies)) return 'movies'
+    if (cat === String(TORLOCK_CAT.anime)) return 'anime'
+    if (cat === String(TORLOCK_CAT.series)) return 'series'
+  } catch {
+    /* ignore */
+  }
+  if (/\/anime\b/i.test(pageUrl)) return 'anime'
+  if (/\/television\b|\/tv\b/i.test(pageUrl)) return 'series'
+  if (/\/movie/i.test(pageUrl)) return 'movies'
+  return null
+}
+
+function isTorlockDecoyTitle(title: string): boolean {
+  const t = title.replace(/\s+/g, ' ').trim()
+  if (!t) return true
+  return /^\[?movies?\]?(?:\s*[-–:]\s*.*)?$/i.test(t) && t.length < 40
+}
+
 export function isYtsUrl(pageUrl: string): boolean {
   try {
     return isYifyHost(new URL(pageUrl).hostname)
@@ -490,8 +558,9 @@ export function parseReleaseDate(text: string, now = Date.now()): number | undef
 }
 
 /**
- * Torlock uses table links for headings, sorting and navigation. Only its
- * /torrent/<id>/<slug>.html links represent playable detail pages.
+ * Torlock HTML listings: detail pages are /torrent/<id>/<slug>.html on
+ * torlock.com (often unquoted hrefs). Ads use rotating *.t0r.space hosts with
+ * decoy "Movie - Full Version" titles — skip those.
  */
 function scrapeTorlockLinks(html: string, pageUrl: string): TorrentPageLink[] {
   const doc = new DOMParser().parseFromString(html, 'text/html')
@@ -508,8 +577,19 @@ function scrapeTorlockLinks(html: string, pageUrl: string): TorrentPageLink[] {
     } catch {
       continue
     }
-    if (!/(^|\.)torlock\.com$/i.test(url.hostname)) continue
+    const hostOk =
+      /(^|\.)torlock\.com$/i.test(url.hostname) || /(^|\.)t0r\.space$/i.test(url.hostname)
+    if (!hostOk) continue
     if (!/^\/torrent\/\d+\/[^/]+\.html$/i.test(url.pathname)) continue
+
+    // Prefer the canonical torlock.com detail URL when the href is on t0r.space.
+    if (/(^|\.)t0r\.space$/i.test(url.hostname)) {
+      try {
+        url = new URL(url.pathname, 'https://www.torlock.com')
+      } catch {
+        continue
+      }
+    }
 
     url.hash = ''
     const absolute = url.toString()
@@ -521,7 +601,7 @@ function scrapeTorlockLinks(html: string, pageUrl: string): TorrentPageLink[] {
         anchor.textContent?.replace(/\s+/g, ' ').trim() ||
         '',
     )
-    if (title.length < 2) continue
+    if (title.length < 2 || isTorlockDecoyTitle(title)) continue
 
     const rowText = row?.textContent?.replace(/\s+/g, ' ').trim() ?? ''
 
@@ -551,6 +631,128 @@ function scrapeTorlockLinks(html: string, pageUrl: string): TorrentPageLink[] {
   }
 
   return links
+}
+
+function xmlTagText(block: string, tag: string): string {
+  const m = block.match(new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)</${tag}>`, 'i'))
+  if (!m) return ''
+  return m[1]
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/gi, '$1')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .trim()
+}
+
+function torznabAttr(block: string, name: string): string {
+  const m = block.match(
+    new RegExp(`<torznab:attr[^>]*name="${name}"[^>]*value="([^"]*)"`, 'i'),
+  )
+  return m?.[1]?.trim() ?? ''
+}
+
+/** Parse Torlock Torznab RSS into catalog links (preferred over HTML scrape). */
+function scrapeTorlockTorznab(xml: string, pageUrl: string): {
+  links: TorrentPageLink[]
+  nextPage: string | null
+} {
+  const feedCategory = torlockCategoryFromUrl(pageUrl) ?? 'movies'
+  const origin = new URL(pageUrl).origin
+  const offset = Math.max(0, Number(new URL(pageUrl).searchParams.get('offset') || 0) || 0)
+  const links: TorrentPageLink[] = []
+  const seen = new Set<string>()
+
+  for (const m of xml.matchAll(/<item>([\s\S]*?)<\/item>/gi)) {
+    const block = m[1]
+    const title = cleanMovieTitle(xmlTagText(block, 'title'))
+    if (title.length < 2 || isTorlockDecoyTitle(title)) continue
+
+    const catAttr = torznabAttr(block, 'category') || xmlTagText(block, 'category')
+    // Parent TV (5000) responses can include Anime (5070) — keep shelves clean.
+    if (feedCategory === 'series' && catAttr === String(TORLOCK_CAT.anime)) continue
+    if (feedCategory === 'anime' && catAttr && catAttr !== String(TORLOCK_CAT.anime)) continue
+    if (feedCategory === 'movies' && catAttr && catAttr !== String(TORLOCK_CAT.movies)) continue
+
+    const guid = xmlTagText(block, 'guid') || xmlTagText(block, 'comments')
+    const magnet =
+      torznabAttr(block, 'magneturl') ||
+      (() => {
+        const link = xmlTagText(block, 'link')
+        return /^magnet:\?/i.test(link) ? link : ''
+      })()
+    let detail = guid
+    if (!detail || !/^https?:\/\//i.test(detail)) {
+      const pathMatch = /\/torrent\/\d+\/[^/\s]+\.html/i.exec(block)
+      detail = pathMatch ? new URL(pathMatch[0], origin).toString() : ''
+    }
+    if (!detail && !magnet) continue
+    const url = detail || magnet
+    if (seen.has(url)) continue
+    seen.add(url)
+
+    const pub = xmlTagText(block, 'pubDate')
+    const releasedAt = pub ? Date.parse(pub) : undefined
+    const seeders = Number(torznabAttr(block, 'seeders') || 0) || 0
+
+    links.push({
+      title: title.slice(0, 180),
+      url,
+      summary: seeders ? `${seeders.toLocaleString()} seeders` : 'Torlock',
+      category: feedCategory,
+      releasedAt: Number.isFinite(releasedAt) ? releasedAt : undefined,
+      torrentUri: magnet || undefined,
+    })
+  }
+
+  // First page only — do not offer further Torznab offsets.
+  return { links, nextPage: null }
+}
+
+async function scrapeTorlockPage(
+  pageUrl: string,
+  sourceLabel: string,
+): Promise<TorrentScrapeOutcome> {
+  // Prefer Torznab — HTML listings hide/obfuscate titles and break plain scrapers.
+  let apiUrl = pageUrl
+  if (!isTorlockTorznabUrl(pageUrl)) {
+    const origin = new URL(pageUrl).origin
+    const category = torlockCategoryFromUrl(pageUrl) ?? 'movies'
+    apiUrl = torlockTorznabUrl(origin, category, 0)
+  }
+
+  const { ok, content, error: fetchError } = await fetchText(apiUrl)
+  if (!ok) {
+    return emptyOutcome(apiUrl, sourceLabel, fetchError || 'could not load Torznab feed')
+  }
+  if (!/<item[\s>]/i.test(content) && !/<rss[\s>]/i.test(content)) {
+    return emptyOutcome(apiUrl, sourceLabel, 'Torznab response was not a feed')
+  }
+
+  const { links, nextPage } = scrapeTorlockTorznab(content, apiUrl)
+  const searchTemplate = (() => {
+    const u = new URL('/torznab/api', new URL(apiUrl).origin)
+    u.searchParams.set('t', 'search')
+    u.searchParams.set('cat', String(TORLOCK_CAT.movies))
+    u.searchParams.set('q', QUERY_TOKEN)
+    u.searchParams.set('limit', String(TORLOCK_PAGE_SIZE))
+    u.searchParams.set('offset', '0')
+    return u.toString()
+  })()
+  return {
+    results: [],
+    links,
+    pageTitle: sourceLabel,
+    pageUrl: apiUrl,
+    nextPage,
+    prevPage: null,
+    searchTemplate,
+    error:
+      links.length === 0
+        ? `${sourceLabel}: Torznab feed returned no titles`
+        : null,
+  }
 }
 
 /**
@@ -1213,8 +1415,13 @@ function findSearchTemplate(
   }
 
   if (isTorlockUrl(pageUrl)) {
-    // Search within Torlock's Movies category
-    return `${pageOrigin}/movie/torrents/${QUERY_PATH_TOKEN}.html`
+    const u = new URL('/torznab/api', pageOrigin)
+    u.searchParams.set('t', 'search')
+    u.searchParams.set('cat', String(TORLOCK_CAT.movies))
+    u.searchParams.set('q', QUERY_TOKEN)
+    u.searchParams.set('limit', String(TORLOCK_PAGE_SIZE))
+    u.searchParams.set('offset', '0')
+    return u.toString()
   }
 
   if (isYtsSource(pageUrl, sourceLabel)) {
@@ -2031,6 +2238,10 @@ export async function scrapePage(
   // YTS HTML is Cloudflare-blocked; use the JSON API (same pattern as EZTV).
   // Match by host, API path, or a source label that contains "yts" / "yify".
   if (isYtsSource(pageUrl, sourceLabel)) return scrapeYtsPage(pageUrl, sourceLabel)
+  // Torlock HTML obfuscates listing titles; use their public Torznab API.
+  if (isTorlockUrl(pageUrl) || isTorlockTorznabUrl(pageUrl)) {
+    return scrapeTorlockPage(pageUrl, sourceLabel)
+  }
   const { ok, content, error: fetchError } = await fetchText(pageUrl)
   if (!ok) {
     return {
@@ -2060,14 +2271,8 @@ export async function scrapePage(
 /** Fetch a saved website's front page. */
 export function scrapeWebsite(source: TorrentSource): Promise<TorrentScrapeOutcome> {
   if (isTorlockUrl(source.url)) {
-    const sourceUrl = new URL(source.url)
-    // Torlock's /all/ route mixes matching software, music and other
-    // categories into the results. Its /movie/ route applies the site's own
-    // Movies category filter before Jiyu parses the page.
-    sourceUrl.pathname = '/movie/torrents/movie.html'
-    sourceUrl.search = ''
-    sourceUrl.hash = ''
-    return scrapePage(sourceUrl.toString(), source.label)
+    const origin = new URL(source.url).origin
+    return scrapePage(torlockTorznabUrl(origin, 'movies', 0), source.label)
   }
   if (isYtsSource(source.url, source.label)) {
     const origin = new URL(source.url).origin
@@ -2100,19 +2305,19 @@ export function catalogFeedsForSource(source: TorrentSource): CatalogFeed[] {
     if (isTorlockUrl(source.url)) {
       return [
         {
-          url: `${origin}/movie/torrents/movie.html?sort=added`,
+          url: torlockTorznabUrl(origin, 'movies', 0),
           category: 'movies',
-          maxPages: 8,
+          maxPages: 1,
         },
         {
-          url: `${origin}/television/torrents/television.html?sort=added`,
+          url: torlockTorznabUrl(origin, 'series', 0),
           category: 'series',
-          maxPages: 6,
+          maxPages: 1,
         },
         {
-          url: `${origin}/anime/torrents/anime.html?sort=added`,
+          url: torlockTorznabUrl(origin, 'anime', 0),
           category: 'anime',
-          maxPages: 6,
+          maxPages: 1,
         },
       ]
     }
@@ -2177,9 +2382,9 @@ export function linkToCatalogItem(
     category,
     url: link.url,
     poster: link.poster,
-    // Category only on the card — source site stays on `source`, not in tags.
+    // Category only on the card — never put origin hostnames in shelf-facing fields.
     tags: [category],
-    source: source.label,
+    source: 'Web catalog',
     sourceKind: 'torrent',
     transport: 'torrent',
     torrentUri: link.torrentUri,

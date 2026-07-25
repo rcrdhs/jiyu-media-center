@@ -8,12 +8,13 @@ import {
 } from 'react'
 import { useCatalog } from './CatalogContext'
 import {
+  DEFAULT_EPG_URLS,
   extractEpgUrlsFromM3U,
-  fetchEpgXml,
   getManualEpgUrl,
+  loadEpgFromUrls,
   matchEpgChannelId,
   nowNext,
-  parseXmltvAsync,
+  parseEpgUrlList,
   setManualEpgUrl,
   type EpgData,
   type EpgProgramme,
@@ -27,6 +28,9 @@ interface EpgContextValue {
   manualUrl: string
   setManualUrl: (url: string) => void
   discoveredUrls: string[]
+  /** URLs that will be fetched on refresh (manual → playlist → defaults). */
+  activeUrls: string[]
+  /** First active URL (for compact UI labels). */
   activeUrl: string | null
   refresh: (url?: string) => Promise<void>
   channelIdFor: (item: StreamItem) => string | null
@@ -50,7 +54,14 @@ export function EpgProvider({ children }: { children: ReactNode }) {
     return [...new Set(urls)]
   }, [sources])
 
-  const activeUrl = manualUrl.trim() || discoveredUrls[0] || null
+  const activeUrls = useMemo(() => {
+    const manual = parseEpgUrlList(manualUrl)
+    if (manual.length > 0) return manual
+    if (discoveredUrls.length > 0) return discoveredUrls
+    return [...DEFAULT_EPG_URLS]
+  }, [manualUrl, discoveredUrls])
+
+  const activeUrl = activeUrls[0] || null
 
   const setManualUrl = useCallback((url: string) => {
     setManualEpgUrl(url)
@@ -59,8 +70,8 @@ export function EpgProvider({ children }: { children: ReactNode }) {
 
   const refresh = useCallback(
     async (url?: string) => {
-      const target = (url ?? activeUrl)?.trim()
-      if (!target) {
+      const targets = url?.trim() ? parseEpgUrlList(url) : activeUrls
+      if (targets.length === 0) {
         setError('Add an EPG (XMLTV) URL in Library, or import a playlist with url-tvg.')
         setData(null)
         return
@@ -68,11 +79,7 @@ export function EpgProvider({ children }: { children: ReactNode }) {
       setLoading(true)
       setError(null)
       try {
-        const xml = await fetchEpgXml(target)
-        const parsed = await parseXmltvAsync(xml, target)
-        if (parsed.programmes.length === 0 && parsed.channels.length === 0) {
-          throw new Error('EPG loaded but contained no programmes')
-        }
+        const parsed = await loadEpgFromUrls(targets)
         setData(parsed)
       } catch (err) {
         setData(null)
@@ -81,7 +88,7 @@ export function EpgProvider({ children }: { children: ReactNode }) {
         setLoading(false)
       }
     },
-    [activeUrl],
+    [activeUrls],
   )
 
   const channelIdFor = useCallback(
@@ -110,6 +117,7 @@ export function EpgProvider({ children }: { children: ReactNode }) {
       manualUrl,
       setManualUrl,
       discoveredUrls,
+      activeUrls,
       activeUrl,
       refresh,
       channelIdFor,
@@ -122,6 +130,7 @@ export function EpgProvider({ children }: { children: ReactNode }) {
       manualUrl,
       setManualUrl,
       discoveredUrls,
+      activeUrls,
       activeUrl,
       refresh,
       channelIdFor,

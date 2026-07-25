@@ -12,6 +12,8 @@ interface CatalogGridProps {
   showToolbar?: boolean
   /** Hide offline/timeout as soon as check finishes (default on) */
   autoHideUnresponsive?: boolean
+  /** Online only / Auto-hide / Check streams (IPTV health). Off for torrent shelves. */
+  showHealthFilters?: boolean
 }
 
 export function CatalogGrid({
@@ -20,16 +22,19 @@ export function CatalogGrid({
   autoCheck = false,
   showToolbar = true,
   autoHideUnresponsive = true,
+  showHealthFilters = true,
 }: CatalogGridProps) {
   const { checkMany, getStatus, checkingCount } = useStreamHealth()
   const { hideDuplicates, setHideDuplicates } = useCatalog()
   const [filterOnline, setFilterOnline] = useState(false)
-  const [hideOffline, setHideOffline] = useState(autoHideUnresponsive)
+  const [hideOffline, setHideOffline] = useState(
+    showHealthFilters ? autoHideUnresponsive : false,
+  )
   const itemKey = items.map((i) => i.id).join('|')
 
   useEffect(() => {
-    setHideOffline(autoHideUnresponsive)
-  }, [autoHideUnresponsive])
+    setHideOffline(showHealthFilters ? autoHideUnresponsive : false)
+  }, [autoHideUnresponsive, showHealthFilters])
 
   useEffect(() => {
     if (!autoCheck || items.length === 0) return
@@ -83,38 +88,42 @@ export function CatalogGrid({
     <div className="catalog-block">
       {showToolbar && (
         <div className="health-toolbar">
-          <button
-            type="button"
-            className="primary-btn"
-            disabled={checkingCount > 0 || probeable.length === 0}
-            onClick={() => void checkMany(probeable)}
-          >
-            {checkingCount > 0
-              ? `Checking ${checkingCount.toLocaleString()}…`
-              : `Check ${probeable.length.toLocaleString()} stream${probeable.length === 1 ? '' : 's'}`}
-          </button>
-          <label className="check-toggle">
-            <input
-              type="checkbox"
-              checked={filterOnline}
-              onChange={(e) => {
-                setFilterOnline(e.target.checked)
-                if (e.target.checked) setHideOffline(false)
-              }}
-            />
-            Online only
-          </label>
-          <label className="check-toggle">
-            <input
-              type="checkbox"
-              checked={hideOffline}
-              onChange={(e) => {
-                setHideOffline(e.target.checked)
-                if (e.target.checked) setFilterOnline(false)
-              }}
-            />
-            Auto-hide unresponsive
-          </label>
+          {showHealthFilters && (
+            <>
+              <button
+                type="button"
+                className="primary-btn"
+                disabled={checkingCount > 0 || probeable.length === 0}
+                onClick={() => void checkMany(probeable)}
+              >
+                {checkingCount > 0
+                  ? `Checking ${checkingCount.toLocaleString()}…`
+                  : `Check ${probeable.length.toLocaleString()} stream${probeable.length === 1 ? '' : 's'}`}
+              </button>
+              <label className="check-toggle">
+                <input
+                  type="checkbox"
+                  checked={filterOnline}
+                  onChange={(e) => {
+                    setFilterOnline(e.target.checked)
+                    if (e.target.checked) setHideOffline(false)
+                  }}
+                />
+                Online only
+              </label>
+              <label className="check-toggle">
+                <input
+                  type="checkbox"
+                  checked={hideOffline}
+                  onChange={(e) => {
+                    setHideOffline(e.target.checked)
+                    if (e.target.checked) setFilterOnline(false)
+                  }}
+                />
+                Auto-hide unresponsive
+              </label>
+            </>
+          )}
           <label className="check-toggle">
             <input
               type="checkbox"
@@ -123,25 +132,28 @@ export function CatalogGrid({
             />
             Hide duplicates
           </label>
-          {probeable.length > 0 ? (
-            <span className="health-summary">
-              <em className="online">{onlineCount}</em> up · <em className="offline">{offlineCount}</em>{' '}
-              down
-              {pendingCount > 0 ? ` · ${pendingCount} pending` : ''}
-              {autoCheck ? ' · auto-check' : ''}
-            </span>
-          ) : (
-            <span className="health-summary">No live streams to check</span>
-          )}
+          {showHealthFilters &&
+            (probeable.length > 0 ? (
+              <span className="health-summary">
+                <em className="online">{onlineCount}</em> up ·{' '}
+                <em className="offline">{offlineCount}</em> down
+                {pendingCount > 0 ? ` · ${pendingCount} pending` : ''}
+                {autoCheck ? ' · auto-check' : ''}
+              </span>
+            ) : (
+              <span className="health-summary">No live streams to check</span>
+            ))}
         </div>
       )}
 
       {visibleItems.length === 0 ? (
         <div className="empty-state">
           <p>
-            {checkingCount > 0
+            {showHealthFilters && checkingCount > 0
               ? 'Checking streams… dead ones disappear as they’re found.'
-              : 'No reachable streams in this view. Uncheck “Auto-hide unresponsive” or refresh your playlist.'}
+              : showHealthFilters
+                ? 'No reachable streams in this view. Uncheck “Auto-hide unresponsive” or refresh your playlist.'
+                : emptyHint ?? 'Nothing matches this view.'}
           </p>
         </div>
       ) : (

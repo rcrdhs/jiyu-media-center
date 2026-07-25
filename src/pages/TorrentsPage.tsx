@@ -369,7 +369,7 @@ export function TorrentsPage({ embedded = false }: TorrentsPageProps) {
         </p>
       )}
 
-      {torrentSyncMessage && <p className="fine-print">{torrentSyncMessage}</p>}
+      {/* Sync status lives in Library → Activity log (masked). */}
 
       <form className="guide-toolbar" onSubmit={addSource}>
         <input

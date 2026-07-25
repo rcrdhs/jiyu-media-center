@@ -28,7 +28,8 @@ function qualityBonus(title: string): number {
 }
 
 function countryBonus(tvgId: string): number {
-  const cc = /\.([a-z]{2})$/i.exec(tvgId)?.[1]?.toLowerCase()
+  // IPTV-Org ids look like CNN.us@SD — country is before optional @quality.
+  const cc = /\.([a-z]{2})(?:@|$)/i.exec(tvgId)?.[1]?.toLowerCase()
   if (!cc) return 0
   if (cc === 'us' || cc === 'uk' || cc === 'gb') return 14
   if (cc === 'ca' || cc === 'au' || cc === 'ie' || cc === 'nz' || cc === 'jm') return 10

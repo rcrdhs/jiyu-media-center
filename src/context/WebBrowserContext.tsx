@@ -59,14 +59,28 @@ function boundsFromElement(el: HTMLElement): BrowserBounds {
   }
 }
 
-function pipStageBounds(): BrowserBounds {
+/** Shared geometry for native stage + HTML chrome so they stay pixel-aligned. */
+export function getPipLayout() {
   const width = Math.round(Math.min(PIP_WIDTH, window.innerWidth * 0.42))
+  const margin = PIP_MARGIN
+  const stageHeight = PIP_HEIGHT
+  const chromeHeight = PIP_CHROME
+  const x = Math.round(window.innerWidth - width - margin)
+  const stageY = Math.round(window.innerHeight - stageHeight - margin)
   return {
-    x: Math.round(window.innerWidth - width - PIP_MARGIN),
-    y: Math.round(window.innerHeight - PIP_HEIGHT - PIP_MARGIN),
     width,
-    height: PIP_HEIGHT,
+    margin,
+    stageHeight,
+    chromeHeight,
+    x,
+    stageY,
+    chromeY: stageY - chromeHeight,
   }
+}
+
+function pipStageBounds(): BrowserBounds {
+  const { x, stageY, width, stageHeight } = getPipLayout()
+  return { x, y: stageY, width, height: stageHeight }
 }
 
 function fullscreenBounds(): BrowserBounds {
@@ -398,10 +412,19 @@ export function useWebBrowser() {
 }
 
 export function pipChromeMetrics() {
+  if (typeof window === 'undefined') {
+    return {
+      width: PIP_WIDTH,
+      stageHeight: PIP_HEIGHT,
+      chromeHeight: PIP_CHROME,
+      margin: PIP_MARGIN,
+    }
+  }
+  const layout = getPipLayout()
   return {
-    width: PIP_WIDTH,
-    stageHeight: PIP_HEIGHT,
-    chromeHeight: PIP_CHROME,
-    margin: PIP_MARGIN,
+    width: layout.width,
+    stageHeight: layout.stageHeight,
+    chromeHeight: layout.chromeHeight,
+    margin: layout.margin,
   }
 }

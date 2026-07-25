@@ -43,6 +43,8 @@ export const LOCAL_CHANNELS: StreamItem[] = [
     // Streamlock host is dead. Public HLS from iptv-org Jamaica list (univtec).
     url: 'https://vod2live.univtec.com/manifest/a99a1804-dc83-411f-8c1c-b62f08cdfa59.m3u8',
     poster: 'https://i.imgur.com/R4PoC3L.png',
+    // Matches epgshare JM XMLTV (also try IPTV-Org TVJ.jm@SD via matcher aliases).
+    tvgId: 'Television.Jamaica.jm',
     tags: ['local', 'jamaica', 'live', 'hls'],
     source: 'Local channel',
     language: 'en',
@@ -57,6 +59,7 @@ export const LOCAL_CHANNELS: StreamItem[] = [
     url: 'https://vimeo.com/event/4401057',
     poster:
       'https://static.wikia.nocookie.net/logopedia/images/c/c5/CVM_Television_logo_2023.webp/revision/latest/scale-to-width-down/640?cb=20231225060123',
+    tvgId: 'CVM.Television.Limited.jm',
     tags: ['local', 'jamaica', 'live', 'hls', 'vimeo'],
     source: 'Local channel',
     language: 'en',
@@ -68,6 +71,7 @@ export const LOCAL_CHANNELS: StreamItem[] = [
     category: 'news',
     url: 'https://www.youtube.com/@nationwidenewsnetwork/live',
     poster: 'https://images.unsplash.com/photo-1504711435469-e1ffb926aa56?w=640&q=80',
+    tvgId: 'Jamaican.News.Network.jm',
     tags: ['local', 'jamaica', 'live', 'youtube'],
     source: 'Local channel',
     language: 'en',

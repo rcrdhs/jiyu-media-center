@@ -2,10 +2,35 @@ import type { StreamItem } from '../types'
 import { normalizeTitleKey } from './dedupe'
 
 const EPG_URL_KEY = 'jiyu.epg.url'
+
+/**
+ * Default XMLTV packs that cover Jiyu’s IPTV shelves (US sports/news brands + JM locals)
+ * plus Free TV (mjh) channels seeded in Library. Matched by tvg-id / title — not every
+ * world feed will have listings.
+ */
+export const DEFAULT_EPG_URLS = [
+  'https://epgshare01.online/epgshare01/epg_ripper_US2.xml.gz',
+  'https://epgshare01.online/epgshare01/epg_ripper_JM1.xml.gz',
+  'https://i.mjh.nz/all/epg.xml.gz',
+] as const
+
+/** @deprecated Prefer DEFAULT_EPG_URLS — kept for older call sites. */
+export const DEFAULT_EPG_URL = DEFAULT_EPG_URLS[0]
+
 /** Keep programmes around “now” so huge guides stay usable */
 const PAST_MS = 6 * 3600_000
 const FUTURE_MS = 48 * 3600_000
 const PARSE_CHUNK = 400
+
+/** Extra ids tried when matching local / common brands to epgshare-style channel ids. */
+const EPG_ID_ALIASES: Record<string, string[]> = {
+  'local-tvj': ['Television.Jamaica.jm', 'TVJ.jm', 'TVJ.jm@SD', 'TVJ.Sports.jm'],
+  'local-cvm': ['CVM.Television.Limited.jm', 'CVM.jm'],
+  'local-nationwide': ['Jamaican.News.Network.jm'],
+  tvj: ['Television.Jamaica.jm', 'TVJ.Sports.jm'],
+  cvm: ['CVM.Television.Limited.jm'],
+  nationwide: ['Jamaican.News.Network.jm'],
+}
 
 export interface EpgChannel {
   id: string
@@ -37,6 +62,29 @@ function yieldToMain(): Promise<void> {
   })
 }
 
+function compactKey(key: string): string {
+  return key.replace(/[^a-z0-9]+/g, '')
+}
+
+/** Drop regional / feed suffixes so "ESPN HD East" can match stream title "ESPN". */
+function softTitleKeys(name: string): string[] {
+  const base = normalizeTitleKey(name)
+  if (!base) return []
+  const keys = new Set<string>([base])
+  const stripped = base
+    .replace(
+      /\b(east|west|pacific|atlantic|north|south|central|outer market|alternate|alt|feed|overflow|hd|sd|network|channel|television|tv|usa|us)\b/g,
+      ' ',
+    )
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (stripped) keys.add(stripped)
+  const parts = stripped.split(' ').filter(Boolean)
+  if (parts.length >= 2) keys.add(parts.slice(0, 2).join(' '))
+  if (parts.length >= 1 && parts[0].length >= 4) keys.add(parts[0])
+  return [...keys]
+}
+
 function buildIndexes(
   channels: EpgChannel[],
   programmes: EpgProgramme[],
@@ -57,8 +105,17 @@ function buildIndexes(
   for (const ch of channels) {
     channelById.set(ch.id, ch)
     channelById.set(ch.id.toLowerCase(), ch)
-    const key = normalizeTitleKey(ch.name)
-    if (key && !channelByName.has(key)) channelByName.set(key, ch.id)
+    // IPTV-Org style: CNN.us@SD ↔ CNN.us
+    const bare = ch.id.split('@')[0]
+    if (bare && bare !== ch.id) {
+      if (!channelById.has(bare)) channelById.set(bare, ch)
+      if (!channelById.has(bare.toLowerCase())) channelById.set(bare.toLowerCase(), ch)
+    }
+    for (const key of softTitleKeys(ch.name)) {
+      if (!channelByName.has(key)) channelByName.set(key, ch.id)
+      const compact = compactKey(key)
+      if (compact && !channelByName.has(compact)) channelByName.set(compact, ch.id)
+    }
   }
 
   return {
@@ -70,6 +127,37 @@ function buildIndexes(
     fetchedAt: Date.now(),
     sourceUrl,
   }
+}
+
+/** Split a manual / default EPG field into one or more http(s) URLs. */
+export function parseEpgUrlList(raw: string | null | undefined): string[] {
+  if (!raw?.trim()) return []
+  const parts = raw
+    .split(/[\n,;]+/)
+    .map((p) => p.trim())
+    .filter((p) => /^https?:\/\//i.test(p))
+  return [...new Set(parts)]
+}
+
+export function mergeEpgData(parts: EpgData[]): EpgData | null {
+  if (parts.length === 0) return null
+  if (parts.length === 1) return parts[0]
+  const channels: EpgChannel[] = []
+  const programmes: EpgProgramme[] = []
+  const seenChannel = new Set<string>()
+  for (const part of parts) {
+    for (const ch of part.channels) {
+      if (seenChannel.has(ch.id)) continue
+      seenChannel.add(ch.id)
+      channels.push(ch)
+    }
+    programmes.push(...part.programmes)
+  }
+  return buildIndexes(
+    channels,
+    programmes,
+    parts.map((p) => p.sourceUrl).join(', '),
+  )
 }
 
 /** Pull url-tvg / x-tvg-url from #EXTM3U header line(s) */
@@ -241,15 +329,64 @@ export async function fetchEpgXml(url: string): Promise<string> {
   return xml
 }
 
+function lookupChannelId(data: EpgData, id: string): string | null {
+  const direct =
+    data.channelById.get(id) ||
+    data.channelById.get(id.toLowerCase()) ||
+    data.channelById.get(id.split('@')[0]) ||
+    data.channelById.get(id.split('@')[0].toLowerCase())
+  return direct?.id ?? null
+}
+
 export function matchEpgChannelId(item: StreamItem, data: EpgData): string | null {
-  if (item.tvgId) {
-    const byId =
-      data.channelById.get(item.tvgId) || data.channelById.get(item.tvgId.toLowerCase())
-    if (byId) return byId.id
+  const aliasKeys = [item.id, item.tvgId, normalizeTitleKey(item.title)].filter(
+    Boolean,
+  ) as string[]
+  for (const key of aliasKeys) {
+    for (const alias of EPG_ID_ALIASES[key] || EPG_ID_ALIASES[key.toLowerCase()] || []) {
+      const hit = lookupChannelId(data, alias)
+      if (hit) return hit
+    }
   }
-  const key = normalizeTitleKey(item.title)
-  if (!key) return null
-  return data.channelByName.get(key) ?? null
+
+  if (item.tvgId) {
+    const byId = lookupChannelId(data, item.tvgId)
+    if (byId) return byId
+  }
+
+  for (const key of softTitleKeys(item.title)) {
+    const byName = data.channelByName.get(key) || data.channelByName.get(compactKey(key))
+    if (byName) return byName
+  }
+  return null
+}
+
+/** Fetch + parse one or more XMLTV URLs and merge into a single guide. */
+export async function loadEpgFromUrls(urls: string[]): Promise<EpgData> {
+  const unique = [...new Set(urls.map((u) => u.trim()).filter(Boolean))]
+  if (unique.length === 0) throw new Error('No EPG URL provided')
+
+  const parts: EpgData[] = []
+  const errors: string[] = []
+  for (const url of unique) {
+    try {
+      const xml = await fetchEpgXml(url)
+      const parsed = await parseXmltvAsync(xml, url)
+      if (parsed.channels.length === 0 && parsed.programmes.length === 0) {
+        errors.push(`${url}: empty guide`)
+        continue
+      }
+      parts.push(parsed)
+    } catch (err) {
+      errors.push(`${url}: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  const merged = mergeEpgData(parts)
+  if (!merged) {
+    throw new Error(errors[0] || 'EPG loaded but contained no programmes')
+  }
+  return merged
 }
 
 export function nowNext(

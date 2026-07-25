@@ -6,6 +6,12 @@ import { CatalogGrid } from '../components/CatalogGrid'
 import { ContinueWatching } from '../components/ContinueWatching'
 import { useMainScrollRestore } from '../hooks/useMainScrollRestore'
 import { isVodCategory } from '../lib/continueWatching'
+import {
+  formatSectionGrowth,
+  isGrowthTrackedSection,
+  recordSectionTitleCount,
+  type SectionGrowth,
+} from '../lib/libraryGrowth'
 import { getSectionSourcePrefs, setSectionSourcePrefs } from '../lib/sectionPrefs'
 import { collapseEpisodeRowsToShows, isYtsLabel } from '../lib/torrents'
 import { getMainStage, getSectionView, setSectionView } from '../lib/viewState'
@@ -13,6 +19,17 @@ import type { CategoryId, StreamItem } from '../types'
 
 const PAGE = 120
 const MIXED_SECTIONS = new Set<CategoryId>(['movies', 'series', 'anime'])
+
+function isIptvShelfItem(item: StreamItem): boolean {
+  if (item.sourceKind === 'torrent' || item.transport === 'torrent') return false
+  if (item.sourceKind === 'iptv') return true
+  if (item.tags?.some((t) => /^iptv$/i.test(t))) return true
+  // Playlist imports are direct streams and not builtins.
+  if (item.sourceKind !== 'builtin' && item.transport === 'direct') {
+    if (item.tags?.some((t) => /^imported$/i.test(t))) return true
+  }
+  return false
+}
 
 function sourceRank(item: StreamItem, torrentFirst: boolean): number {
   const kind = item.sourceKind ?? (item.transport === 'torrent' ? 'torrent' : 'iptv')
@@ -79,7 +96,7 @@ function sortSectionItems(
 
 export function SectionPage() {
   const { id } = useParams<{ id: string }>()
-  const { byCategory, ready, englishOnly, torrentCount, torrentSyncMessage } = useCatalog()
+  const { byCategory, ready } = useCatalog()
   const meta = CATEGORIES.find((c) => c.id === id)
   const saved = id ? getSectionView(id) : undefined
   const sentinelRef = useRef<HTMLDivElement>(null)
@@ -93,30 +110,18 @@ export function SectionPage() {
 
   const categoryId = (meta?.id ?? 'series') as CategoryId
   const items = byCategory(categoryId)
+  const trackGrowth = Boolean(meta && isGrowthTrackedSection(meta.id))
 
-  const filtered = useMemo(() => {
+  /** Shelf size without search — used for today/yesterday title counts. */
+  const shelfItems = useMemo(() => {
     let list = items
+    // TV Series (and other mixed shelves): drop IPTV / M3U rows when enabled.
     if (showSourceTools && sourcePrefs.hideIptv) {
-      list = list.filter(
-        (item) =>
-          item.sourceKind === 'torrent' ||
-          item.transport === 'torrent' ||
-          item.sourceKind === 'builtin',
-      )
+      list = list.filter((item) => !isIptvShelfItem(item))
     }
     // TV Series / Anime: one shelf card per show (not every SxxExx release).
     if (categoryId === 'series' || categoryId === 'anime') {
       list = collapseEpisodeRowsToShows(list)
-    }
-    const q = query.trim().toLowerCase()
-    if (q) {
-      list = list.filter(
-        (item) =>
-          item.title.toLowerCase().includes(q) ||
-          item.description.toLowerCase().includes(q) ||
-          item.tags?.some((t) => t.toLowerCase().includes(q)) ||
-          item.source?.toLowerCase().includes(q),
-      )
     }
     if (showSourceTools) {
       list = sortSectionItems(
@@ -127,7 +132,31 @@ export function SectionPage() {
       )
     }
     return list
-  }, [items, query, showSourceTools, sourcePrefs, categoryId])
+  }, [items, showSourceTools, sourcePrefs, categoryId])
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return shelfItems
+    return shelfItems.filter(
+      (item) =>
+        item.title.toLowerCase().includes(q) ||
+        item.description.toLowerCase().includes(q) ||
+        item.tags?.some((t) => t.toLowerCase().includes(q)) ||
+        item.source?.toLowerCase().includes(q),
+    )
+  }, [shelfItems, query])
+
+  const [growth, setGrowth] = useState<SectionGrowth | null>(null)
+
+  useEffect(() => {
+    if (!ready || !trackGrowth) {
+      setGrowth(null)
+      return
+    }
+    setGrowth(recordSectionTitleCount(categoryId, shelfItems.length))
+  }, [ready, trackGrowth, categoryId, shelfItems.length])
+
+  const growthLine = growth ? formatSectionGrowth(growth) : null
 
   const effectiveVisible = Math.min(
     Math.max(visible, PAGE),
@@ -202,23 +231,21 @@ export function SectionPage() {
         <p className="lede">
           {meta.blurb}{' '}
           <span className="count-chip">
-            {filtered.length.toLocaleString()} title{filtered.length === 1 ? '' : 's'}
+            {(query.trim() ? filtered.length : shelfItems.length).toLocaleString()} title
+            {(query.trim() ? filtered.length : shelfItems.length) === 1 ? '' : 's'}
           </span>
-          {torrentCount > 0 && showSourceTools && (
-            <span className="lede-note">
-              {' '}
-              · {torrentCount.toLocaleString()} titles from websites
-            </span>
-          )}
-          {meta.id !== 'anime' && englishOnly && (
-            <span className="lede-note"> · English only (toggle in sidebar)</span>
-          )}
-          {meta.id === 'anime' && (
-            <span className="lede-note"> · All languages (Anime)</span>
-          )}
         </p>
-        {torrentSyncMessage && showSourceTools && (
-          <p className="fine-print">{torrentSyncMessage}</p>
+        {trackGrowth && growth && growthLine && (
+          <p className="section-growth">
+            {growthLine}
+            {growth.delta != null && growth.delta !== 0 && (
+              <span className={growth.delta > 0 ? 'section-growth-up' : 'section-growth-down'}>
+                {' '}
+                ({growth.delta > 0 ? '+' : ''}
+                {growth.delta.toLocaleString()} since yesterday)
+              </span>
+            )}
+          </p>
         )}
       </header>
 
@@ -237,14 +264,16 @@ export function SectionPage() {
             setVisible(PAGE)
           }}
         />
-        <label className="check-toggle tool-toggle">
-          <input
-            type="checkbox"
-            checked={autoCheck}
-            onChange={(e) => setAutoCheck(e.target.checked)}
-          />
-          Auto-check visible streams
-        </label>
+        {!showSourceTools && (
+          <label className="check-toggle tool-toggle">
+            <input
+              type="checkbox"
+              checked={autoCheck}
+              onChange={(e) => setAutoCheck(e.target.checked)}
+            />
+            Auto-check visible streams
+          </label>
+        )}
         {showSourceTools && (
           <>
             <label className="check-toggle tool-toggle">
@@ -253,7 +282,7 @@ export function SectionPage() {
                 checked={sourcePrefs.hideIptv}
                 onChange={(e) => updateSourcePrefs({ hideIptv: e.target.checked })}
               />
-              Playlists last
+              Hide IPTV
             </label>
             <label className="check-toggle tool-toggle">
               <input
@@ -279,7 +308,9 @@ export function SectionPage() {
 
       <CatalogGrid
         items={shown}
-        autoCheck={autoCheck}
+        autoCheck={showSourceTools ? false : autoCheck}
+        showHealthFilters={!showSourceTools}
+        autoHideUnresponsive={!showSourceTools}
         emptyHint={`No ${meta.label.toLowerCase()} titles yet. Import a playlist or add a website in Library to fill this shelf.`}
       />
       {remaining > 0 && (

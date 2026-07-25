@@ -10,4 +10,10 @@ export const DEFAULT_PLAYLISTS = [
     label: 'IPTV-Org News (Top 100)',
     url: 'https://iptv-org.github.io/iptv/categories/news.m3u',
   },
+  /** Ships x-tvg-url + matching tvg-ids so Guide has schedules out of the box. */
+  {
+    id: 'builtin-mjh-free-tv',
+    label: 'Free TV (with guide)',
+    url: 'https://i.mjh.nz/all/raw-tv.m3u8',
+  },
 ] as const

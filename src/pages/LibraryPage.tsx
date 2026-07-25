@@ -2,6 +2,12 @@ import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from 'r
 import { useSearchParams } from 'react-router-dom'
 import { fetchPlaylistContent, useCatalog } from '../context/CatalogContext'
 import { useEpg } from '../context/EpgContext'
+import {
+  clearActivityLog,
+  formatActivityTime,
+  listActivityLog,
+  type ActivityEntry,
+} from '../lib/activityLog'
 import { buildXtreamPlaylistUrl, normalizeIptvPlaylistUrl, type IptvOutput } from '../lib/iptv'
 import { probeStreamUrl } from '../lib/streamHealth'
 import {
@@ -59,6 +65,7 @@ export function LibraryPage() {
   const [busy, setBusy] = useState(false)
   const [progress, setProgress] = useState<string | null>(null)
   const [sourceHealth, setSourceHealth] = useState<Record<string, StreamHealthState>>({})
+  const [activity, setActivity] = useState<ActivityEntry[]>(() => listActivityLog())
   const fileRef = useRef<HTMLInputElement>(null)
   const [searchParams] = useSearchParams()
 
@@ -330,7 +337,7 @@ export function LibraryPage() {
               Collapses same-title / same-URL entries across playlists (default on).
             </p>
             <label className="field-label" htmlFor="epg-url">
-              EPG / XMLTV URL
+              EPG / XMLTV URL(s)
             </label>
             <form
               className="iptv-form"
@@ -339,15 +346,15 @@ export function LibraryPage() {
                 setManualUrl(epgDraft)
                 void refreshEpg(epgDraft.trim() || undefined).then(() => {
                   if (epgDraft.trim()) reportOk('EPG URL saved — guide refreshing')
-                  else reportOk('Manual EPG URL cleared')
+                  else reportOk('Manual EPG cleared — using built-in US/JM guides')
                 })
               }}
             >
-              <input
+              <textarea
                 id="epg-url"
                 className="url-input"
-                type="url"
-                placeholder="https://example.com/epg.xml"
+                rows={3}
+                placeholder="https://epgshare01.online/epgshare01/epg_ripper_US2.xml.gz"
                 value={epgDraft}
                 onChange={(e) => setEpgDraft(e.target.value)}
                 spellCheck={false}
@@ -362,10 +369,58 @@ export function LibraryPage() {
               Active: {activeUrl || 'none'}
               {discoveredUrls.length > 0
                 ? ` · ${discoveredUrls.length} url-tvg from playlists`
-                : ''}
+                : ' · built-in US + Jamaica XMLTV when blank'}
               {epgData ? ` · ${epgData.programmes.length.toLocaleString()} programmes` : ''}
+              . One URL per line, or comma-separated.
             </p>
             {epgError && <p className="toast toast-error">{epgError}</p>}
+          </section>
+
+          <section className="panel library-activity-panel">
+            <details
+              className="library-activity"
+              onToggle={(e) => {
+                if ((e.target as HTMLDetailsElement).open) {
+                  setActivity(listActivityLog())
+                }
+              }}
+            >
+              <summary>Activity log</summary>
+              <p className="fine-print library-privacy-note">
+                Jiyu does not ship analytics or ad trackers. Catalog sync messages are masked so
+                shelves never show origin sites. Torrent playback may still contact BitTorrent
+                trackers listed inside a magnet (normal peer discovery — not app telemetry).
+              </p>
+              {activity.length === 0 ? (
+                <p className="fine-print">No activity recorded yet.</p>
+              ) : (
+                <ul className="activity-log-list">
+                  {activity.map((entry) => (
+                    <li key={entry.id}>
+                      <time dateTime={new Date(entry.at).toISOString()}>
+                        {formatActivityTime(entry.at)}
+                      </time>
+                      <span className={`activity-kind activity-kind-${entry.kind}`}>
+                        {entry.kind}
+                      </span>
+                      <span>{entry.message}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {activity.length > 0 && (
+                <button
+                  type="button"
+                  className="ghost-btn"
+                  onClick={() => {
+                    clearActivityLog()
+                    setActivity([])
+                  }}
+                >
+                  Clear log
+                </button>
+              )}
+            </details>
           </section>
 
           <section className="panel">
