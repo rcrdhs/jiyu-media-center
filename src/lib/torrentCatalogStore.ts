@@ -58,18 +58,22 @@ export async function upsertTorrentItems(items: StreamItem[]): Promise<number> {
 
 export async function deleteTorrentItemsForSource(sourceId: string): Promise<void> {
   const db = await openDb()
-  const tx = db.transaction(STORE, 'readwrite')
-  const store = tx.objectStore(STORE)
-  const index = store.index('torrentSourceId')
-  const req = index.getAllKeys(sourceId)
-  await new Promise<void>((resolve, reject) => {
-    req.onsuccess = () => {
-      for (const key of req.result) store.delete(key)
-      resolve()
-    }
-    req.onerror = () => reject(req.error ?? new Error('Failed to delete source items'))
+  const keys = await new Promise<IDBValidKey[]>((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readonly')
+    const req = tx.objectStore(STORE).index('torrentSourceId').getAllKeys(sourceId)
+    req.onsuccess = () => resolve(req.result ?? [])
+    req.onerror = () => reject(req.error ?? new Error('Failed to list source items'))
   })
-  await txDone(tx)
+  // Batch deletes so a 20k-title library doesn't freeze the main thread.
+  const batchSize = 400
+  for (let i = 0; i < keys.length; i += batchSize) {
+    const chunk = keys.slice(i, i + batchSize)
+    const tx = db.transaction(STORE, 'readwrite')
+    const store = tx.objectStore(STORE)
+    for (const key of chunk) store.delete(key)
+    await txDone(tx)
+    await new Promise((r) => setTimeout(r, 0))
+  }
 }
 
 export async function clearTorrentCatalog(): Promise<void> {

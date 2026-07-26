@@ -43,6 +43,21 @@ const SUBSPLEASE_SOURCE: TorrentSource = {
   url: 'https://subsplease.org/shows/',
 }
 
+function labelSubsPleaseSource(source: TorrentSource): TorrentSource {
+  try {
+    if (!isSubsPleaseUrl(source.url)) return source
+    if (isSubsPleaseShowsListUrl(source.url)) {
+      return { ...source, label: 'subsplease.org · Full Shows' }
+    }
+    if (isSubsPleaseLatestFeedUrl(source.url)) {
+      return { ...source, label: 'subsplease.org · New Releases' }
+    }
+  } catch {
+    /* keep label */
+  }
+  return source
+}
+
 function normalizeTorrentSourceList(parsed: unknown): TorrentSource[] {
   const sources: TorrentSource[] = Array.isArray(parsed)
     ? parsed.filter(
@@ -53,7 +68,7 @@ function normalizeTorrentSourceList(parsed: unknown): TorrentSource[] {
   if (!sources.some((source) => isSubsPleaseUrl(source.url))) {
     sources.push(SUBSPLEASE_SOURCE)
   }
-  return sources
+  return sources.map(labelSubsPleaseSource)
 }
 
 function readTorrentSourcesLocal(): TorrentSource[] {
@@ -1019,11 +1034,11 @@ export function getConnectionDownlinkMbps(): number {
   return typeof conn?.downlink === 'number' && conn.downlink > 0 ? conn.downlink : 0
 }
 
-/** Highest quality a connection can comfortably sustain. */
+/** Highest quality a connection can comfortably sustain. Prefer 720p first. */
 export function targetQualityForSpeed(downlinkMbps: number): number {
-  if (downlinkMbps <= 0) return 1080 // unknown → assume a solid broadband line
+  if (downlinkMbps <= 0) return 720 // unknown → start at 720p
   if (downlinkMbps >= 25) return 2160
-  if (downlinkMbps >= 8) return 1080
+  if (downlinkMbps >= 12) return 1080
   return 720
 }
 
@@ -1130,6 +1145,14 @@ export interface EpisodeChoice {
  * Collapse a flat magnet list (many qualities × many episodes) into one
  * best-quality pick per episode, ordered naturally for the player drawer.
  */
+/** Group key for a release — episode token, or title without quality (movies/OVAs). */
+function episodeGroupKey(title: string): string | null {
+  const ep = parseEpisodeKey(title)
+  if (ep) return ep
+  const showKey = normalizeShowKey(title)
+  return showKey.length >= 2 ? `T:${showKey}` : null
+}
+
 export function buildEpisodeChoices(
   results: TorrentResult[],
   downlinkMbps: number,
@@ -1139,7 +1162,7 @@ export function buildEpisodeChoices(
   const minDistinct = options?.minDistinctEpisodes ?? 2
   const byEpisode = new Map<string, TorrentResult[]>()
   for (const result of results) {
-    const key = parseEpisodeKey(result.title)
+    const key = episodeGroupKey(result.title)
     if (!key) continue
     const list = byEpisode.get(key)
     if (list) list.push(result)
@@ -1249,18 +1272,37 @@ export async function resolveShowEpisodes(
 ): Promise<{ episodes: EpisodeChoice[]; error?: string }> {
   const preference = getViewingQuality()
   const downlink = getConnectionDownlinkMbps()
-  const requestedQuality =
-    preference === 'auto'
-      ? isSubsPleaseUrl(item.detailUrl || item.url)
-        ? 720
-        : undefined
-      : preference
+  // Auto still prefers 720p first (anime + series); explicit prefs win.
+  const requestedQuality = preference === 'auto' ? 720 : preference
 
   // Prefer catalog siblings first (EZTV latest-episode sync → one card per show).
   const fromCatalog = buildCatalogEpisodeChoices(item, catalog, downlink, requestedQuality, {
     minDistinctEpisodes: 1,
   })
   if (fromCatalog.length > 0) return { episodes: fromCatalog }
+
+  // New Releases carry a single-ep magnet plus a show page — scrape the show
+  // so the player still gets the full episode list when possible.
+  let showPage: string | null = null
+  try {
+    if (
+      item.detailUrl &&
+      !item.detailUrl.startsWith('magnet:') &&
+      isSubsPleaseUrl(item.detailUrl) &&
+      /^\/shows\/[^/]+/i.test(new URL(item.detailUrl).pathname)
+    ) {
+      showPage = item.detailUrl
+    }
+  } catch {
+    showPage = null
+  }
+  if (showPage) {
+    const outcome = await scrapePage(showPage, item.source || 'torrent')
+    const grouped = buildEpisodeChoices(outcome.results, downlink, requestedQuality, {
+      minDistinctEpisodes: 1,
+    })
+    if (grouped.length > 0) return { episodes: grouped }
+  }
 
   const uri = item.torrentUri ?? ''
   if (uri && isTorrentInput(uri)) {
@@ -1290,20 +1332,9 @@ export async function resolveShowEpisodes(
   })
   if (grouped.length > 0) return { episodes: grouped }
 
-  // Packs / odd titles without SxxExx — still list every magnet.
-  const loose: EpisodeChoice[] = []
-  for (const result of outcome.results) {
-    if (!isTorrentInput(result.uri)) continue
-    loose.push({
-      key: parseEpisodeKey(result.title) || `R${loose.length + 1}`,
-      title: result.title,
-      torrentUri: result.uri,
-      quality: parseQuality(result.title),
-    })
-  }
   return {
-    episodes: loose,
-    error: loose.length === 0 ? outcome.error || 'No playable episodes found.' : undefined,
+    episodes: [],
+    error: outcome.error || 'No playable episodes found.',
   }
 }
 
@@ -1508,6 +1539,70 @@ export function isSubsPleaseUrl(pageUrl: string): boolean {
   }
 }
 
+/** Full catalog listing (`/shows/`), not a single-show page. */
+export function isSubsPleaseShowsListUrl(pageUrl: string): boolean {
+  try {
+    return isSubsPleaseUrl(pageUrl) && /^\/shows\/?$/i.test(new URL(pageUrl).pathname)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Homepage / latest feed — single-episode new releases (not `/shows/…` detail).
+ */
+export function isSubsPleaseLatestFeedUrl(pageUrl: string): boolean {
+  try {
+    const url = new URL(pageUrl)
+    if (!isSubsPleaseUrl(pageUrl)) return false
+    if (isSubsPleaseShowsListUrl(pageUrl)) return false
+    if (/^\/shows\/[^/]+/i.test(url.pathname)) return false
+    if (/\/api\/?/i.test(url.pathname) && /[?&]f=latest\b/i.test(url.search)) return true
+    return url.pathname === '/' || url.pathname === ''
+  } catch {
+    return false
+  }
+}
+
+export const ANIME_SHELF_NEW_RELEASES = 'new-releases'
+export const ANIME_SHELF_FULL_SHOWS = 'full-shows'
+
+export function isAnimeNewReleaseItem(item: StreamItem): boolean {
+  return Boolean(item.tags?.some((t) => t.toLowerCase() === ANIME_SHELF_NEW_RELEASES))
+}
+
+export function isAnimeFullShowItem(item: StreamItem): boolean {
+  if (item.tags?.some((t) => t.toLowerCase() === ANIME_SHELF_NEW_RELEASES)) return false
+  if (item.tags?.some((t) => t.toLowerCase() === ANIME_SHELF_FULL_SHOWS)) return true
+  // Legacy SubsPlease / other torrent anime without a shelf tag → Full Shows.
+  return item.category === 'anime' && (item.sourceKind === 'torrent' || item.transport === 'torrent')
+}
+
+function subsPleaseShowSlug(show: string): string {
+  return show
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/['’]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+}
+
+function pickSubsPleaseDownload(
+  downloads: SubsPleaseDownload[] | undefined,
+): SubsPleaseDownload | null {
+  const list = (downloads ?? []).filter((d) => /^magnet:\?/i.test(d.magnet))
+  if (list.length === 0) return null
+  const rank = (res: string) => {
+    const n = Number(res) || 0
+    if (n === 720) return 3
+    if (n === 1080) return 2
+    if (n === 480) return 1
+    return 0
+  }
+  return [...list].sort((a, b) => rank(b.res) - rank(a.res))[0] ?? null
+}
+
 interface SubsPleaseDownload {
   res: string
   magnet: string
@@ -1518,6 +1613,8 @@ interface SubsPleaseRelease {
   show?: string
   episode?: string
   image_url?: string
+  /** Show slug used on /shows/<page>/ when present */
+  page?: string
   downloads?: SubsPleaseDownload[]
 }
 
@@ -1559,12 +1656,118 @@ function subsPleaseReleasesToResults(
   return results
 }
 
+/**
+ * Homepage “See more” uses `/api/?f=latest&p=N` (starts at p=1 after the
+ * first 20). SubsPlease caps this around p=2 (~60 releases) then returns
+ * `{ error: "limit_reached" }`.
+ */
+async function scrapeSubsPleaseLatest(
+  origin: string,
+  sourceLabel: string,
+  pageUrl: string,
+): Promise<TorrentScrapeOutcome> {
+  const links: TorrentPageLink[] = []
+  const seen = new Set<string>()
+  let lastError = ''
+
+  const pushRelease = (release: SubsPleaseRelease) => {
+    if (!release?.show) return
+    const episode = String(release.episode || '').trim()
+    const dedupe = `${release.show.toLowerCase()}\0${episode.toLowerCase()}`
+    if (seen.has(dedupe)) return
+    const download = pickSubsPleaseDownload(release.downloads)
+    if (!download) return
+    seen.add(dedupe)
+    const slug =
+      (release.page && String(release.page).replace(/^\/+|\/+$/g, '')) ||
+      subsPleaseShowSlug(release.show)
+    if (!slug) return
+    const showUrl = `${origin}/shows/${slug}`
+    const isRange = /^\d+\s*-\s*\d+$/.test(episode)
+    const title = episode
+      ? `${release.show} · ${isRange ? 'Episodes' : 'Episode'} ${episode}`
+      : release.show
+    const releasedAt = release.release_date ? Date.parse(release.release_date) : undefined
+    links.push({
+      title,
+      // Unique per episode so New Releases don't collapse onto one show id.
+      url: `${showUrl}/#${encodeURIComponent(episode || 'latest')}`,
+      summary: episode ? `New release · Episode ${episode}` : 'New release',
+      poster: release.image_url
+        ? new URL(release.image_url, origin).toString()
+        : undefined,
+      category: 'anime',
+      releasedAt: Number.isFinite(releasedAt) ? releasedAt : undefined,
+      torrentUri: download.magnet,
+    })
+  }
+
+  // p=0 (or omitted) = first batch; p=1 / p=2 = See more pages.
+  for (let page = 0; page <= 4; page += 1) {
+    const apiUrl =
+      page === 0
+        ? `${origin}/api/?f=latest&tz=America%2FNew_York`
+        : `${origin}/api/?f=latest&tz=America%2FNew_York&p=${page}`
+    const latest = await fetchText(apiUrl)
+    if (!latest.ok) {
+      lastError = latest.error || 'latest releases could not load'
+      if (links.length === 0) {
+        return emptyOutcome(pageUrl, sourceLabel, lastError)
+      }
+      break
+    }
+    try {
+      const payload = JSON.parse(latest.content) as
+        | Record<string, SubsPleaseRelease>
+        | { error?: string }
+      if (payload && typeof payload === 'object' && 'error' in payload) {
+        const err = String((payload as { error?: string }).error || '')
+        if (/limit_reached/i.test(err)) break
+        lastError = err || 'latest API error'
+        if (links.length === 0) {
+          return emptyOutcome(pageUrl, sourceLabel, lastError)
+        }
+        break
+      }
+      const rows = Object.values(payload as Record<string, SubsPleaseRelease>)
+      if (rows.length === 0) break
+      const before = links.length
+      for (const release of rows) pushRelease(release)
+      // No new titles (duplicate page) — stop.
+      if (links.length === before) break
+    } catch {
+      if (links.length === 0) {
+        return emptyOutcome(pageUrl, sourceLabel, 'unexpected latest API response')
+      }
+      break
+    }
+  }
+
+  links.sort((a, b) => (b.releasedAt ?? 0) - (a.releasedAt ?? 0))
+  return {
+    results: [],
+    links,
+    pageTitle: `SubsPlease new releases (${links.length.toLocaleString()})`,
+    pageUrl: origin + '/',
+    nextPage: null,
+    prevPage: null,
+    searchTemplate: null,
+    error: links.length === 0 ? `${sourceLabel}: no new releases found` : null,
+  }
+}
+
 async function scrapeSubsPlease(pageUrl: string, sourceLabel: string): Promise<TorrentScrapeOutcome> {
+  const url = new URL(pageUrl)
+
+  // Homepage is JS-rendered — pull the same JSON the site uses for new releases.
+  if (isSubsPleaseLatestFeedUrl(pageUrl)) {
+    return scrapeSubsPleaseLatest(url.origin, sourceLabel, pageUrl)
+  }
+
   const { ok, content, error } = await fetchText(pageUrl)
   if (!ok) return emptyOutcome(pageUrl, sourceLabel, error || 'could not load page')
 
   const doc = new DOMParser().parseFromString(content, 'text/html')
-  const url = new URL(pageUrl)
   const isShowList = /^\/shows\/?$/i.test(url.pathname)
 
   if (isShowList) {
@@ -1842,11 +2045,21 @@ export function isEztvSource(pageUrl: string, sourceLabel = ''): boolean {
 
 const EZTV_PAGE_SIZE = 100
 /** Show List ALL catalogue — ~100 shows per AJAX page. */
+/** Show List ALL ≈ ~100 shows/page; ~200+ pages for the full catalogue. */
 const EZTV_SHOWLIST_MAX_PAGES = 250
 
 function eztvApiUrl(origin: string, page: number, imdbId?: string): string {
   const base = `${origin}/api/get-torrents?limit=${EZTV_PAGE_SIZE}&page=${page}`
   return imdbId ? `${base}&imdb_id=${encodeURIComponent(imdbId)}` : base
+}
+
+function isEztvApiUrl(pageUrl: string): boolean {
+  try {
+    const url = new URL(pageUrl)
+    return isEztvHost(url.hostname) && /\/api\/get-torrents/i.test(url.pathname)
+  } catch {
+    return false
+  }
 }
 
 /** Full Show List catalogue (the site's ALL tab), not Trending / Airing. */
@@ -2049,6 +2262,73 @@ async function scrapeEztvShowlistPage(
   }
 }
 
+/** True when release titles look like they belong to this show (not a wrong IMDb). */
+function eztvTorrentsMatchShow(torrents: EztvApiTorrent[], showTitle: string): boolean {
+  const showKey = normalizeShowKey(showTitle)
+  if (showKey.length < 3 || torrents.length === 0) return false
+  const sample = torrents.slice(0, 20)
+  let hits = 0
+  for (const t of sample) {
+    const releaseKey = normalizeShowKey(t.title || '')
+    if (!releaseKey) continue
+    if (
+      releaseKey === showKey ||
+      releaseKey.startsWith(`${showKey} `) ||
+      releaseKey.includes(` ${showKey} `)
+    ) {
+      hits += 1
+    }
+  }
+  // Require a clear majority — wrong IMDb pages return a fully unrelated set.
+  return hits >= Math.max(1, Math.ceil(sample.length * 0.5))
+}
+
+function extractEztvImdbCandidates(html: string): string[] {
+  const found: string[] = []
+  const seen = new Set<string>()
+  const push = (digits: string) => {
+    const id = digits.replace(/^tt/i, '')
+    if (!/^\d{5,8}$/.test(id) || seen.has(id)) return
+    seen.add(id)
+    found.push(id)
+  }
+  // Prefer explicit imdb.com title links / imdb_id fields — never bare tt######
+  // (show pages embed unrelated IDs that used to steal the episode list).
+  const linkRe = /imdb\.com\/title\/tt(\d+)/gi
+  let match: RegExpExecArray | null
+  while ((match = linkRe.exec(html)) !== null) push(match[1])
+  const fieldRe = /["']imdb_id["']\s*:\s*["']?(\d+)/gi
+  while ((match = fieldRe.exec(html)) !== null) push(match[1])
+  return found
+}
+
+async function fetchEztvTorrentsForImdb(
+  origin: string,
+  imdbId: string,
+): Promise<EztvApiTorrent[]> {
+  const allTorrents: EztvApiTorrent[] = []
+  for (let page = 1; page <= 40; page++) {
+    const apiUrl = eztvApiUrl(origin, page, imdbId)
+    const api = await fetchText(apiUrl)
+    if (!api.ok) {
+      if (page === 1) return []
+      break
+    }
+    let torrents: EztvApiTorrent[]
+    try {
+      const json = JSON.parse(api.content) as { torrents?: EztvApiTorrent[] }
+      torrents = Array.isArray(json.torrents) ? json.torrents : []
+    } catch {
+      if (page === 1) return []
+      break
+    }
+    if (torrents.length === 0) break
+    allTorrents.push(...torrents)
+    if (torrents.length < EZTV_PAGE_SIZE) break
+  }
+  return allTorrents
+}
+
 /**
  * Show detail: read IMDb id from the show page, then pull magnets from the
  * open get-torrents API (HTML magnet buttons are JS/Cloudflare-guarded).
@@ -2056,17 +2336,118 @@ async function scrapeEztvShowlistPage(
 async function resolveImdbIdFromTitle(title: string): Promise<string> {
   const q = title.trim()
   if (!q) return ''
+  const want = normalizeShowKey(q)
+  try {
+    const single = await fetch(
+      `https://api.tvmaze.com/singlesearch/shows?q=${encodeURIComponent(q)}`,
+    )
+    if (single.ok) {
+      const json = (await single.json()) as {
+        name?: string
+        externals?: { imdb?: string | null }
+      }
+      const nameKey = normalizeShowKey(json.name || '')
+      const imdb = (json.externals?.imdb || '').replace(/^tt/i, '')
+      if (/^\d+$/.test(imdb) && (nameKey === want || nameKey.includes(want) || want.includes(nameKey))) {
+        return imdb
+      }
+    }
+    const search = await fetch(
+      `https://api.tvmaze.com/search/shows?q=${encodeURIComponent(q)}`,
+    )
+    if (!search.ok) return ''
+    const rows = (await search.json()) as Array<{
+      show?: { name?: string; externals?: { imdb?: string | null } }
+    }>
+    for (const row of rows) {
+      const nameKey = normalizeShowKey(row.show?.name || '')
+      const imdb = (row.show?.externals?.imdb || '').replace(/^tt/i, '')
+      if (!/^\d+$/.test(imdb) || !nameKey) continue
+      if (nameKey === want || nameKey.startsWith(want) || want.startsWith(nameKey)) return imdb
+    }
+    return ''
+  } catch {
+    return ''
+  }
+}
+
+type TvMazeShowHit = {
+  name: string
+  imdbDigits: string
+  poster?: string
+}
+
+async function resolveTvMazeShow(title: string): Promise<TvMazeShowHit | null> {
+  const q = title.trim()
+  if (!q) return null
   try {
     const response = await fetch(
       `https://api.tvmaze.com/singlesearch/shows?q=${encodeURIComponent(q)}`,
     )
-    if (!response.ok) return ''
-    const json = (await response.json()) as { externals?: { imdb?: string | null } }
-    const imdb = json.externals?.imdb || ''
-    const digits = imdb.replace(/^tt/i, '')
-    return /^\d+$/.test(digits) ? digits : ''
+    if (!response.ok) return null
+    const json = (await response.json()) as {
+      name?: string
+      externals?: { imdb?: string | null }
+      image?: { medium?: string | null; original?: string | null } | null
+    }
+    const imdb = (json.externals?.imdb || '').replace(/^tt/i, '')
+    if (!/^\d+$/.test(imdb)) return null
+    return {
+      name: (json.name || q).trim(),
+      imdbDigits: imdb,
+      poster: json.image?.medium || json.image?.original || undefined,
+    }
   } catch {
-    return ''
+    return null
+  }
+}
+
+/**
+ * Find a show that isn't on the recent-API shelf yet (e.g. Devious Maids) via
+ * TVMaze → EZTV public API. No Cloudflare / Show List required.
+ */
+export async function lookupEztvShowCard(
+  query: string,
+  source: TorrentSource,
+): Promise<TorrentPageLink | null> {
+  if (!isEztvSource(source.url, source.label)) return null
+  const hit = await resolveTvMazeShow(query)
+  if (!hit) return null
+  let origin: string
+  try {
+    origin = new URL(source.url).origin
+  } catch {
+    return null
+  }
+  const apiUrl = eztvApiUrl(origin, 1, hit.imdbDigits)
+  const api = await fetchText(apiUrl)
+  if (!api.ok) return null
+  let torrents: EztvApiTorrent[] = []
+  try {
+    const json = JSON.parse(api.content) as { torrents?: EztvApiTorrent[]; torrents_count?: number }
+    torrents = Array.isArray(json.torrents) ? json.torrents : []
+    if (torrents.length === 0 && !(json.torrents_count && json.torrents_count > 0)) {
+      return null
+    }
+  } catch {
+    return null
+  }
+  const sample = torrents[0]
+  const screenshot = sample?.small_screenshot || sample?.large_screenshot || ''
+  const poster = hit.poster
+    ? hit.poster
+    : screenshot
+      ? screenshot.startsWith('//')
+        ? `https:${screenshot}`
+        : screenshot
+      : undefined
+  return {
+    title: hit.name.slice(0, 180),
+    url: apiUrl,
+    summary: 'TV series',
+    poster,
+    category: 'series',
+    releasedAt: sample?.date_released_unix ? sample.date_released_unix * 1000 : undefined,
   }
 }
 
@@ -2085,52 +2466,80 @@ async function scrapeEztvShowDetail(
     return eztvFailed(sourceLabel, pageUrl, 'invalid show URL')
   }
 
-  let imdbId = ''
   const page = await fetchText(pageUrl)
   if (page.ok) {
-    const imdbMatch =
-      page.content.match(/imdb\.com\/title\/tt(\d+)/i) ||
-      page.content.match(/\btt(\d{7,8})\b/i) ||
-      page.content.match(/["']imdb_id["']\s*:\s*["']?(\d+)/i)
-    imdbId = imdbMatch?.[1] || ''
     const heading =
       page.content.match(/<h1[^>]*>([^<]+)/i)?.[1] ||
       page.content.match(/<title>([^|<]+)/i)?.[1] ||
       ''
     if (heading.trim()) showTitle = heading.replace(/\s*Torrent Download.*$/i, '').trim()
   }
-  if (!imdbId && showTitle) {
-    imdbId = await resolveImdbIdFromTitle(showTitle)
+
+  const showKey = normalizeShowKey(showTitle)
+
+  // Show-page magnets first. EZTV’s get-torrents API often returns a completely
+  // different series for the IMDb id glued to the page (e.g. this title → Extraordinary Animals).
+  if (page.ok) {
+    const fromHtml = scrapeTorrentLinks(page.content, sourceLabel, pageUrl)
+    const matched = fromHtml.filter((r) => {
+      const key = normalizeShowKey(r.title)
+      return (
+        key === showKey ||
+        key.startsWith(`${showKey} `) ||
+        (showKey.length >= 6 && key.includes(showKey))
+      )
+    })
+    if (matched.length > 0) {
+      return {
+        results: matched,
+        links: matched.map((r) => ({
+          title: r.title.slice(0, 180),
+          url: r.uri,
+          summary: '',
+          category: 'series' as const,
+          torrentUri: r.uri,
+        })),
+        pageTitle: sourceLabel,
+        pageUrl,
+        nextPage: null,
+        prevPage: null,
+        searchTemplate: null,
+        error: null,
+      }
+    }
   }
-  if (!imdbId) {
+
+  const candidates: string[] = []
+  const seenIds = new Set<string>()
+  const pushId = (id: string) => {
+    if (!id || seenIds.has(id)) return
+    seenIds.add(id)
+    candidates.push(id)
+  }
+  // TVMaze first — page IMDb candidates are frequently wrong on EZTV.
+  if (showTitle) {
+    pushId(await resolveImdbIdFromTitle(showTitle))
+  }
+  if (page.ok) {
+    for (const id of extractEztvImdbCandidates(page.content)) pushId(id)
+  }
+
+  let allTorrents: EztvApiTorrent[] = []
+  for (const imdbId of candidates) {
+    const torrents = await fetchEztvTorrentsForImdb(origin, imdbId)
+    if (torrents.length === 0) continue
+    if (!eztvTorrentsMatchShow(torrents, showTitle)) continue
+    allTorrents = torrents
+    break
+  }
+
+  if (allTorrents.length === 0) {
     return eztvFailed(
       sourceLabel,
       pageUrl,
-      page.error || 'could not find IMDb id for this show',
+      page.error ||
+        'no matching torrents for this title (EZTV’s listing looks mislinked)',
     )
-  }
-
-  const allTorrents: EztvApiTorrent[] = []
-  for (let page = 1; page <= 40; page++) {
-    const apiUrl = eztvApiUrl(origin, page, imdbId)
-    const api = await fetchText(apiUrl)
-    if (!api.ok) {
-      if (page === 1) {
-        return eztvFailed(sourceLabel, apiUrl, api.error || 'could not reach the EZTV API')
-      }
-      break
-    }
-    let torrents: EztvApiTorrent[]
-    try {
-      const json = JSON.parse(api.content) as { torrents?: EztvApiTorrent[] }
-      torrents = Array.isArray(json.torrents) ? json.torrents : []
-    } catch {
-      if (page === 1) return eztvFailed(sourceLabel, apiUrl, 'unexpected response from the EZTV API')
-      break
-    }
-    if (torrents.length === 0) break
-    allTorrents.push(...torrents)
-    if (torrents.length < EZTV_PAGE_SIZE) break
   }
 
   const { results, links } = mapEztvTorrents(allTorrents, sourceLabel)
@@ -2147,8 +2556,8 @@ async function scrapeEztvShowDetail(
 }
 
 /**
- * Latest-episode feed (open JSON API). Used for Browse; shelf sync prefers
- * the Show List ALL catalogue instead.
+ * Latest-episode / per-show feed (open JSON API). Preserves imdb_id when present
+ * so show cards opened from the shelf resolve the full episode list.
  */
 async function scrapeEztvLatestPage(
   pageUrl: string,
@@ -2156,16 +2565,19 @@ async function scrapeEztvLatestPage(
 ): Promise<TorrentScrapeOutcome> {
   let origin: string
   let page = 1
+  let imdbId: string | undefined
   try {
     const url = new URL(pageUrl)
     origin = url.origin
     if (/\/api\/get-torrents/i.test(url.pathname)) {
       page = Math.max(1, Number(url.searchParams.get('page')) || 1)
+      const raw = (url.searchParams.get('imdb_id') || '').replace(/^tt/i, '')
+      imdbId = /^\d+$/.test(raw) ? raw : undefined
     }
   } catch {
     origin = pageUrl
   }
-  const apiUrl = eztvApiUrl(origin, page)
+  const apiUrl = eztvApiUrl(origin, page, imdbId)
 
   const { ok, content, error: fetchError } = await fetchText(apiUrl)
   if (!ok) {
@@ -2173,7 +2585,7 @@ async function scrapeEztvLatestPage(
       sourceLabel,
       apiUrl,
       fetchError || 'could not reach the EZTV API',
-      page > 1 ? eztvApiUrl(origin, page - 1) : null,
+      page > 1 ? eztvApiUrl(origin, page - 1, imdbId) : null,
     )
   }
 
@@ -2190,12 +2602,84 @@ async function scrapeEztvLatestPage(
   return {
     results,
     links,
-    pageTitle: `${sourceLabel} — latest episodes (page ${page})`,
+    pageTitle: `${sourceLabel} — ${imdbId ? 'show episodes' : 'latest episodes'} (page ${page})`,
+    pageUrl: apiUrl,
+    nextPage: torrents.length >= EZTV_PAGE_SIZE ? eztvApiUrl(origin, page + 1, imdbId) : null,
+    prevPage: page > 1 ? eztvApiUrl(origin, page - 1, imdbId) : null,
+    searchTemplate: null,
+    error: links.length === 0 ? `${sourceLabel}: no playable torrents found` : null,
+  }
+}
+
+/**
+ * Build one shelf card per IMDb show from a get-torrents page (no Cloudflare).
+ */
+async function scrapeEztvApiShowIndexPage(
+  pageUrl: string,
+  sourceLabel: string,
+): Promise<TorrentScrapeOutcome> {
+  let origin: string
+  let page = 1
+  try {
+    const url = new URL(pageUrl)
+    origin = url.origin
+    page = Math.max(1, Number(url.searchParams.get('page')) || 1)
+  } catch {
+    return eztvFailed(sourceLabel, pageUrl, 'invalid EZTV API URL')
+  }
+
+  const apiUrl = eztvApiUrl(origin, page)
+  const { ok, content, error: fetchError } = await fetchText(apiUrl)
+  if (!ok) {
+    return eztvFailed(sourceLabel, apiUrl, fetchError || 'could not reach the EZTV API')
+  }
+
+  let torrents: EztvApiTorrent[]
+  try {
+    const json = JSON.parse(content) as { torrents?: EztvApiTorrent[] }
+    torrents = Array.isArray(json.torrents) ? json.torrents : []
+  } catch {
+    return eztvFailed(sourceLabel, apiUrl, 'unexpected response from the EZTV API')
+  }
+  if (torrents.length === 0 && page === 1) {
+    return eztvFailed(sourceLabel, apiUrl, 'no torrents returned')
+  }
+
+  const links: TorrentPageLink[] = []
+  const seen = new Set<string>()
+  for (const t of torrents) {
+    const imdb = String(t.imdb_id || '')
+      .replace(/^tt/i, '')
+      .trim()
+    if (!/^\d+$/.test(imdb) || seen.has(imdb)) continue
+    seen.add(imdb)
+    const title = cleanShowDisplayTitle(t.title || '').slice(0, 180)
+    if (!title) continue
+    const screenshot = t.small_screenshot || t.large_screenshot || ''
+    const poster = screenshot
+      ? screenshot.startsWith('//')
+        ? `https:${screenshot}`
+        : screenshot
+      : undefined
+    links.push({
+      title,
+      url: eztvApiUrl(origin, 1, imdb),
+      summary: 'TV series',
+      poster,
+      category: 'series',
+      releasedAt: t.date_released_unix ? t.date_released_unix * 1000 : undefined,
+    })
+  }
+
+  return {
+    results: [],
+    links,
+    pageTitle: `${sourceLabel} — API shows (page ${page})`,
     pageUrl: apiUrl,
     nextPage: torrents.length >= EZTV_PAGE_SIZE ? eztvApiUrl(origin, page + 1) : null,
     prevPage: page > 1 ? eztvApiUrl(origin, page - 1) : null,
     searchTemplate: null,
-    error: links.length === 0 ? `${sourceLabel}: no playable torrents found` : null,
+    error: links.length === 0 ? `${sourceLabel}: no shows found` : null,
   }
 }
 
@@ -2204,25 +2688,18 @@ async function scrapeEztvPage(
   sourceLabel: string,
 ): Promise<TorrentScrapeOutcome> {
   if (isEztvShowUrl(pageUrl)) return scrapeEztvShowDetail(pageUrl, sourceLabel)
-  if (isEztvShowlistUrl(pageUrl)) {
-    const showlist = await scrapeEztvShowlistPage(pageUrl, sourceLabel)
-    if (showlist.links.length > 0) return showlist
-    // Cloudflare can still block the Show List AJAX; keep Series usable via
-    // the open latest-episodes API until the browser clearance succeeds.
+  if (isEztvApiUrl(pageUrl)) {
     try {
-      const origin = new URL(pageUrl).origin
-      const latest = await scrapeEztvLatestPage(eztvApiUrl(origin, 1), sourceLabel)
-      if (latest.links.length > 0) {
-        return {
-          ...latest,
-          error:
-            `${sourceLabel}: Show List blocked (${showlist.error || '403'}); using latest episodes instead`,
-        }
-      }
+      const imdb = new URL(pageUrl).searchParams.get('imdb_id')
+      if (imdb) return scrapeEztvLatestPage(pageUrl, sourceLabel)
     } catch {
-      /* keep original showlist error */
+      /* fall through */
     }
-    return showlist
+    return scrapeEztvApiShowIndexPage(pageUrl, sourceLabel)
+  }
+  if (isEztvShowlistUrl(pageUrl)) {
+    // Full ALL catalogue only — do not silently replace with a small API sample.
+    return scrapeEztvShowlistPage(pageUrl, sourceLabel)
   }
   return scrapeEztvLatestPage(pageUrl, sourceLabel)
 }
@@ -2293,6 +2770,8 @@ export interface CatalogFeed {
   category: 'movies' | 'series' | 'anime'
   /** How many listing pages to crawl for this feed */
   maxPages: number
+  /** Extra shelf tag (e.g. anime New Releases vs Full Shows) */
+  shelfTag?: string
 }
 
 /**
@@ -2335,7 +2814,6 @@ export function catalogFeedsForSource(source: TorrentSource): CatalogFeed[] {
       return [
         {
           // Show List ALL tab via /showlist/ajax/ (~100 shows/page, ~20k total).
-          // Always map into TV Series — never Movies / Anime.
           url: eztvShowlistAjaxUrl(origin, 1),
           category: 'series',
           maxPages: EZTV_SHOWLIST_MAX_PAGES,
@@ -2343,11 +2821,23 @@ export function catalogFeedsForSource(source: TorrentSource): CatalogFeed[] {
       ]
     }
     if (isSubsPleaseUrl(source.url)) {
+      // Root URL → New Releases; /shows/ → Full Shows catalog.
+      if (isSubsPleaseLatestFeedUrl(source.url)) {
+        return [
+          {
+            url: `${origin}/`,
+            category: 'anime',
+            maxPages: 1,
+            shelfTag: ANIME_SHELF_NEW_RELEASES,
+          },
+        ]
+      }
       return [
         {
           url: `${origin}/shows/`,
           category: 'anime',
           maxPages: 1,
+          shelfTag: ANIME_SHELF_FULL_SHOWS,
         },
       ]
     }
@@ -2362,6 +2852,7 @@ export function linkToCatalogItem(
   link: TorrentPageLink,
   source: TorrentSource,
   fallbackCategory?: 'movies' | 'series' | 'anime',
+  shelfTag?: string,
 ): StreamItem {
   // EZTV is exclusively episodic television. Force its entries into TV
   // Series even if generic URL/title inference would choose another shelf.
@@ -2375,6 +2866,13 @@ export function linkToCatalogItem(
         : link.category ??
           fallbackCategory ??
           inferTorrentCategory(link.url, link.title, link.summary)
+  const tags = [category]
+  if (shelfTag && !tags.includes(shelfTag)) tags.push(shelfTag)
+  // New-release magnets still keep the show page for full episode lists.
+  const showPage =
+    shelfTag === ANIME_SHELF_NEW_RELEASES
+      ? link.url.replace(/#.*$/, '').replace(/\/$/, '')
+      : undefined
   return {
     id: stableTorrentItemId(link.url),
     title: link.title,
@@ -2382,13 +2880,13 @@ export function linkToCatalogItem(
     category,
     url: link.url,
     poster: link.poster,
-    // Category only on the card — never put origin hostnames in shelf-facing fields.
-    tags: [category],
+    // Category (+ optional shelf) — never put origin hostnames in shelf-facing fields.
+    tags,
     source: 'Web catalog',
     sourceKind: 'torrent',
     transport: 'torrent',
     torrentUri: link.torrentUri,
-    detailUrl: link.torrentUri ? undefined : link.url,
+    detailUrl: link.torrentUri ? showPage : link.url,
     releasedAt: link.releasedAt,
     torrentSourceId: source.id,
   }

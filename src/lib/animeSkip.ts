@@ -1,9 +1,8 @@
 /**
  * Anime intro/outro skip windows via AniSkip (crowdsourced).
  *
- * Cold opens: when AniSkip marks an OP that starts after a short teaser
- * (startTime >= COLD_OPEN_MIN_SECONDS), the player auto-skips the OP once
- * the playhead reaches it — the teaser always plays.
+ * Skip is always opt-in (Skip Intro / Skip Ending). Playback never auto-jumps
+ * past openings so every episode starts at the true beginning.
  *
  * When AniSkip has no data, a cold-open-aware default (≈1:25→2:55) is used
  * for manual Skip Intro only — never from 0, so the teaser is not wiped.
@@ -254,9 +253,8 @@ export function skipButtonLabel(interval: AnimeSkipInterval): string {
 }
 
 /**
- * True when this OP follows a cold open and should be jumped automatically
- * once the playhead enters the opening window. Never true for the default
- * fallback (manual Skip Intro only).
+ * True when AniSkip marks an OP after a cold-open teaser.
+ * Kept for callers that want to style Skip Intro; playback never auto-jumps.
  */
 export function shouldAutoSkipOpening(interval: AnimeSkipInterval): boolean {
   return (

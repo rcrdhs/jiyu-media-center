@@ -1,10 +1,14 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore, type FormEvent } from 'react'
 import { useCatalog } from '../context/CatalogContext'
 import { usePlayback } from '../context/PlaybackContext'
 import {
   deleteTorrentItemsForSource,
   loadTorrentCatalogMeta,
 } from '../lib/torrentCatalogStore'
+import {
+  getTorrentSyncMessage,
+  subscribeTorrentSyncMessage,
+} from '../lib/torrentSyncStatus'
 import {
   buildEpisodeChoices,
   buildSearchUrl,
@@ -37,8 +41,12 @@ type TorrentsPageProps = {
 
 export function TorrentsPage({ embedded = false }: TorrentsPageProps) {
   const { play } = usePlayback()
-  const { syncTorrentWebsite, reloadTorrentCatalog, torrentSyncMessage, torrentCount } =
-    useCatalog()
+  const { syncTorrentWebsite, reloadTorrentCatalog, torrentCount } = useCatalog()
+  const torrentSyncMessage = useSyncExternalStore(
+    subscribeTorrentSyncMessage,
+    getTorrentSyncMessage,
+    getTorrentSyncMessage,
+  )
   const desktop = Boolean(window.signalDesktop?.torrentStream)
   const returnTo = embedded ? '/library' : '/torrents'
 
@@ -89,6 +97,18 @@ export function TorrentsPage({ embedded = false }: TorrentsPageProps) {
       label = new URL(url).hostname.replace(/^www\./, '')
     } catch {
       /* keep url as label */
+    }
+    try {
+      const parsed = new URL(url)
+      if (/(^|\.)subsplease\.org$/i.test(parsed.hostname)) {
+        label = /^\/shows\/?$/i.test(parsed.pathname)
+          ? 'subsplease.org · Full Shows'
+          : parsed.pathname === '/' || parsed.pathname === ''
+            ? 'subsplease.org · New Releases'
+            : label
+      }
+    } catch {
+      /* keep hostname label */
     }
     const source: TorrentSource = { id: `src-${Date.now()}`, label, url }
     persistSources([...sources, source])
@@ -173,12 +193,11 @@ export function TorrentsPage({ embedded = false }: TorrentsPageProps) {
     const outcome = await browsePage(link.url, source)
     if (!outcome || !window.signalDesktop?.torrentStream) return
     const preference = getViewingQuality()
-    const requestedQuality =
-      preference === 'auto' ? (isSubsPleaseUrl(source.url) ? 720 : undefined) : preference
+    const requestedQuality = preference === 'auto' ? 720 : preference
     const downlink = getConnectionDownlinkMbps()
     const episodes = buildEpisodeChoices(outcome.results, downlink, requestedQuality)
     if (episodes.length > 1) {
-      const startIndex = episodes.length - 1
+      const startIndex = 0
       const chosen = episodes[startIndex]
       setAutoInfo(
         `Playing episode ${startIndex + 1} of ${episodes.length} · ${labelQuality(chosen.quality)}.`,
@@ -369,7 +388,11 @@ export function TorrentsPage({ embedded = false }: TorrentsPageProps) {
         </p>
       )}
 
-      {/* Sync status lives in Library → Activity log (masked). */}
+      {torrentSyncMessage && (
+        <p className="toast" role="status">
+          {torrentSyncMessage}
+        </p>
+      )}
 
       <form className="guide-toolbar" onSubmit={addSource}>
         <input
@@ -520,7 +543,7 @@ export function TorrentsPage({ embedded = false }: TorrentsPageProps) {
                   onClick={() => {
                     setAutoInfo(null)
                     const preference = getViewingQuality()
-                    const requestedQuality = preference === 'auto' ? undefined : preference
+                    const requestedQuality = preference === 'auto' ? 720 : preference
                     const showKey = normalizeShowKey(r.title)
                     const sameShow = results.filter(
                       (row) => normalizeShowKey(row.title) === showKey,

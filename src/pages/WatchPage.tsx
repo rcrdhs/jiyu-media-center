@@ -11,11 +11,10 @@ import {
 import {
   getConnectionDownlinkMbps,
   isTorrentInput,
-  isSubsPleaseUrl,
-  buildCatalogEpisodeChoices,
   buildEpisodeChoices,
   parseEpisodeKey,
   pickBestStream,
+  resolveShowEpisodes,
   scrapePage,
   type EpisodeChoice,
 } from '../lib/torrents'
@@ -24,7 +23,7 @@ import { isYouTubeUrl } from '../lib/webBrowser'
 import { isVimeoLiveEventUrl, resolveVimeoLiveHls } from '../lib/vimeoLive'
 import type { StreamItem, StreamPlaylistItem } from '../types'
 
-/** Prefer the saved continue episode over “latest episode” / URI heuristics. */
+/** Prefer the saved continue episode over “first episode” / URI heuristics. */
 function resolveContinueEpisodeIndex(
   episodes: EpisodeChoice[],
   saved: ContinueWatchingEntry | null,
@@ -112,7 +111,8 @@ export function WatchPage() {
         return
       }
 
-      // Torrent catalog entries store a detail page / magnet — resolve at play time
+      // Torrent catalog entries store a detail page / magnet — resolve at play time.
+      // Anime / TV Series: play immediately and attach the full episode list in the player.
       if (item!.transport === 'torrent' || item!.sourceKind === 'torrent') {
         if (!window.signalDesktop?.torrentStream) {
           setError('Torrent playback needs the Jiyu desktop app.')
@@ -125,8 +125,42 @@ export function WatchPage() {
           let startEpisodeIndex = 0
           const preference = getViewingQuality()
           const downlink = getConnectionDownlinkMbps()
+          const isShowShelf =
+            item!.category === 'series' || item!.category === 'anime'
 
-          if (!uri || !isTorrentInput(uri)) {
+          if (isShowShelf) {
+            const resolved = await resolveShowEpisodes(item!, items)
+            if (cancelled) return
+            const episodes = resolved.episodes
+            if (episodes.length === 0) {
+              setError(resolved.error || 'No episodes found for this title.')
+              return
+            }
+            const saved = getContinueEntry(item!.id)
+            const continuedIndex = resolveContinueEpisodeIndex(episodes, saved)
+            if (continuedIndex != null) {
+              startEpisodeIndex = continuedIndex
+            } else if (uri && isTorrentInput(uri)) {
+              const currentKey = parseEpisodeKey(item!.title)
+              const byKey = currentKey
+                ? episodes.findIndex((ep) => ep.key === currentKey)
+                : -1
+              const byUri = episodes.findIndex((ep) => ep.torrentUri === uri)
+              // Match the clicked row when possible; otherwise start at episode 1.
+              startEpisodeIndex = byKey >= 0 ? byKey : byUri >= 0 ? byUri : 0
+            } else {
+              // Show card — start at the first episode (Continue Watching overrides above).
+              startEpisodeIndex = 0
+            }
+            const chosen = episodes[startEpisodeIndex]
+            uri = chosen.torrentUri
+            title = chosen.title || title
+            episodePlaylist = episodes.map((ep) => ({
+              title: ep.title,
+              url: '',
+              torrentUri: ep.torrentUri,
+            }))
+          } else if (!uri || !isTorrentInput(uri)) {
             const detail = item!.detailUrl || item!.url
             const outcome = await scrapePage(detail, item!.source || 'torrent')
             if (cancelled) return
@@ -134,14 +168,12 @@ export function WatchPage() {
               setError(outcome.error || 'No magnet or torrent link found on that page.')
               return
             }
-            const requestedQuality =
-              preference === 'auto' ? (isSubsPleaseUrl(detail) ? 720 : undefined) : preference
+            const requestedQuality = preference === 'auto' ? 720 : preference
             const episodes = buildEpisodeChoices(outcome.results, downlink, requestedQuality)
 
             if (episodes.length > 1) {
               const saved = getContinueEntry(item!.id)
-              startEpisodeIndex =
-                resolveContinueEpisodeIndex(episodes, saved) ?? episodes.length - 1
+              startEpisodeIndex = resolveContinueEpisodeIndex(episodes, saved) ?? 0
               const chosen = episodes[startEpisodeIndex]
               uri = chosen.torrentUri
               title = chosen.title || title
@@ -159,39 +191,6 @@ export function WatchPage() {
               uri = pick.result.uri
               title = pick.result.title || title
             }
-          } else if (item!.category === 'series' || item!.category === 'anime') {
-            // EZTV-style catalog: each row is already a magnet. Gather sibling
-            // episodes from the same show on the Series / Anime shelves.
-            const requestedQuality = preference === 'auto' ? undefined : preference
-            const episodes = buildCatalogEpisodeChoices(
-              item!,
-              items,
-              downlink,
-              requestedQuality,
-            )
-            if (episodes.length > 1) {
-              const saved = getContinueEntry(item!.id)
-              const continuedIndex = resolveContinueEpisodeIndex(episodes, saved)
-              if (continuedIndex != null) {
-                startEpisodeIndex = continuedIndex
-              } else {
-                const currentKey = parseEpisodeKey(item!.title)
-                const byKey = currentKey
-                  ? episodes.findIndex((ep) => ep.key === currentKey)
-                  : -1
-                const byUri = episodes.findIndex((ep) => ep.torrentUri === uri)
-                startEpisodeIndex =
-                  byKey >= 0 ? byKey : byUri >= 0 ? byUri : episodes.length - 1
-              }
-              const chosen = episodes[startEpisodeIndex]
-              uri = chosen.torrentUri
-              title = chosen.title || title
-              episodePlaylist = episodes.map((ep) => ({
-                title: ep.title,
-                url: '',
-                torrentUri: ep.torrentUri,
-              }))
-            }
           }
 
           const result = await window.signalDesktop.torrentStream(uri)
@@ -202,7 +201,7 @@ export function WatchPage() {
           }
 
           let playlist = episodePlaylist
-          if (playlist && playlist.length > 1) {
+          if (playlist && playlist.length > 0) {
             playlist = playlist.map((entry, index) =>
               index === startEpisodeIndex
                 ? {

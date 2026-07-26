@@ -1,5 +1,6 @@
 import {
   createContext,
+  startTransition,
   useCallback,
   useContext,
   useEffect,
@@ -38,6 +39,7 @@ import {
   syncAllTorrentSources,
   syncTorrentSource,
 } from '../lib/torrentSync'
+import { setTorrentSyncMessage } from '../lib/torrentSyncStatus'
 import type { CategoryId, StreamItem } from '../types'
 
 export interface AddPlaylistInput {
@@ -72,7 +74,6 @@ interface CatalogContextValue {
   /** Crawl a torrent website into Movies / Series / Anime */
   syncTorrentWebsite: (sourceId: string) => Promise<{ added: number; error?: string }>
   syncAllTorrentWebsites: () => Promise<{ added: number; sources: number }>
-  torrentSyncMessage: string | null
 }
 
 const CatalogContext = createContext<CatalogContextValue | null>(null)
@@ -98,7 +99,6 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false)
   const [sources, setSources] = useState<PlaylistSource[]>([])
   const [torrentItems, setTorrentItems] = useState<StreamItem[]>([])
-  const [torrentSyncMessage, setTorrentSyncMessage] = useState<string | null>(null)
   const [englishOnly, setEnglishOnlyState] = useState(() => getEnglishOnlyPref())
   const [hideDuplicates, setHideDuplicatesState] = useState(() => getHideDuplicatesPref())
 
@@ -120,11 +120,15 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
   const reloadTorrentCatalog = useCallback(async () => {
     try {
       const rows = await listTorrentCatalog()
-      setTorrentItems(rows)
+      startTransition(() => {
+        setTorrentItems(rows)
+      })
     } catch (err) {
       // IndexedDB can throw UnknownError when Chromium's QuotaManager is corrupted
       console.error('Torrent catalog unavailable (storage may need a reset):', err)
-      setTorrentItems([])
+      startTransition(() => {
+        setTorrentItems([])
+      })
     }
   }, [])
 
@@ -353,10 +357,13 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
       if (!source) return { added: 0, error: 'Website not found' }
       setTorrentSyncMessage('Updating catalog…')
       try {
-        const result = await syncTorrentSource(source, (p) =>
-          setTorrentSyncMessage(maskActivityMessage(p.message)),
-        )
-        await reloadTorrentCatalog()
+        const result = await syncTorrentSource(source, (p) => {
+          setTorrentSyncMessage(maskActivityMessage(p.message))
+        })
+        // Only reload shelves once at the end — mid-sync reloads froze TV Series.
+        if (result.added > 0 || result.error) {
+          await reloadTorrentCatalog()
+        }
         const summary = result.error
           ? maskActivityMessage(result.error)
           : `Added ${result.added.toLocaleString()} titles to the catalog`
@@ -379,11 +386,11 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
     const list = loadTorrentSources()
     if (list.length === 0) return { added: 0, sources: 0 }
     setTorrentSyncMessage('Updating catalog…')
-    const results = await syncAllTorrentSources(list, (p) =>
-      setTorrentSyncMessage(maskActivityMessage(p.message)),
-    )
-    await reloadTorrentCatalog()
+    const results = await syncAllTorrentSources(list, (p) => {
+      setTorrentSyncMessage(maskActivityMessage(p.message))
+    })
     const added = results.reduce((sum, r) => sum + r.added, 0)
+    if (added > 0) await reloadTorrentCatalog()
     const summary = `Synced ${added.toLocaleString()} titles to the catalog`
     setTorrentSyncMessage(summary)
     appendActivity('sync', summary)
@@ -457,7 +464,6 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
       reloadTorrentCatalog,
       syncTorrentWebsite,
       syncAllTorrentWebsites,
-      torrentSyncMessage,
     }),
     [
       ready,
@@ -480,7 +486,6 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
       reloadTorrentCatalog,
       syncTorrentWebsite,
       syncAllTorrentWebsites,
-      torrentSyncMessage,
     ],
   )
 

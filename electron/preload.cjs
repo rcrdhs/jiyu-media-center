@@ -37,4 +37,12 @@ contextBridge.exposeInMainWorld('signalDesktop', {
     ipcRenderer.on('browser:nav', listener)
     return () => ipcRenderer.removeListener('browser:nav', listener)
   },
+  onSaveContinue: (callback) => {
+    const listener = () => callback()
+    ipcRenderer.on('app:save-continue', listener)
+    return () => ipcRenderer.removeListener('app:save-continue', listener)
+  },
+  continueSaved: () => {
+    ipcRenderer.send('app:continue-saved')
+  },
 })

@@ -165,7 +165,7 @@ export function isLocalPlaybackUrl(url: string | undefined): boolean {
   )
 }
 
-function isTrustedDuration(duration: number): boolean {
+export function isTrustedDuration(duration: number): boolean {
   return (
     Number.isFinite(duration) &&
     duration !== Infinity &&
@@ -174,73 +174,154 @@ function isTrustedDuration(duration: number): boolean {
 }
 
 /**
+ * Progressive remux / torrent pipes often report duration ≈ buffered end ≈ playhead.
+ * Treating that as the real episode length falsely marks mid-watch as “finished”
+ * and wipes Continue watching (common around 10–15 minutes into anime).
+ */
+export function isLikelyPartialDuration(
+  duration: number,
+  currentTime: number,
+  options?: { assumeProgressive?: boolean; playbackUrl?: string },
+): boolean {
+  if (!Number.isFinite(duration) || duration <= 0) return false
+  if (!Number.isFinite(currentTime) || currentTime < 0) return false
+  const progressive =
+    Boolean(options?.assumeProgressive) || isLocalPlaybackUrl(options?.playbackUrl)
+  if (progressive) {
+    // Still downloading / remuxing — length tracks the buffer, not the file.
+    // Use a tight window: real titles still have many minutes left at mid-watch.
+    return duration <= currentTime + 90
+  }
+  // Non-progressive: only reject the obvious “duration hugs the playhead” case.
+  return currentTime >= MIN_SECONDS && duration <= currentTime + 45
+}
+
+/**
  * True when the viewer has reached at least 95% of a known full duration.
  * Requires a trusted length so progressive remux buffer sizes don’t count as “done”.
+ * Local remux/torrent URLs never complete from duration alone (use video.ended).
  */
-export function isEpisodeComplete(currentTime: number, duration: number): boolean {
+export function isEpisodeComplete(
+  currentTime: number,
+  duration: number,
+  options?: { playbackUrl?: string; assumeProgressive?: boolean },
+): boolean {
   if (!Number.isFinite(currentTime) || currentTime < MIN_SECONDS) return false
   if (!isTrustedDuration(duration)) return false
+  if (options?.assumeProgressive || isLocalPlaybackUrl(options?.playbackUrl)) {
+    return false
+  }
+  if (isLikelyPartialDuration(duration, currentTime, options)) return false
   return currentTime / duration >= COMPLETE_RATIO
 }
 
 export function shouldTrackProgress(
   duration: number,
   currentTime: number,
-  options?: { allowUnknownDuration?: boolean },
+  options?: { allowUnknownDuration?: boolean; playbackUrl?: string },
 ): boolean {
   if (!Number.isFinite(currentTime) || currentTime < MIN_SECONDS) return false
-  if (isEpisodeComplete(currentTime, duration)) return false
+  const usableDuration = isLikelyPartialDuration(duration, currentTime, {
+    assumeProgressive: options?.allowUnknownDuration,
+    playbackUrl: options?.playbackUrl,
+  })
+    ? 0
+    : duration
+  if (
+    isEpisodeComplete(currentTime, usableDuration, {
+      playbackUrl: options?.playbackUrl,
+      assumeProgressive: options?.allowUnknownDuration,
+    })
+  ) {
+    return false
+  }
 
   const durationUnknown =
-    !Number.isFinite(duration) || duration === Infinity || duration <= 0
+    !Number.isFinite(usableDuration) || usableDuration === Infinity || usableDuration <= 0
 
   // Progressive remux often reports “duration” as only what’s buffered so far.
   // Track by playhead alone until we see a trusted full length.
   if (options?.allowUnknownDuration) {
-    if (!isTrustedDuration(duration)) return true
-    return !isEpisodeComplete(currentTime, duration)
+    if (!isTrustedDuration(usableDuration)) return true
+    return !isEpisodeComplete(currentTime, usableDuration, {
+      playbackUrl: options?.playbackUrl,
+      assumeProgressive: true,
+    })
   }
 
   if (durationUnknown) return false
-  if (duration < 60) return false
+  if (usableDuration < 60) return false
   return true
 }
 
 export function upsertContinueEntry(
   entry: Omit<ContinueWatchingEntry, 'updatedAt'> & { updatedAt?: number },
-  options?: { allowUnknownDuration?: boolean },
+  options?: { allowUnknownDuration?: boolean; playbackUrl?: string },
 ) {
   if (!isVodCategory(entry.category)) return
 
   const existing = getContinueEntry(entry.id)
+  const playbackUrl = options?.playbackUrl || entry.playUrl
+  const progressive = Boolean(options?.allowUnknownDuration) || isLocalPlaybackUrl(playbackUrl)
+
+  const scrub = (duration: number) =>
+    isLikelyPartialDuration(duration, entry.currentTime, {
+      assumeProgressive: progressive,
+      playbackUrl,
+    })
+      ? 0
+      : duration
+
+  const reportedDuration = scrub(entry.duration)
+  const savedDuration = scrub(existing?.duration || 0)
+
   // Prefer a trusted full length (saved or newly reported) for the 95% complete check.
-  const durationForComplete = isTrustedDuration(entry.duration)
-    ? entry.duration
-    : existing?.duration && isTrustedDuration(existing.duration)
-      ? existing.duration
+  const durationForComplete = isTrustedDuration(reportedDuration)
+    ? reportedDuration
+    : isTrustedDuration(savedDuration)
+      ? savedDuration
       : 0
 
   // Finished (≥95%) — drop from Continue watching instead of saving.
-  if (isEpisodeComplete(entry.currentTime, durationForComplete)) {
+  if (
+    isEpisodeComplete(entry.currentTime, durationForComplete, {
+      playbackUrl,
+      assumeProgressive: progressive,
+    })
+  ) {
     removeContinueEntry(entry.id)
     return
   }
 
-  if (!shouldTrackProgress(entry.duration, entry.currentTime, options)) {
+  if (
+    !shouldTrackProgress(reportedDuration || entry.duration, entry.currentTime, {
+      ...options,
+      playbackUrl,
+    })
+  ) {
     return
   }
 
-  const trusted = isTrustedDuration(entry.duration)
+  const trusted = isTrustedDuration(reportedDuration)
   const next: ContinueWatchingEntry = {
     ...existing,
     ...entry,
     // Don’t persist truncated remux durations — they look “almost done” on Home.
-    duration: trusted ? entry.duration : existing?.duration && existing.duration > 0 ? existing.duration : 0,
+    duration: trusted
+      ? reportedDuration
+      : isTrustedDuration(savedDuration)
+        ? savedDuration
+        : 0,
     updatedAt: entry.updatedAt ?? Date.now(),
   }
 
   // Re-check after merging a previously saved trusted duration.
-  if (isEpisodeComplete(next.currentTime, next.duration)) {
+  if (
+    isEpisodeComplete(next.currentTime, next.duration, {
+      playbackUrl,
+      assumeProgressive: progressive,
+    })
+  ) {
     removeContinueEntry(entry.id)
     return
   }

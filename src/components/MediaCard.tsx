@@ -4,7 +4,6 @@ import { useStreamHealth } from '../context/StreamHealthContext'
 import { getMainStage, setMainScroll } from '../lib/viewState'
 import { isYouTubeUrl } from '../lib/webBrowser'
 import { isWeakPosterUrl, resolveCatalogPoster } from '../lib/posterFallback'
-import { isShowBrowseItem } from '../lib/torrents'
 import { CardPreview } from './CardPreview'
 import type { StreamHealthState, StreamItem } from '../types'
 
@@ -90,7 +89,7 @@ export function MediaCard({ item }: MediaCardProps) {
       onMouseLeave={onLeave}
     >
       <Link
-        to={isShowBrowseItem(item) ? `/show/${item.id}` : `/watch/${item.id}`}
+        to={`/watch/${item.id}`}
         className="media-card"
         state={{ from: `${location.pathname}${location.search}` }}
         title={

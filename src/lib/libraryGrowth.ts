@@ -5,12 +5,19 @@ const TRACKED = new Set<CategoryId>(['movies', 'series', 'anime'])
 
 type DayCounts = Record<string, number> // YYYY-MM-DD → title count
 
-type GrowthStore = Partial<Record<CategoryId, DayCounts>>
+/** Current end-of-day (latest) counts, plus first count seen that calendar day. */
+type GrowthStore = {
+  days: Partial<Record<CategoryId, DayCounts>>
+  open: Partial<Record<CategoryId, DayCounts>>
+}
 
 export type SectionGrowth = {
   yesterday: number | null
   today: number
+  /** today − yesterday, when yesterday was recorded */
   delta: number | null
+  /** today − first count recorded today (new titles since morning baseline) */
+  newToday: number
 }
 
 function localDateKey(d = new Date()): string {
@@ -26,14 +33,28 @@ function yesterdayKey(from = new Date()): string {
   return localDateKey(d)
 }
 
+function emptyStore(): GrowthStore {
+  return { days: {}, open: {} }
+}
+
 function readStore(): GrowthStore {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
-    if (!raw) return {}
-    const parsed = JSON.parse(raw) as GrowthStore
-    return parsed && typeof parsed === 'object' ? parsed : {}
+    if (!raw) return emptyStore()
+    const parsed = JSON.parse(raw) as GrowthStore | Partial<Record<CategoryId, DayCounts>>
+    if (!parsed || typeof parsed !== 'object') return emptyStore()
+    // Migrate v1 flat map { movies: { "2026-…" : n } } → { days, open }
+    if (!('days' in parsed) && !('open' in parsed)) {
+      const days = parsed as Partial<Record<CategoryId, DayCounts>>
+      return { days, open: {} }
+    }
+    const store = parsed as GrowthStore
+    return {
+      days: store.days && typeof store.days === 'object' ? store.days : {},
+      open: store.open && typeof store.open === 'object' ? store.open : {},
+    }
   } catch {
-    return {}
+    return emptyStore()
   }
 }
 
@@ -58,52 +79,69 @@ export function isGrowthTrackedSection(id: CategoryId): boolean {
   return TRACKED.has(id)
 }
 
+function growthFrom(
+  days: DayCounts,
+  open: DayCounts,
+  fallbackToday: number,
+): SectionGrowth {
+  const todayKey = localDateKey()
+  const yday = yesterdayKey()
+  const today = typeof days[todayKey] === 'number' ? days[todayKey] : fallbackToday
+  const yesterday = typeof days[yday] === 'number' ? days[yday] : null
+  const openToday = typeof open[todayKey] === 'number' ? open[todayKey] : today
+  return {
+    yesterday,
+    today,
+    delta: yesterday == null ? null : today - yesterday,
+    newToday: today - openToday,
+  }
+}
+
 /**
  * Snapshot today's shelf title count for a section. Call when the catalog
  * has a stable count (after show-collapse, before search filter).
  */
 export function recordSectionTitleCount(category: CategoryId, count: number): SectionGrowth {
   if (!TRACKED.has(category) || !Number.isFinite(count) || count < 0) {
-    return { yesterday: null, today: Math.max(0, count || 0), delta: null }
+    return {
+      yesterday: null,
+      today: Math.max(0, count || 0),
+      delta: null,
+      newToday: 0,
+    }
   }
 
   const today = localDateKey()
-  const yday = yesterdayKey()
   const store = readStore()
-  const days = { ...(store[category] ?? {}) }
-  days[today] = Math.max(0, Math.round(count))
-  store[category] = pruneDays(days)
+  const days = { ...(store.days[category] ?? {}) }
+  const open = { ...(store.open[category] ?? {}) }
+  const n = Math.max(0, Math.round(count))
+
+  // First visit of the calendar day becomes the baseline for "new today".
+  if (typeof open[today] !== 'number') {
+    open[today] = n
+  }
+  days[today] = n
+
+  store.days[category] = pruneDays(days)
+  store.open[category] = pruneDays(open)
   writeStore(store)
 
-  const yesterday = typeof days[yday] === 'number' ? days[yday] : null
-  const todayCount = days[today]
-  return {
-    yesterday,
-    today: todayCount,
-    delta: yesterday == null ? null : todayCount - yesterday,
-  }
+  return growthFrom(days, open, n)
 }
 
 export function getSectionGrowth(category: CategoryId, fallbackToday = 0): SectionGrowth {
   if (!TRACKED.has(category)) {
-    return { yesterday: null, today: fallbackToday, delta: null }
+    return { yesterday: null, today: fallbackToday, delta: null, newToday: 0 }
   }
-  const days = readStore()[category] ?? {}
-  const todayKey = localDateKey()
-  const yday = yesterdayKey()
-  const today = typeof days[todayKey] === 'number' ? days[todayKey] : fallbackToday
-  const yesterday = typeof days[yday] === 'number' ? days[yday] : null
-  return {
-    yesterday,
-    today,
-    delta: yesterday == null ? null : today - yesterday,
-  }
+  const store = readStore()
+  return growthFrom(store.days[category] ?? {}, store.open[category] ?? {}, fallbackToday)
 }
 
 export function formatSectionGrowth(growth: SectionGrowth): string | null {
   const t = growth.today.toLocaleString()
   if (growth.yesterday == null) {
-    // First snapshot for this section — comparison appears the next calendar day.
+    // First snapshot for this section — day-over-day appears next calendar day.
     return `Today ${t} titles`
   }
   const y = growth.yesterday.toLocaleString()

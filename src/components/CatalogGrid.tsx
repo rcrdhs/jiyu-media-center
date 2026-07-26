@@ -30,7 +30,8 @@ export function CatalogGrid({
   const [hideOffline, setHideOffline] = useState(
     showHealthFilters ? autoHideUnresponsive : false,
   )
-  const itemKey = items.map((i) => i.id).join('|')
+  // Avoid joining thousands of ids on every render (TV Series shelves got huge).
+  const itemKey = `${items.length}:${items[0]?.id ?? ''}:${items[items.length - 1]?.id ?? ''}`
 
   useEffect(() => {
     setHideOffline(showHealthFilters ? autoHideUnresponsive : false)

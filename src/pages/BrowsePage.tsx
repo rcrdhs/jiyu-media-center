@@ -99,13 +99,7 @@ export function BrowsePage() {
           {matches.map((item) => (
             <Link
               key={item.id}
-              to={
-                item.category === 'series' || item.category === 'anime'
-                  ? item.transport === 'torrent' || item.sourceKind === 'torrent'
-                    ? `/show/${item.id}`
-                    : `/watch/${item.id}`
-                  : `/watch/${item.id}`
-              }
+              to={`/watch/${item.id}`}
               className="browse-result"
             >
               <strong>{item.title}</strong>

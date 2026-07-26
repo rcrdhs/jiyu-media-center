@@ -161,6 +161,8 @@ declare global {
       browserExecute?: (code: string) => Promise<{ ok: boolean; result?: unknown; error?: string }>
       browserGetNav?: () => Promise<BrowserNavState & { visible?: boolean }>
       onBrowserNav?: (callback: (state: BrowserNavState) => void) => () => void
+      onSaveContinue?: (callback: () => void) => () => void
+      continueSaved?: () => void
       quit?: () => Promise<void>
       getVersion?: () => Promise<string>
       fetchHtml?: (url: string) => Promise<PlaylistFetchResult>

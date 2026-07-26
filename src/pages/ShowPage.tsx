@@ -26,6 +26,7 @@ export function ShowPage() {
   const [episodes, setEpisodes] = useState<EpisodeChoice[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [playError, setPlayError] = useState<string | null>(null)
   const [playingIndex, setPlayingIndex] = useState<number | null>(null)
   const [fallbackPoster, setFallbackPoster] = useState('')
 
@@ -52,6 +53,7 @@ export function ShowPage() {
     let cancelled = false
     setLoading(true)
     setError(null)
+    setPlayError(null)
     setEpisodes([])
     void resolveShowEpisodes(item, items).then((result) => {
       if (cancelled) return
@@ -80,17 +82,32 @@ export function ShowPage() {
 
   async function playEpisode(index: number) {
     if (!item || !window.signalDesktop?.torrentStream) {
-      setError('Torrent playback needs the Jiyu desktop app.')
+      setPlayError('Torrent playback needs the Jiyu desktop app.')
       return
     }
     const chosen = episodes[index]
     if (!chosen) return
     setPlayingIndex(index)
-    setError(null)
+    setPlayError(null)
     try {
-      const result = await window.signalDesktop.torrentStream(chosen.torrentUri)
-      if (!result.ok || !result.url) {
-        setError(result.error || 'Could not start torrent stream')
+      const result = await Promise.race([
+        window.signalDesktop.torrentStream(chosen.torrentUri),
+        new Promise<{ ok: false; error: string }>((resolve) => {
+          window.setTimeout(
+            () =>
+              resolve({
+                ok: false,
+                error: 'Taking too long to start — the swarm may be dead. Try another episode.',
+              }),
+            60_000,
+          )
+        }),
+      ])
+      if (!result.ok || !('url' in result && result.url)) {
+        setPlayError(
+          ('error' in result && result.error) ||
+            'Could not start torrent stream',
+        )
         setPlayingIndex(null)
         return
       }
@@ -131,7 +148,7 @@ export function ShowPage() {
         returnTo: `/show/${item.id}`,
       })
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Torrent playback failed')
+      setPlayError(err instanceof Error ? err.message : 'Torrent playback failed')
     } finally {
       setPlayingIndex(null)
     }
@@ -194,6 +211,12 @@ export function ShowPage() {
         {error && (
           <div className="empty-state">
             <p>{error}</p>
+          </div>
+        )}
+
+        {playError && (
+          <div className="empty-state" style={{ marginBottom: '0.75rem' }}>
+            <p>{playError}</p>
           </div>
         )}
 

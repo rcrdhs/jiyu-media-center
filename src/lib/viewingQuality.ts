@@ -8,10 +8,12 @@ export function getViewingQuality(): ViewingQuality {
     if (value === '720') return 720
     if (value === '1080') return 1080
     if (value === '2160') return 2160
+    if (value === 'auto') return 'auto'
   } catch {
-    // Use adaptive quality when storage is unavailable.
+    // Fall through to the default.
   }
-  return 'auto'
+  // Default: prefer 720p first (faster start, less bandwidth) over Auto/1080.
+  return 720
 }
 
 export function setViewingQuality(value: ViewingQuality) {

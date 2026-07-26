@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import { HashRouter, Navigate, Route, Routes, useParams } from 'react-router-dom'
 import { CatalogProvider } from './context/CatalogContext'
 import { StreamHealthProvider } from './context/StreamHealthContext'
@@ -17,9 +18,27 @@ import { BrowsePage } from './pages/BrowsePage'
 import { WebBrowserPage } from './pages/WebBrowserPage'
 import { GuidePage } from './pages/GuidePage'
 import { MultiviewPage } from './pages/MultiviewPage'
+import { FORCE_SAVE_CONTINUE_EVENT } from './lib/continueWatching'
+
 function SectionRoute() {
   const { id } = useParams()
   return <SectionPage key={id} />
+}
+
+/** Flush Continue watching when Electron is about to close the window. */
+function DesktopContinueSaveBridge() {
+  useEffect(() => {
+    const api = window.signalDesktop
+    if (!api?.onSaveContinue) return
+    return api.onSaveContinue(() => {
+      window.dispatchEvent(new Event(FORCE_SAVE_CONTINUE_EVENT))
+      // Let the Player persist handler run before acknowledging.
+      window.setTimeout(() => {
+        api.continueSaved?.()
+      }, 50)
+    })
+  }, [])
+  return null
 }
 
 export default function App() {
@@ -50,6 +69,7 @@ export default function App() {
                   <BackToTop />
                   <GlobalPlayer />
                   <WebBrowserPip />
+                  <DesktopContinueSaveBridge />
                 </div>
               </WebBrowserProvider>
             </HashRouter>
