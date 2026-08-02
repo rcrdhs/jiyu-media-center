@@ -35,6 +35,8 @@ export interface ContinueWatchingEntry {
   transport?: StreamTransport
   sourceKind?: StreamSourceKind
   source?: string
+  /** Authoritative runtime (YTS/ffprobe) — preferred over remux buffer duration. */
+  runtimeSeconds?: number
 }
 
 export const CONTINUE_WATCHING_EVENT = 'jiyu:continue-watching'
@@ -123,7 +125,94 @@ export function listContinueWatching(category?: CategoryId): ContinueWatchingEnt
 }
 
 export function getContinueEntry(id: string): ContinueWatchingEntry | null {
-  return readAll().find((entry) => entry.id === id) ?? null
+  const entry = readAll().find((item) => item.id === id) ?? null
+  if (!entry) return null
+  return sanitizeContinueEntry(entry)
+}
+
+/**
+ * Clamp / recover a playhead against an authoritative runtime.
+ * Severe overruns (watch-clock / remux offset bugs) fold back into the title
+ * instead of offering Resume past EOF.
+ */
+export function normalizeContinuePlayhead(
+  currentTime: number,
+  runtimeSeconds?: number | null,
+): { currentTime: number; finished: boolean; repaired: boolean } {
+  const runtime = Number(runtimeSeconds) || 0
+  const t = Math.max(0, Number(currentTime) || 0)
+  if (!isTrustedDuration(runtime) || !Number.isFinite(t)) {
+    return { currentTime: t, finished: false, repaired: false }
+  }
+  if (t <= runtime * COMPLETE_RATIO) {
+    return { currentTime: Math.min(t, runtime), finished: false, repaired: t > runtime }
+  }
+  // Slightly past the real end — treat as finished.
+  if (t <= runtime * 1.12) {
+    return { currentTime: t, finished: true, repaired: false }
+  }
+  // Severe overrun: fold wall-clock / accrued time back into the movie.
+  let folded = t % runtime
+  if (folded < MIN_SECONDS) {
+    return { currentTime: t, finished: true, repaired: true }
+  }
+  if (folded >= runtime * COMPLETE_RATIO) {
+    return { currentTime: t, finished: true, repaired: true }
+  }
+  // Rewind a few seconds so Resume isn't parked on a remux gap edge.
+  return {
+    currentTime: Math.max(MIN_SECONDS, folded - 10),
+    finished: false,
+    repaired: true,
+  }
+}
+
+/** Apply runtime clamp to a continue row; removes the row when past the real end. */
+export function sanitizeContinueEntry(
+  entry: ContinueWatchingEntry,
+  runtimeSeconds?: number | null,
+): ContinueWatchingEntry | null {
+  const runtime =
+    Number(runtimeSeconds) ||
+    Number(entry.runtimeSeconds) ||
+    (isTrustedDuration(entry.duration) ? entry.duration : 0)
+  if (!isTrustedDuration(runtime)) return entry
+
+  const normalized = normalizeContinuePlayhead(entry.currentTime, runtime)
+  if (normalized.finished) {
+    removeContinueEntry(entry.id)
+    return null
+  }
+  const needsWrite =
+    normalized.repaired ||
+    entry.currentTime !== normalized.currentTime ||
+    entry.runtimeSeconds !== runtime ||
+    (isTrustedDuration(runtime) && entry.duration !== runtime)
+  if (!needsWrite) return entry
+
+  const next: ContinueWatchingEntry = {
+    ...entry,
+    currentTime: normalized.currentTime,
+    duration: runtime,
+    runtimeSeconds: runtime,
+    updatedAt: Date.now(),
+  }
+  const others = readAll().filter((item) => item.id !== next.id)
+  writeAll([next, ...others])
+  return next
+}
+
+/**
+ * When playback learns a trusted runtime, repair a bloated Continue row so
+ * Resume offers a real in-title time (not 2h+ past EOF).
+ */
+export function repairContinueWithRuntime(
+  id: string,
+  runtimeSeconds: number,
+): ContinueWatchingEntry | null {
+  const entry = readAll().find((item) => item.id === id) ?? null
+  if (!entry) return null
+  return sanitizeContinueEntry(entry, runtimeSeconds)
 }
 
 export function removeContinueEntry(id: string) {
@@ -152,6 +241,7 @@ export function streamItemFromContinueEntry(entry: ContinueWatchingEntry): Strea
     transport,
     sourceKind: entry.sourceKind || (transport === 'torrent' ? 'torrent' : undefined),
     source: entry.source,
+    runtimeSeconds: entry.runtimeSeconds,
   }
 }
 
@@ -171,6 +261,54 @@ export function isTrustedDuration(duration: number): boolean {
     duration !== Infinity &&
     duration >= TRUSTED_DURATION_SECONDS
   )
+}
+
+/** Prefer the longer of two trusted runtimes (catalog vs ffprobe). */
+export function mergeRuntimeSeconds(
+  a?: number | null,
+  b?: number | null,
+): number | undefined {
+  const left = Number(a) || 0
+  const right = Number(b) || 0
+  const best = Math.max(left, right)
+  return best > 0 ? best : undefined
+}
+
+/**
+ * Pick an authoritative title length: catalog/YTS/ffprobe runtime first, then a
+ * saved Continue duration that does not look like a remux buffer stub.
+ */
+export function resolveTrustedRuntimeSeconds(options: {
+  runtimeSeconds?: number | null
+  savedDuration?: number | null
+  reportedDuration?: number | null
+  playbackUrl?: string
+  currentTime?: number
+}): number {
+  const runtime = Number(options.runtimeSeconds) || 0
+  if (isTrustedDuration(runtime)) return runtime
+
+  const saved = Number(options.savedDuration) || 0
+  const playhead = Number(options.currentTime) || 0
+  if (
+    isTrustedDuration(saved) &&
+    !isLikelyPartialDuration(saved, playhead, {
+      assumeProgressive: true,
+      playbackUrl: options.playbackUrl,
+    })
+  ) {
+    return saved
+  }
+
+  const reported = Number(options.reportedDuration) || 0
+  if (
+    isTrustedDuration(reported) &&
+    !isLocalPlaybackUrl(options.playbackUrl) &&
+    !isLikelyPartialDuration(reported, playhead, { playbackUrl: options.playbackUrl })
+  ) {
+    return reported
+  }
+  return 0
 }
 
 /**
@@ -197,17 +335,52 @@ export function isLikelyPartialDuration(
 }
 
 /**
+ * Remux pipes often fire `ended` when ffmpeg hits a download gap or when the
+ * browser treats the buffered fragment length as the full title (~5 minutes in).
+ * Those are not real finishes — Continue watching must keep the playhead.
+ */
+export function isRemuxFalseEnd(
+  currentTime: number,
+  duration: number,
+  playbackUrl?: string,
+  trustedRuntime?: number,
+): boolean {
+  if (!isLocalPlaybackUrl(playbackUrl)) return false
+  if (!Number.isFinite(currentTime) || currentTime < MIN_SECONDS) return false
+  // With a real runtime, any stop before ~92% of that length is a gap — not the end.
+  if (isTrustedDuration(trustedRuntime || 0)) {
+    return currentTime < (trustedRuntime as number) * 0.92
+  }
+  // Classic early stop: Chromium thinks the movie is only a few minutes long.
+  if (!Number.isFinite(duration) || duration <= 0 || duration < 20 * 60) return true
+  if (
+    isLikelyPartialDuration(duration, currentTime, {
+      assumeProgressive: true,
+      playbackUrl,
+    })
+  ) {
+    return true
+  }
+  // Trusted-looking length but still clearly mid-title.
+  return currentTime / duration < 0.9
+}
+
+/**
  * True when the viewer has reached at least 95% of a known full duration.
  * Requires a trusted length so progressive remux buffer sizes don’t count as “done”.
- * Local remux/torrent URLs never complete from duration alone (use video.ended).
+ * Local remux/torrent URLs never complete from remux duration alone — only from
+ * an authoritative runtime (YTS/ffprobe) passed as `duration` with `authoritative`.
  */
 export function isEpisodeComplete(
   currentTime: number,
   duration: number,
-  options?: { playbackUrl?: string; assumeProgressive?: boolean },
+  options?: { playbackUrl?: string; assumeProgressive?: boolean; authoritative?: boolean },
 ): boolean {
   if (!Number.isFinite(currentTime) || currentTime < MIN_SECONDS) return false
   if (!isTrustedDuration(duration)) return false
+  if (options?.authoritative) {
+    return currentTime / duration >= COMPLETE_RATIO
+  }
   if (options?.assumeProgressive || isLocalPlaybackUrl(options?.playbackUrl)) {
     return false
   }
@@ -260,12 +433,24 @@ export function upsertContinueEntry(
 ) {
   if (!isVodCategory(entry.category)) return
 
-  const existing = getContinueEntry(entry.id)
+  // Read raw — avoid sanitize recursion while merging.
+  const existing = readAll().find((item) => item.id === entry.id) ?? null
   const playbackUrl = options?.playbackUrl || entry.playUrl
   const progressive = Boolean(options?.allowUnknownDuration) || isLocalPlaybackUrl(playbackUrl)
 
+  const runtimeHint =
+    Number(entry.runtimeSeconds) ||
+    Number(existing?.runtimeSeconds) ||
+    0
+  const normalized = normalizeContinuePlayhead(entry.currentTime, runtimeHint)
+  if (normalized.finished) {
+    removeContinueEntry(entry.id)
+    return
+  }
+  const playhead = normalized.currentTime
+
   const scrub = (duration: number) =>
-    isLikelyPartialDuration(duration, entry.currentTime, {
+    isLikelyPartialDuration(duration, playhead, {
       assumeProgressive: progressive,
       playbackUrl,
     })
@@ -280,13 +465,16 @@ export function upsertContinueEntry(
     ? reportedDuration
     : isTrustedDuration(savedDuration)
       ? savedDuration
-      : 0
+      : isTrustedDuration(runtimeHint)
+        ? runtimeHint
+        : 0
 
   // Finished (≥95%) — drop from Continue watching instead of saving.
   if (
-    isEpisodeComplete(entry.currentTime, durationForComplete, {
+    isEpisodeComplete(playhead, durationForComplete, {
       playbackUrl,
       assumeProgressive: progressive,
+      authoritative: isTrustedDuration(runtimeHint) || isTrustedDuration(durationForComplete),
     })
   ) {
     removeContinueEntry(entry.id)
@@ -294,7 +482,7 @@ export function upsertContinueEntry(
   }
 
   if (
-    !shouldTrackProgress(reportedDuration || entry.duration, entry.currentTime, {
+    !shouldTrackProgress(reportedDuration || entry.duration, playhead, {
       ...options,
       playbackUrl,
     })
@@ -306,20 +494,25 @@ export function upsertContinueEntry(
   const next: ContinueWatchingEntry = {
     ...existing,
     ...entry,
+    currentTime: playhead,
+    runtimeSeconds: runtimeHint || entry.runtimeSeconds || existing?.runtimeSeconds,
     // Don’t persist truncated remux durations — they look “almost done” on Home.
     duration: trusted
       ? reportedDuration
       : isTrustedDuration(savedDuration)
         ? savedDuration
-        : 0,
+        : isTrustedDuration(runtimeHint)
+          ? runtimeHint
+          : 0,
     updatedAt: entry.updatedAt ?? Date.now(),
   }
 
   // Re-check after merging a previously saved trusted duration.
   if (
-    isEpisodeComplete(next.currentTime, next.duration, {
+    isEpisodeComplete(next.currentTime, next.duration || runtimeHint, {
       playbackUrl,
       assumeProgressive: progressive,
+      authoritative: isTrustedDuration(next.duration || runtimeHint),
     })
   ) {
     removeContinueEntry(entry.id)

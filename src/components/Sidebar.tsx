@@ -4,6 +4,7 @@ import { CATEGORIES } from '../data/catalog'
 import { usePlayback } from '../context/PlaybackContext'
 import { FORCE_SAVE_CONTINUE_EVENT } from '../lib/continueWatching'
 import { APP_RELEASES, APP_VERSION_LABEL } from '../lib/appVersion'
+import { CatalogSyncBar } from './CatalogSyncBar'
 
 export function Sidebar() {
   const { mode, minimizeToPip, slots, awaitingAdd } = usePlayback()
@@ -146,6 +147,7 @@ export function Sidebar() {
       </nav>
 
       <div className="side-footer">
+        <CatalogSyncBar />
         <NavLink
           to="/library"
           className={({ isActive }) =>

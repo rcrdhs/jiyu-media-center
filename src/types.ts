@@ -57,6 +57,13 @@ export interface StreamItem {
   subtitleUrl?: string
   /** Companion subtitle file vs speculative embedded softsub extract */
   subtitleKind?: 'file' | 'embedded'
+  /**
+   * Authoritative title length in seconds (YTS/TMDB runtime or ffprobe).
+   * Prefer this over remux `video.duration`, which often tracks the buffer only.
+   */
+  runtimeSeconds?: number
+  /** Active WebTorrent infoHash while this item is playing (swarm keep-alive). */
+  torrentInfoHash?: string
 }
 
 export interface StreamPlaylistItem {
@@ -112,6 +119,8 @@ export interface TorrentStreamResult extends Partial<TorrentInfo> {
   fileName?: string
   audioTranscoded?: boolean
   playlist?: StreamPlaylistItem[]
+  /** Probed or metadata runtime for the active video file (seconds). */
+  runtimeSeconds?: number
   error?: string
 }
 
@@ -149,6 +158,46 @@ declare global {
       torrentSourcesSave?: (
         sources: Array<{ id: string; label: string; url: string }>,
       ) => Promise<boolean>
+      /** TMDB TV lists with IMDb ids — key stays in Electron. */
+      tmdbPopularTv?: (limit?: number) => Promise<{
+        ok: boolean
+        shows: Array<{
+          tmdbId: number
+          name: string
+          firstAirDate: string
+          popularity: number
+          imdbId: string
+          overview: string
+          poster: string
+        }>
+        error?: string | null
+      }>
+      tmdbTvCatalog?: (
+        kind: 'popular' | 'on_the_air',
+        limit?: number,
+      ) => Promise<{
+        ok: boolean
+        shows: Array<{
+          tmdbId: number
+          name: string
+          firstAirDate: string
+          popularity: number
+          imdbId: string
+          overview: string
+          poster: string
+        }>
+        error?: string | null
+      }>
+      onTmdbProgress?: (
+        callback: (payload: {
+          phase: 'discover' | 'ids' | 'done'
+          kind: string
+          page: number
+          pagesNeeded: number
+          done: number
+          total: number
+        }) => void,
+      ) => () => void
       browserShow?: (bounds: BrowserBounds) => Promise<boolean>
       browserHide?: (options?: { blank?: boolean }) => Promise<boolean>
       browserSetBounds?: (bounds: BrowserBounds) => Promise<boolean>
@@ -165,10 +214,39 @@ declare global {
       continueSaved?: () => void
       quit?: () => Promise<void>
       getVersion?: () => Promise<string>
+      /** CPU / RAM / battery / GPU hints for adaptive performance. */
+      getSystemCapabilities?: () => Promise<{
+        platform: string
+        arch: string
+        cpuCount: number
+        totalMemGB: number
+        freeMemGB: number
+        onBattery: boolean | null
+        gpuAccelerated: boolean | null
+      }>
+      /** Apply torrent / probe knobs resolved from the device profile. */
+      setPerformanceKnobs?: (knobs: {
+        torrentMaxConns?: number
+        torrentPrefetchPieces?: number
+        torrentCriticalPieces?: number
+        streamProbeConcurrency?: number
+        deviceClass?: string
+      }) => Promise<{ ok: boolean }>
       fetchHtml?: (url: string) => Promise<PlaylistFetchResult>
-      torrentStream?: (magnet: string) => Promise<TorrentStreamResult>
+      /** Close the Cloudflare Chrome helper (after Show List sync). */
+      closeCfBrowser?: (options?: { soon?: boolean; reason?: string }) => Promise<{ ok: boolean }>
+      torrentStream?: (
+        magnet: string,
+        options?: { keepOthers?: boolean },
+      ) => Promise<TorrentStreamResult>
       torrentStatus?: (infoHash?: string) => Promise<{ ok: boolean; torrents: TorrentInfo[]; error?: string }>
       torrentStop?: (infoHash?: string) => Promise<{ ok: boolean; error?: string }>
+      /** Keep pieces downloading while paused / ahead of the playhead (low disk — not a full download). */
+      torrentEnsureDownloading?: (
+        infoHash: string,
+        playheadSec?: number,
+        runtimeSec?: number,
+      ) => Promise<{ ok: boolean; error?: string }>
     }
   }
 }

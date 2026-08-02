@@ -4,10 +4,12 @@ import { useCatalog } from '../context/CatalogContext'
 import {
   CONTINUE_WATCHING_EVENT,
   formatResumeLabel,
+  isTrustedDuration,
   isVodCategory,
   listContinueWatching,
   progressPercent,
   removeContinueEntry,
+  repairContinueWithRuntime,
   vodCategoryLabel,
   type ContinueWatchingEntry,
 } from '../lib/continueWatching'
@@ -91,11 +93,21 @@ export function ContinueWatching({
   variant?: 'home' | 'section'
 }) {
   const location = useLocation()
+  const { getById } = useCatalog()
   const [entries, setEntries] = useState(() => listContinueWatching())
   const fromPath = `${location.pathname}${location.search}` || '/'
 
   useEffect(() => {
-    const refresh = () => setEntries(listContinueWatching())
+    const refresh = () => {
+      // Fold bloated resume times once catalog/YTS runtime is known.
+      for (const entry of listContinueWatching()) {
+        const runtime = getById(entry.id)?.runtimeSeconds || entry.runtimeSeconds
+        if (isTrustedDuration(runtime || 0) && entry.currentTime > (runtime as number)) {
+          repairContinueWithRuntime(entry.id, runtime as number)
+        }
+      }
+      setEntries(listContinueWatching())
+    }
     refresh()
     window.addEventListener('focus', refresh)
     window.addEventListener(CONTINUE_WATCHING_EVENT, refresh)
@@ -105,7 +117,7 @@ export function ContinueWatching({
       window.removeEventListener(CONTINUE_WATCHING_EVENT, refresh)
       document.removeEventListener('visibilitychange', refresh)
     }
-  }, [location.pathname, location.key])
+  }, [location.pathname, location.key, getById])
 
   const shown = category
     ? entries.filter((entry) => entry.category === category)

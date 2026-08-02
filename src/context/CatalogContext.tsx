@@ -33,13 +33,13 @@ import {
 import { appendActivity } from '../lib/activityLog'
 import { maskActivityMessage } from '../lib/sourceMask'
 import { listTorrentCatalog, loadTorrentCatalogMeta } from '../lib/torrentCatalogStore'
-import { isSubsPleaseUrl, loadTorrentSources } from '../lib/torrents'
+import { isEztvSource, isSubsPleaseUrl, loadTorrentSources } from '../lib/torrents'
 import {
   TORRENT_SCRAPER_VERSION,
   syncAllTorrentSources,
   syncTorrentSource,
 } from '../lib/torrentSync'
-import { setTorrentSyncMessage } from '../lib/torrentSyncStatus'
+import { clearTorrentSyncStatus, setTorrentSyncMessage } from '../lib/torrentSyncStatus'
 import type { CategoryId, StreamItem } from '../types'
 
 export interface AddPlaylistInput {
@@ -355,10 +355,10 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
     async (sourceId: string) => {
       const source = loadTorrentSources().find((s) => s.id === sourceId)
       if (!source) return { added: 0, error: 'Website not found' }
-      setTorrentSyncMessage('Updating catalog…')
+      setTorrentSyncMessage('Starting catalog update…', 1)
       try {
         const result = await syncTorrentSource(source, (p) => {
-          setTorrentSyncMessage(maskActivityMessage(p.message))
+          setTorrentSyncMessage(maskActivityMessage(p.message), p.percent ?? null)
         })
         // Only reload shelves once at the end — mid-sync reloads froze TV Series.
         if (result.added > 0 || result.error) {
@@ -367,15 +367,29 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
         const summary = result.error
           ? maskActivityMessage(result.error)
           : `Added ${result.added.toLocaleString()} titles to the catalog`
-        setTorrentSyncMessage(summary)
+        setTorrentSyncMessage(summary, result.error ? null : 100)
         appendActivity(result.error ? 'error' : 'sync', summary)
+        window.setTimeout(() => clearTorrentSyncStatus(), result.error ? 6000 : 2500)
+        if (isEztvSource(source.url, source.label)) {
+          void window.signalDesktop?.closeCfBrowser?.({
+            soon: true,
+            reason: 'eztv-sync-done',
+          })
+        }
         return { added: result.added, error: result.error }
       } catch (err) {
         const message = maskActivityMessage(
           err instanceof Error ? err.message : 'Catalog update failed',
         )
-        setTorrentSyncMessage(message)
+        setTorrentSyncMessage(message, null)
         appendActivity('error', message)
+        window.setTimeout(() => clearTorrentSyncStatus(), 6000)
+        if (isEztvSource(source.url, source.label)) {
+          void window.signalDesktop?.closeCfBrowser?.({
+            soon: true,
+            reason: 'eztv-sync-error',
+          })
+        }
         return { added: 0, error: message }
       }
     },
@@ -385,15 +399,22 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
   const syncAllTorrentWebsites = useCallback(async () => {
     const list = loadTorrentSources()
     if (list.length === 0) return { added: 0, sources: 0 }
-    setTorrentSyncMessage('Updating catalog…')
+    setTorrentSyncMessage('Starting catalog update…', 1)
     const results = await syncAllTorrentSources(list, (p) => {
-      setTorrentSyncMessage(maskActivityMessage(p.message))
+      setTorrentSyncMessage(maskActivityMessage(p.message), p.percent ?? null)
     })
     const added = results.reduce((sum, r) => sum + r.added, 0)
     if (added > 0) await reloadTorrentCatalog()
     const summary = `Synced ${added.toLocaleString()} titles to the catalog`
-    setTorrentSyncMessage(summary)
+    setTorrentSyncMessage(summary, 100)
     appendActivity('sync', summary)
+    window.setTimeout(() => clearTorrentSyncStatus(), 2500)
+    if (list.some((source) => isEztvSource(source.url, source.label))) {
+      void window.signalDesktop?.closeCfBrowser?.({
+        soon: true,
+        reason: 'eztv-sync-all-done',
+      })
+    }
     return { added, sources: list.length }
   }, [reloadTorrentCatalog])
 

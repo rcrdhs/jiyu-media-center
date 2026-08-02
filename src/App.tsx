@@ -19,6 +19,7 @@ import { WebBrowserPage } from './pages/WebBrowserPage'
 import { GuidePage } from './pages/GuidePage'
 import { MultiviewPage } from './pages/MultiviewPage'
 import { FORCE_SAVE_CONTINUE_EVENT } from './lib/continueWatching'
+import { ensurePerformanceProfile } from './lib/deviceProfile'
 
 function SectionRoute() {
   const { id } = useParams()
@@ -37,6 +38,14 @@ function DesktopContinueSaveBridge() {
         api.continueSaved?.()
       }, 50)
     })
+  }, [])
+  return null
+}
+
+/** Detect CPU/RAM/battery and push torrent/sync knobs into Electron. */
+function DevicePerformanceBridge() {
+  useEffect(() => {
+    void ensurePerformanceProfile()
   }, [])
   return null
 }
@@ -70,6 +79,7 @@ export default function App() {
                   <GlobalPlayer />
                   <WebBrowserPip />
                   <DesktopContinueSaveBridge />
+                  <DevicePerformanceBridge />
                 </div>
               </WebBrowserProvider>
             </HashRouter>

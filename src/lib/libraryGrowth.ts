@@ -9,6 +9,9 @@ type DayCounts = Record<string, number> // YYYY-MM-DD → title count
 type GrowthStore = {
   days: Partial<Record<CategoryId, DayCounts>>
   open: Partial<Record<CategoryId, DayCounts>>
+  /** Whole-catalog totals for the Home hero panel. */
+  catalogDays?: DayCounts
+  catalogOpen?: DayCounts
 }
 
 export type SectionGrowth = {
@@ -34,7 +37,7 @@ function yesterdayKey(from = new Date()): string {
 }
 
 function emptyStore(): GrowthStore {
-  return { days: {}, open: {} }
+  return { days: {}, open: {}, catalogDays: {}, catalogOpen: {} }
 }
 
 function readStore(): GrowthStore {
@@ -52,6 +55,10 @@ function readStore(): GrowthStore {
     return {
       days: store.days && typeof store.days === 'object' ? store.days : {},
       open: store.open && typeof store.open === 'object' ? store.open : {},
+      catalogDays:
+        store.catalogDays && typeof store.catalogDays === 'object' ? store.catalogDays : {},
+      catalogOpen:
+        store.catalogOpen && typeof store.catalogOpen === 'object' ? store.catalogOpen : {},
     }
   } catch {
     return emptyStore()
@@ -136,6 +143,69 @@ export function getSectionGrowth(category: CategoryId, fallbackToday = 0): Secti
   }
   const store = readStore()
   return growthFrom(store.days[category] ?? {}, store.open[category] ?? {}, fallbackToday)
+}
+
+/**
+ * Home hero growth: "new today" is titles above yesterday's closing library size.
+ * A daily sync that reloads the same catalog must not count as thousands of new titles.
+ */
+function catalogGrowthFrom(
+  days: DayCounts,
+  open: DayCounts,
+  fallbackToday: number,
+): SectionGrowth {
+  const todayKey = localDateKey()
+  const yday = yesterdayKey()
+  const today = typeof days[todayKey] === 'number' ? days[todayKey] : fallbackToday
+  const yesterday = typeof days[yday] === 'number' ? days[yday] : null
+  const openToday = typeof open[todayKey] === 'number' ? open[todayKey] : today
+  // Prefer yesterday's close. Fall back to today's settled baseline only when
+  // we have no prior day (first run).
+  const baseline = yesterday != null ? yesterday : openToday
+  return {
+    yesterday,
+    today,
+    delta: yesterday == null ? null : today - yesterday,
+    newToday: Math.max(0, today - baseline),
+  }
+}
+
+/** Snapshot the full catalog size for Home (“titles today” / “new today”). */
+export function recordCatalogTitleCount(count: number): SectionGrowth {
+  if (!Number.isFinite(count) || count < 0) {
+    return { yesterday: null, today: 0, delta: null, newToday: 0 }
+  }
+  const today = localDateKey()
+  const yday = yesterdayKey()
+  const store = readStore()
+  const days = { ...(store.catalogDays ?? {}) }
+  const open = { ...(store.catalogOpen ?? {}) }
+  const n = Math.max(0, Math.round(count))
+  const yesterdayCount = typeof days[yday] === 'number' ? days[yday] : null
+
+  if (typeof open[today] !== 'number') {
+    // Seed baseline from yesterday when possible — not from a pre-sync partial load.
+    open[today] = yesterdayCount != null ? yesterdayCount : n
+  } else if (yesterdayCount != null && open[today] < yesterdayCount) {
+    // Repair a cold-start baseline that was recorded before the catalog loaded.
+    open[today] = yesterdayCount
+  } else if (yesterdayCount == null && open[today] < n * 0.5) {
+    // First tracked day: partial load became baseline; treat the filled catalog
+    // as the real start so the initial sync isn't "new".
+    open[today] = n
+  }
+  days[today] = n
+
+  store.catalogDays = pruneDays(days)
+  store.catalogOpen = pruneDays(open)
+  writeStore(store)
+
+  return catalogGrowthFrom(days, open, n)
+}
+
+export function getCatalogGrowth(fallbackToday = 0): SectionGrowth {
+  const store = readStore()
+  return catalogGrowthFrom(store.catalogDays ?? {}, store.catalogOpen ?? {}, fallbackToday)
 }
 
 export function formatSectionGrowth(growth: SectionGrowth): string | null {

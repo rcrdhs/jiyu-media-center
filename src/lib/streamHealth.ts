@@ -1,11 +1,17 @@
 import type { StreamItem, StreamProbeResult } from '../types'
+import { getPerformanceKnobs } from './deviceProfile'
 import { isYouTubeUrl } from './webBrowser'
 import { isYouTubeLiveNow } from './youtubeLive'
 
 /** Fast fail — unresponsive streams shouldn't stall the whole shelf */
 export const DEFAULT_TIMEOUT_MS = 2500
+/** Fallback when the device profile has not resolved yet. */
 export const DEFAULT_CONCURRENCY = 20
 const CHUNK_SIZE = 16
+
+function probeConcurrency(): number {
+  return getPerformanceKnobs().streamProbeConcurrency || DEFAULT_CONCURRENCY
+}
 
 async function probeYouTubeLive(url: string): Promise<StreamProbeResult> {
   const started = Date.now()
@@ -102,7 +108,7 @@ export async function probeStreamItems(
     const slice = items.slice(offset, offset + CHUNK_SIZE)
     const entries = slice.map((item) => ({ id: item.id, url: item.url }))
 
-    const chunk = await mapPool(entries, options?.concurrency ?? DEFAULT_CONCURRENCY, async (entry) => {
+    const chunk = await mapPool(entries, options?.concurrency ?? probeConcurrency(), async (entry) => {
       if (isYouTubeUrl(entry.url)) {
         return { id: entry.id, ...(await probeYouTubeLive(entry.url)) }
       }

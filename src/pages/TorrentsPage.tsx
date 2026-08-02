@@ -6,7 +6,7 @@ import {
   loadTorrentCatalogMeta,
 } from '../lib/torrentCatalogStore'
 import {
-  getTorrentSyncMessage,
+  getTorrentSyncStatus,
   subscribeTorrentSyncMessage,
 } from '../lib/torrentSyncStatus'
 import {
@@ -42,11 +42,12 @@ type TorrentsPageProps = {
 export function TorrentsPage({ embedded = false }: TorrentsPageProps) {
   const { play } = usePlayback()
   const { syncTorrentWebsite, reloadTorrentCatalog, torrentCount } = useCatalog()
-  const torrentSyncMessage = useSyncExternalStore(
+  const torrentSyncStatus = useSyncExternalStore(
     subscribeTorrentSyncMessage,
-    getTorrentSyncMessage,
-    getTorrentSyncMessage,
+    getTorrentSyncStatus,
+    getTorrentSyncStatus,
   )
+  const torrentSyncMessage = torrentSyncStatus.message
   const desktop = Boolean(window.signalDesktop?.torrentStream)
   const returnTo = embedded ? '/library' : '/torrents'
 
@@ -390,7 +391,9 @@ export function TorrentsPage({ embedded = false }: TorrentsPageProps) {
 
       {torrentSyncMessage && (
         <p className="toast" role="status">
-          {torrentSyncMessage}
+          {torrentSyncStatus.percent != null
+            ? `${torrentSyncMessage} · ${torrentSyncStatus.percent}%`
+            : torrentSyncMessage}
         </p>
       )}
 

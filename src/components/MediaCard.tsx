@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { useStreamHealth } from '../context/StreamHealthContext'
 import { getMainStage, setMainScroll } from '../lib/viewState'
+import { isShowBrowseItem } from '../lib/torrents'
 import { isYouTubeUrl } from '../lib/webBrowser'
 import { isWeakPosterUrl, resolveCatalogPoster } from '../lib/posterFallback'
 import { CardPreview } from './CardPreview'
@@ -89,7 +90,7 @@ export function MediaCard({ item }: MediaCardProps) {
       onMouseLeave={onLeave}
     >
       <Link
-        to={`/watch/${item.id}`}
+        to={isShowBrowseItem(item) ? `/show/${item.id}` : `/watch/${item.id}`}
         className="media-card"
         state={{ from: `${location.pathname}${location.search}` }}
         title={
@@ -145,6 +146,14 @@ export function MediaCard({ item }: MediaCardProps) {
               if (!t) return false
               if (/^https?:\/\//i.test(t) || /^#?\d+$/.test(t)) return false
               if (t.toLowerCase() === 'torrent' || t.toLowerCase() === 'subsplease') return false
+              // Shelf plumbing — not for card chrome.
+              if (
+                /^(series|movies|anime|full-shows|new-releases|trending-airing|popular-movies|new-movies)$/i.test(
+                  t,
+                )
+              ) {
+                return false
+              }
               // Never show the website / playlist source on cards (e.g. eztvx.to).
               if (sourceKey && t.toLowerCase() === sourceKey) return false
               if (/\.(to|com|org|net|gg|ch|re|ag|tv|io|xyz)\b/i.test(t)) return false

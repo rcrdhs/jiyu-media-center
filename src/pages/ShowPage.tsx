@@ -3,23 +3,25 @@ import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { resolvePlayableItem } from '../data/catalog'
 import { useCatalog } from '../context/CatalogContext'
 import { usePlayback } from '../context/PlaybackContext'
-import { getContinueEntry } from '../lib/continueWatching'
+import { getContinueEntry, mergeRuntimeSeconds } from '../lib/continueWatching'
 import { isWeakPosterUrl, resolveCatalogPoster } from '../lib/posterFallback'
 import {
   cleanShowDisplayTitle,
+  isEztvSource,
   isShowBrowseItem,
   labelQuality,
   resolveShowEpisodes,
+  torrentUrisForEpisode,
   type EpisodeChoice,
 } from '../lib/torrents'
-import type { StreamItem, StreamPlaylistItem } from '../types'
+import type { StreamItem, StreamPlaylistItem, TorrentStreamResult } from '../types'
 
 export function ShowPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const location = useLocation()
   const { getById, items } = useCatalog()
-  const { play } = usePlayback()
+  const { play, awaitingAdd, slots, mode } = usePlayback()
   const raw = id ? getById(id) : undefined
   const item = useMemo(() => resolvePlayableItem(raw, items), [raw, items])
 
@@ -82,32 +84,52 @@ export function ShowPage() {
 
   async function playEpisode(index: number) {
     if (!item || !window.signalDesktop?.torrentStream) {
-      setPlayError('Torrent playback needs the Jiyu desktop app.')
+      setPlayError('Playback needs the Jiyu desktop app.')
       return
     }
     const chosen = episodes[index]
     if (!chosen) return
     setPlayingIndex(index)
     setPlayError(null)
+    const candidates = torrentUrisForEpisode(chosen)
+    const keepOthers = awaitingAdd || slots.length > 1 || mode === 'multi'
     try {
-      const result = await Promise.race([
-        window.signalDesktop.torrentStream(chosen.torrentUri),
-        new Promise<{ ok: false; error: string }>((resolve) => {
-          window.setTimeout(
-            () =>
-              resolve({
-                ok: false,
-                error: 'Taking too long to start — the swarm may be dead. Try another episode.',
-              }),
-            60_000,
-          )
-        }),
-      ])
-      if (!result.ok || !('url' in result && result.url)) {
-        setPlayError(
-          ('error' in result && result.error) ||
-            'Could not start torrent stream',
-        )
+      let result: TorrentStreamResult | null = null
+      let usedUri = chosen.torrentUri
+      let lastError = 'Could not start torrent stream'
+      for (let i = 0; i < candidates.length; i++) {
+        const uri = candidates[i]
+        usedUri = uri
+        if (i > 0) {
+          setPlayError(`Trying another release (${i + 1}/${candidates.length})…`)
+        }
+        const attempt = await Promise.race([
+          window.signalDesktop.torrentStream(uri, { keepOthers }),
+          new Promise<TorrentStreamResult>((resolve) => {
+            window.setTimeout(
+              () =>
+                resolve({
+                  ok: false,
+                  error:
+                    'Taking too long to start — this release may be unavailable. Try another episode or quality.',
+                }),
+              55_000,
+            )
+          }),
+        ])
+        if (attempt.ok && attempt.url) {
+          result = attempt
+          break
+        }
+        lastError = attempt.error || 'Could not start torrent stream'
+        // Dead swarm — don't burn another minute on the same infohash via alternates
+        // that share the same release; still try distinct alternate magnets.
+        if (/no reachable seeds|no seeds found|swarm may be dead|no peers found/i.test(lastError)) {
+          continue
+        }
+      }
+      if (!result?.ok || !result.url) {
+        setPlayError(lastError)
         setPlayingIndex(null)
         return
       }
@@ -119,7 +141,7 @@ export function ShowPage() {
                 ? {
                     title: ep.title,
                     url: result.url!,
-                    torrentUri: ep.torrentUri,
+                    torrentUri: usedUri,
                     subtitleUrl: result.subtitleUrl ?? result.playlist?.[0]?.subtitleUrl,
                     subtitleKind: result.subtitleKind ?? result.playlist?.[0]?.subtitleKind,
                     fileName: result.fileName,
@@ -140,15 +162,17 @@ export function ShowPage() {
         subtitleUrl: result.subtitleUrl ?? result.playlist?.[0]?.subtitleUrl,
         subtitleKind: result.subtitleKind ?? result.playlist?.[0]?.subtitleKind,
         playlist,
-        torrentUri: chosen.torrentUri,
+        torrentUri: usedUri,
         transport: 'direct',
+        runtimeSeconds: mergeRuntimeSeconds(result.runtimeSeconds, item.runtimeSeconds),
+        torrentInfoHash: result.infoHash,
       }
       play(playable, {
         forceFull: true,
         returnTo: `/show/${item.id}`,
       })
     } catch (err) {
-      setPlayError(err instanceof Error ? err.message : 'Torrent playback failed')
+      setPlayError(err instanceof Error ? err.message : 'Playback failed')
     } finally {
       setPlayingIndex(null)
     }
@@ -200,6 +224,12 @@ export function ShowPage() {
             {loading
               ? 'Loading episode list…'
               : `${episodes.length.toLocaleString()} episode${episodes.length === 1 ? '' : 's'}`}
+            {!loading &&
+            episodes.length > 0 &&
+            isEztvSource(display.detailUrl || display.url || '', display.source) &&
+            episodes.every((ep) => (ep.seeders ?? 0) > 0)
+              ? ' · seeded only'
+              : ''}
             {continueEntry?.episodeTitle
               ? ` · Continue ${continueEntry.episodeTitle}`
               : continueEntry
@@ -237,6 +267,9 @@ export function ShowPage() {
                     <span className="show-episode-name">{ep.title}</span>
                     <span className="show-episode-meta">
                       {ep.quality > 0 ? labelQuality(ep.quality) : ''}
+                      {typeof ep.seeders === 'number' && ep.seeders > 0
+                        ? `${ep.quality > 0 ? ' · ' : ''}${ep.seeders} seeds`
+                        : ''}
                       {isContinue ? ' · Resume' : ''}
                       {busy ? ' · Starting…' : ''}
                     </span>

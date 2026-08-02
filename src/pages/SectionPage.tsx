@@ -15,11 +15,16 @@ import {
 import { getSectionSourcePrefs, setSectionSourcePrefs } from '../lib/sectionPrefs'
 import { upsertTorrentItems } from '../lib/torrentCatalogStore'
 import {
+  ANIME_SHELF_FULL_SHOWS,
   collapseEpisodeRowsToShows,
   isAnimeFullShowItem,
   isAnimeNewReleaseItem,
   isEztvShowUrl,
   isEztvSource,
+  isMoviesNewItem,
+  isMoviesPopularItem,
+  isSeriesFullShowItem,
+  isSeriesTrendingItem,
   isYtsLabel,
   linkToCatalogItem,
   loadTorrentSources,
@@ -30,17 +35,24 @@ import type { CategoryId, StreamItem } from '../types'
 
 const PAGE = 120
 const MIXED_SECTIONS = new Set<CategoryId>(['movies', 'series', 'anime'])
-const ANIME_TAB_KEY = 'jiyu.anime.shelf-tab'
-type AnimeShelfTab = 'new-releases' | 'full-shows'
+type ShelfTabId = 'primary' | 'full-shows'
 
-function readAnimeShelfTab(): AnimeShelfTab {
+function shelfTabStorageKey(category: CategoryId): string {
+  return `jiyu.${category}.shelf-tab`
+}
+
+function readShelfTab(category: CategoryId, fallback: ShelfTabId): ShelfTabId {
   try {
-    const raw = localStorage.getItem(ANIME_TAB_KEY)
-    if (raw === 'new-releases' || raw === 'full-shows') return raw
+    const raw = localStorage.getItem(shelfTabStorageKey(category))
+    if (raw === 'primary' || raw === 'full-shows') return raw
+    // Migrate older anime key values.
+    if (category === 'anime' && (raw === 'new-releases' || raw === 'full-shows')) {
+      return raw === 'new-releases' ? 'primary' : 'full-shows'
+    }
   } catch {
     /* ignore */
   }
-  return 'new-releases'
+  return fallback
 }
 
 function isIptvShelfItem(item: StreamItem): boolean {
@@ -94,9 +106,17 @@ function sortSectionItems(
   torrentFirst: boolean,
   newestFirst: boolean,
   category: CategoryId,
+  /** Popular Movies: keep YTS download-rank via releasedAt, not theatrical year. */
+  sortMode: 'default' | 'rank' = 'default',
 ) {
   return [...items].sort((a, b) => {
-    // Movies: always newest release → earliest (theatrical year / added date).
+    if (category === 'movies' && sortMode === 'rank') {
+      const rank = (b.releasedAt ?? 0) - (a.releasedAt ?? 0)
+      if (rank !== 0) return rank
+      return a.title.localeCompare(b.title, undefined, { sensitivity: 'base' })
+    }
+
+    // Movies (New): newest release → earliest (theatrical year / added date).
     if (category === 'movies') {
       const date = releaseSortKey(b) - releaseSortKey(a)
       if (date !== 0) return date
@@ -126,6 +146,7 @@ function prepareShelfList(
     torrentFirst: boolean
     newestFirst: boolean
     collapseEpisodes?: boolean
+    sortMode?: 'default' | 'rank'
   },
 ) {
   let next = list
@@ -155,6 +176,7 @@ function prepareShelfList(
       options.torrentFirst,
       options.newestFirst,
       options.categoryId,
+      options.sortMode ?? 'default',
     )
   }
   return next
@@ -184,13 +206,33 @@ export function SectionPage() {
   const [autoCheck, setAutoCheck] = useState(saved?.autoCheck ?? true)
   const [listReady, setListReady] = useState(false)
   const [sourcePrefs, setSourcePrefsState] = useState(getSectionSourcePrefs)
-  const [animeTab, setAnimeTab] = useState<AnimeShelfTab>(readAnimeShelfTab)
-
   const categoryId = (meta?.id ?? 'series') as CategoryId
+  const [shelfTab, setShelfTab] = useState<ShelfTabId>(() =>
+    readShelfTab(
+      categoryId,
+      categoryId === 'series' || categoryId === 'anime' || categoryId === 'movies'
+        ? 'primary'
+        : 'full-shows',
+    ),
+  )
+  const userPickedShelfTabRef = useRef(false)
+
   // Memoize — byCategory() returns a new array every call; sync status updates
   // were re-sorting the entire TV Series shelf on every page of EZTV sync.
   const items = useMemo(() => byCategory(categoryId), [byCategory, categoryId])
   const trackGrowth = Boolean(meta && isGrowthTrackedSection(meta.id))
+
+  useEffect(() => {
+    // Remounting the same section (click a title → Back) must keep the saved
+    // infinite-scroll window. Resetting to PAGE here made scroll restore clamp
+    // to the top after deep scrolls (e.g. titles starting with "P").
+    userPickedShelfTabRef.current = false
+    setShelfTab(readShelfTab(categoryId, 'primary'))
+    const savedView = getSectionView(categoryId)
+    setVisible(savedView?.visible ?? PAGE)
+    setQuery(savedView?.query ?? '')
+    setAutoCheck(savedView?.autoCheck ?? true)
+  }, [categoryId])
 
   const shelfOpts = useMemo(
     () => ({
@@ -203,63 +245,165 @@ export function SectionPage() {
     [categoryId, showSourceTools, sourcePrefs],
   )
 
-  /** Shelf size without search — used for today/yesterday title counts. */
-  const shelfItems = useMemo(() => {
+  const splitShelves = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    const match = (item: StreamItem) => matchesSectionQuery(item, q)
+
     if (categoryId === 'anime') {
-      const newReleases = prepareShelfList(
-        items.filter((item) => isAnimeNewReleaseItem(item)),
+      const primary = prepareShelfList(
+        items.filter((item) => isAnimeNewReleaseItem(item) && match(item)),
         { ...shelfOpts, newestFirst: true, collapseEpisodes: false },
       )
       const fullShows = prepareShelfList(
-        items.filter((item) => isAnimeFullShowItem(item)),
+        items.filter((item) => isAnimeFullShowItem(item) && match(item)),
         shelfOpts,
       )
       const other = prepareShelfList(
         items.filter(
-          (item) => !isAnimeNewReleaseItem(item) && !isAnimeFullShowItem(item),
+          (item) =>
+            !isAnimeNewReleaseItem(item) && !isAnimeFullShowItem(item) && match(item),
         ),
         shelfOpts,
       )
-      return [...newReleases, ...fullShows, ...other]
+      return {
+        primaryLabel: 'New Releases',
+        fullLabel: 'Full Shows',
+        primaryBlurb: '',
+        fullBlurb: '',
+        primaryEmpty: 'No new releases yet — sync the anime website in Library.',
+        fullEmpty: 'No full shows yet — sync the anime website in Library.',
+        primary,
+        fullShows,
+        other,
+      }
+    }
+
+    if (categoryId === 'series') {
+      // Full Shows = TMDB popular on EZTV; Now Airing = EZTV trending/landing.
+      const primary = prepareShelfList(
+        items.filter((item) => isSeriesFullShowItem(item) && match(item)),
+        shelfOpts,
+      )
+      const fullShows = prepareShelfList(
+        items.filter((item) => isSeriesTrendingItem(item) && match(item)),
+        { ...shelfOpts, newestFirst: true },
+      )
+      const other = prepareShelfList(
+        items.filter(
+          (item) =>
+            !isSeriesFullShowItem(item) && !isSeriesTrendingItem(item) && match(item),
+        ),
+        shelfOpts,
+      )
+      return {
+        primaryLabel: 'Full Shows',
+        fullLabel: 'Now Airing',
+        primaryBlurb: '',
+        fullBlurb: '',
+        primaryEmpty: 'No full shows yet — sync the TV website in Library.',
+        fullEmpty: 'No airing titles yet — sync the TV website in Library.',
+        primary,
+        fullShows,
+        other,
+      }
+    }
+
+    if (categoryId === 'movies') {
+      const primary = prepareShelfList(
+        items.filter((item) => isMoviesPopularItem(item) && match(item)),
+        { ...shelfOpts, sortMode: 'rank' },
+      )
+      const fullShows = prepareShelfList(
+        items.filter((item) => isMoviesNewItem(item) && match(item)),
+        { ...shelfOpts, newestFirst: true },
+      )
+      const other = prepareShelfList(
+        items.filter(
+          (item) => !isMoviesPopularItem(item) && !isMoviesNewItem(item) && match(item),
+        ),
+        shelfOpts,
+      )
+      return {
+        primaryLabel: 'Popular Movies',
+        fullLabel: 'New Movies',
+        primaryBlurb: '',
+        fullBlurb: '',
+        primaryEmpty: 'No popular movies yet — sync the movies website in Library.',
+        fullEmpty: 'No new movies yet — sync the movies website in Library.',
+        primary,
+        fullShows,
+        other,
+      }
+    }
+
+    return null
+  }, [items, query, categoryId, shelfOpts])
+
+  /** Shelf size without search — used for today/yesterday title counts. */
+  const shelfItems = useMemo(() => {
+    if (categoryId === 'anime') {
+      return [
+        ...prepareShelfList(
+          items.filter((item) => isAnimeNewReleaseItem(item)),
+          { ...shelfOpts, newestFirst: true, collapseEpisodes: false },
+        ),
+        ...prepareShelfList(
+          items.filter((item) => isAnimeFullShowItem(item)),
+          shelfOpts,
+        ),
+        ...prepareShelfList(
+          items.filter(
+            (item) => !isAnimeNewReleaseItem(item) && !isAnimeFullShowItem(item),
+          ),
+          shelfOpts,
+        ),
+      ]
+    }
+    if (categoryId === 'series') {
+      return [
+        ...prepareShelfList(
+          items.filter((item) => isSeriesFullShowItem(item)),
+          shelfOpts,
+        ),
+        ...prepareShelfList(
+          items.filter((item) => isSeriesTrendingItem(item)),
+          { ...shelfOpts, newestFirst: true },
+        ),
+        ...prepareShelfList(
+          items.filter(
+            (item) => !isSeriesFullShowItem(item) && !isSeriesTrendingItem(item),
+          ),
+          shelfOpts,
+        ),
+      ]
+    }
+    if (categoryId === 'movies') {
+      return [
+        ...prepareShelfList(
+          items.filter((item) => isMoviesPopularItem(item)),
+          { ...shelfOpts, sortMode: 'rank' },
+        ),
+        ...prepareShelfList(
+          items.filter((item) => isMoviesNewItem(item)),
+          { ...shelfOpts, newestFirst: true },
+        ),
+        ...prepareShelfList(
+          items.filter((item) => !isMoviesPopularItem(item) && !isMoviesNewItem(item)),
+          shelfOpts,
+        ),
+      ]
     }
     return prepareShelfList(items, shelfOpts)
   }, [items, categoryId, shelfOpts])
 
-  const animeShelves = useMemo(() => {
-    if (categoryId !== 'anime') return null
-    const q = query.trim().toLowerCase()
-    const newReleases = prepareShelfList(
-      items.filter((item) => isAnimeNewReleaseItem(item) && matchesSectionQuery(item, q)),
-      { ...shelfOpts, newestFirst: true, collapseEpisodes: false },
-    )
-    const fullShows = prepareShelfList(
-      items.filter((item) => isAnimeFullShowItem(item) && matchesSectionQuery(item, q)),
-      shelfOpts,
-    )
-    const other = prepareShelfList(
-      items.filter(
-        (item) =>
-          !isAnimeNewReleaseItem(item) &&
-          !isAnimeFullShowItem(item) &&
-          matchesSectionQuery(item, q),
-      ),
-      shelfOpts,
-    )
-    return { newReleases, fullShows, other }
-  }, [items, query, categoryId, shelfOpts])
-
   const filtered = useMemo(() => {
-    if (animeShelves) {
-      return [
-        ...animeShelves.newReleases,
-        ...animeShelves.fullShows,
-        ...animeShelves.other,
-      ]
+    if (splitShelves) {
+      return [...splitShelves.primary, ...splitShelves.fullShows, ...splitShelves.other]
     }
     const q = query.trim().toLowerCase()
     if (!q) return shelfItems
     return shelfItems.filter((item) => matchesSectionQuery(item, q))
-  }, [shelfItems, query, animeShelves])
+  }, [shelfItems, query, splitShelves])
 
   const [growth, setGrowth] = useState<SectionGrowth | null>(null)
 
@@ -289,7 +433,9 @@ export function SectionPage() {
           const link = await lookupEztvShowCard(q, source)
           if (!link) continue
           eztvLookupRef.current = qLower
-          await upsertTorrentItems([linkToCatalogItem(link, source, 'series')])
+          await upsertTorrentItems([
+            linkToCatalogItem(link, source, 'series', ANIME_SHELF_FULL_SHOWS),
+          ])
           await reloadTorrentCatalog()
           break
         }
@@ -300,40 +446,42 @@ export function SectionPage() {
 
   const growthLine = growth ? formatSectionGrowth(growth) : null
 
-  const hasAnimeTabs = Boolean(
-    animeShelves &&
-      (animeShelves.newReleases.length > 0 ||
-        animeShelves.fullShows.length > 0 ||
-        animeShelves.other.length > 0),
+  const hasShelfTabs = Boolean(
+    splitShelves &&
+      (splitShelves.primary.length > 0 ||
+        splitShelves.fullShows.length > 0 ||
+        splitShelves.other.length > 0),
   )
 
-  // Prefer New Releases when that shelf has items; otherwise land on Full Shows.
+  // On first load only: if the saved primary tab is empty, land on Full Shows.
+  // Never bounce after the user explicitly picks a tab.
   useEffect(() => {
-    if (!animeShelves) return
-    if (animeTab === 'new-releases' && animeShelves.newReleases.length === 0) {
-      if (animeShelves.fullShows.length > 0 || animeShelves.other.length > 0) {
-        setAnimeTab('full-shows')
+    if (!splitShelves || userPickedShelfTabRef.current) return
+    if (shelfTab === 'primary' && splitShelves.primary.length === 0) {
+      if (splitShelves.fullShows.length > 0 || splitShelves.other.length > 0) {
+        setShelfTab('full-shows')
       }
     }
-  }, [animeShelves, animeTab])
+  }, [splitShelves, shelfTab])
 
-  function selectAnimeTab(tab: AnimeShelfTab) {
-    setAnimeTab(tab)
+  function selectShelfTab(tab: ShelfTabId) {
+    userPickedShelfTabRef.current = true
+    setShelfTab(tab)
     setVisible(PAGE)
     try {
-      localStorage.setItem(ANIME_TAB_KEY, tab)
+      localStorage.setItem(shelfTabStorageKey(categoryId), tab)
     } catch {
       /* ignore */
     }
   }
 
-  const activeAnimeList = useMemo(() => {
-    if (!animeShelves) return null
-    if (animeTab === 'new-releases') return animeShelves.newReleases
-    return [...animeShelves.fullShows, ...animeShelves.other]
-  }, [animeShelves, animeTab])
+  const activeShelfList = useMemo(() => {
+    if (!splitShelves) return null
+    if (shelfTab === 'primary') return splitShelves.primary
+    return [...splitShelves.fullShows, ...splitShelves.other]
+  }, [splitShelves, shelfTab])
 
-  const pagedList = activeAnimeList ?? filtered
+  const pagedList = activeShelfList ?? filtered
   const effectiveVisible = Math.min(
     Math.max(visible, PAGE),
     Math.max(pagedList.length, PAGE),
@@ -501,35 +649,42 @@ export function SectionPage() {
         )}
       </div>
 
-      {hasAnimeTabs && animeShelves ? (
+      {hasShelfTabs && splitShelves ? (
         <section className="section-block anime-shelf-block">
           <div className="section-head anime-shelf-head">
-            <div className="anime-shelf-tabs" role="tablist" aria-label="Anime shelves">
+            <div
+              className="anime-shelf-tabs"
+              role="tablist"
+              aria-label={`${meta.label} shelves`}
+            >
               <button
                 type="button"
                 role="tab"
-                className={`anime-shelf-tab${animeTab === 'new-releases' ? ' is-active' : ''}`}
-                aria-selected={animeTab === 'new-releases'}
-                onClick={() => selectAnimeTab('new-releases')}
+                className={`anime-shelf-tab${shelfTab === 'primary' ? ' is-active' : ''}`}
+                aria-selected={shelfTab === 'primary'}
+                onClick={() => selectShelfTab('primary')}
               >
-                New Releases
+                {splitShelves.primaryLabel}
               </button>
               <button
                 type="button"
                 role="tab"
-                className={`anime-shelf-tab${animeTab === 'full-shows' ? ' is-active' : ''}`}
-                aria-selected={animeTab === 'full-shows'}
-                onClick={() => selectAnimeTab('full-shows')}
+                className={`anime-shelf-tab${shelfTab === 'full-shows' ? ' is-active' : ''}`}
+                aria-selected={shelfTab === 'full-shows'}
+                onClick={() => selectShelfTab('full-shows')}
               >
-                Full Shows
+                {splitShelves.fullLabel}
               </button>
             </div>
-            <p>
-              {animeTab === 'new-releases'
-                ? 'Latest single-episode drops from SubsPlease'
-                : 'Complete SubsPlease catalog'}
-              <span className="count-chip">{pagedList.length.toLocaleString()}</span>
-            </p>
+            {((shelfTab === 'primary'
+              ? splitShelves.primaryBlurb
+              : splitShelves.fullBlurb) || ''
+            ).trim() ? (
+              <p>
+                {shelfTab === 'primary' ? splitShelves.primaryBlurb : splitShelves.fullBlurb}
+                <span className="count-chip">{pagedList.length.toLocaleString()}</span>
+              </p>
+            ) : null}
           </div>
           <CatalogGrid
             items={shown}
@@ -537,9 +692,7 @@ export function SectionPage() {
             showHealthFilters={false}
             autoHideUnresponsive={false}
             emptyHint={
-              animeTab === 'new-releases'
-                ? 'No new releases yet — sync the SubsPlease homepage in Library.'
-                : 'No full shows yet — sync SubsPlease /shows/ in Library.'
+              shelfTab === 'primary' ? splitShelves.primaryEmpty : splitShelves.fullEmpty
             }
           />
         </section>

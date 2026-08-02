@@ -11,6 +11,15 @@ import {
 import { buildXtreamPlaylistUrl, normalizeIptvPlaylistUrl, type IptvOutput } from '../lib/iptv'
 import { probeStreamUrl } from '../lib/streamHealth'
 import {
+  ensurePerformanceProfile,
+  getPerformanceMode,
+  onPerformanceProfile,
+  performanceModeLabel,
+  setPerformanceMode,
+  type PerformanceKnobs,
+  type PerformanceMode,
+} from '../lib/deviceProfile'
+import {
   getViewingQuality,
   setViewingQuality,
   type ViewingQuality,
@@ -53,6 +62,8 @@ export function LibraryPage() {
     data: epgData,
   } = useEpg()
   const [quality, setQuality] = useState<ViewingQuality>(getViewingQuality)
+  const [perfMode, setPerfMode] = useState<PerformanceMode>(getPerformanceMode)
+  const [perfSummary, setPerfSummary] = useState('')
   const [message, setMessage] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [paste, setPaste] = useState('')
@@ -76,6 +87,12 @@ export function LibraryPage() {
       requestAnimationFrame(() => el.scrollIntoView({ behavior: 'smooth', block: 'start' }))
     }
   }, [searchParams])
+
+  useEffect(() => {
+    const apply = (knobs: PerformanceKnobs) => setPerfSummary(knobs.summary)
+    void ensurePerformanceProfile().then(apply)
+    return onPerformanceProfile(apply)
+  }, [])
 
   function reportOk(text: string) {
     setError(null)
@@ -295,6 +312,30 @@ export function LibraryPage() {
         <div className="library-side">
           <section className="panel">
             <h2>Preferences &amp; EPG</h2>
+            <label className="field-label" htmlFor="performance-mode">
+              Performance
+            </label>
+            <select
+              id="performance-mode"
+              className="url-input"
+              value={perfMode}
+              onChange={(event) => {
+                const next = event.target.value as PerformanceMode
+                setPerfMode(next)
+                setPerformanceMode(next)
+              }}
+              aria-label="Performance mode for this device"
+            >
+              <option value="auto">{performanceModeLabel('auto')}</option>
+              <option value="high">{performanceModeLabel('high')}</option>
+              <option value="balanced">{performanceModeLabel('balanced')}</option>
+              <option value="lite">{performanceModeLabel('lite')}</option>
+            </select>
+            {perfSummary ? (
+              <p className="field-hint" style={{ marginTop: '0.35rem', opacity: 0.75 }}>
+                {perfSummary}
+              </p>
+            ) : null}
             <label className="field-label" htmlFor="viewing-quality">
               Viewing quality
             </label>
@@ -311,7 +352,7 @@ export function LibraryPage() {
               }}
               aria-label="Preferred viewing quality"
             >
-              <option value="auto">Auto (internet speed)</option>
+              <option value="auto">Auto (internet + device)</option>
               <option value="720">720p</option>
               <option value="1080">1080p</option>
               <option value="2160">4K</option>

@@ -9,9 +9,13 @@ import {
   getContinueEntry,
   isEpisodeComplete,
   isLikelyPartialDuration,
+  isRemuxFalseEnd,
   isTrustedDuration,
   isVodCategory,
+  normalizeContinuePlayhead,
   removeContinueEntry,
+  repairContinueWithRuntime,
+  resolveTrustedRuntimeSeconds,
   upsertContinueEntry,
   FORCE_SAVE_CONTINUE_EVENT,
 } from '../lib/continueWatching'
@@ -22,6 +26,8 @@ import {
   type AnimeSkipInterval,
 } from '../lib/animeSkip'
 import { activeSubtitleText, parseSubtitleCues, type SubtitleCue } from '../lib/subtitles'
+import { getPerformanceKnobs } from '../lib/deviceProfile'
+import { fetchYtsRuntimeSeconds } from '../lib/torrents'
 import { getViewingQuality, viewingQualityLabel } from '../lib/viewingQuality'
 import type { StreamItem, StreamPlaylistItem } from '../types'
 
@@ -197,9 +203,13 @@ export function Player({
   /** After Restart, block saves until the playhead is back near 0 (avoids re-writing old time). */
   const restartGuardRef = useRef(false)
   const [resumeOffer, setResumeOffer] = useState<number | null>(null)
+  /** Absolute title clock (remux video.currentTime is only the current fragment). */
+  const [playbackClock, setPlaybackClock] = useState({ current: 0, duration: 0 })
   const [skipIntervals, setSkipIntervals] = useState<AnimeSkipInterval[]>([])
   const [skipTarget, setSkipTarget] = useState<AnimeSkipInterval | null>(null)
   const skipDismissedRef = useRef<string | null>(null)
+  /** True while we paused to rebuild the remux lead buffer (not a user pause). */
+  const leadBufferPauseRef = useRef(false)
   const selectPlaylistItemRef = useRef<(index: number) => Promise<void>>(async () => {})
   const skipAnimeIntervalRef = useRef<
     (interval: AnimeSkipInterval, options?: { auto?: boolean }) => void
@@ -279,20 +289,66 @@ export function Player({
     resumeKeyRef.current = null
     timelineOffsetRef.current = 0
     setTimelineOffset(0)
-    resumePendingRef.current = Boolean(saved && saved.playlistIndex === nextIndex && saved.currentTime >= 5)
+    const runtimeHint = item.runtimeSeconds || saved?.runtimeSeconds || 0
+    const repaired =
+      saved && isTrustedDuration(runtimeHint)
+        ? repairContinueWithRuntime(item.id, runtimeHint)
+        : saved
+    const resumeAt =
+      repaired && repaired.playlistIndex === nextIndex && repaired.currentTime >= 5
+        ? repaired.currentTime
+        : null
+    resumePendingRef.current = Boolean(resumeAt)
     watchClockRef.current = {
       lastTs: 0,
-      accrued: saved?.currentTime && saved.currentTime >= 5 ? saved.currentTime : 0,
+      accrued: resumeAt || 0,
     }
-    setResumeOffer(
-      saved && saved.playlistIndex === nextIndex && saved.currentTime >= 5
-        ? saved.currentTime
-        : null,
-    )
+    setResumeOffer(resumeAt)
     setSkipIntervals([])
     setSkipTarget(null)
     skipDismissedRef.current = null
-  }, [item.id, item.playlist?.length, item.url])
+  }, [item.id, item.playlist?.length, item.url, item.runtimeSeconds])
+
+  // When ffprobe/YTS runtime arrives (or is fetched), fold a bloated Resume (e.g. 2:49 → ~1:05).
+  useEffect(() => {
+    if (isTile) return
+    let cancelled = false
+
+    async function repairResume(runtime: number) {
+      if (!isTrustedDuration(runtime) || cancelled) return
+      const before = getContinueEntry(item.id)?.currentTime || 0
+      const repaired = repairContinueWithRuntime(item.id, runtime)
+      if (!repaired || repaired.currentTime < 5) {
+        setResumeOffer(null)
+        return
+      }
+      setResumeOffer(repaired.currentTime)
+      if (watchClockRef.current.accrued > repaired.currentTime) {
+        watchClockRef.current.accrued = repaired.currentTime
+      }
+      if (before - repaired.currentTime > 30) {
+        flash(`Resume adjusted to ${formatClock(repaired.currentTime)}`)
+      }
+    }
+
+    const known = item.runtimeSeconds || getContinueEntry(item.id)?.runtimeSeconds || 0
+    if (isTrustedDuration(known)) {
+      void repairResume(known)
+      return
+    }
+
+    const saved = getContinueEntry(item.id)
+    const bloated = Boolean(saved && saved.currentTime > 90 * 60)
+    if (!bloated) return
+    const detail = item.detailUrl || saved?.detailUrl
+    void fetchYtsRuntimeSeconds(detail).then((runtime) => {
+      if (runtime) void repairResume(runtime)
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [isTile, item.id, item.runtimeSeconds, item.detailUrl])
 
   useEffect(() => {
     if (isTile || isPip || item.category !== 'anime') {
@@ -375,7 +431,15 @@ export function Player({
 
   function effectivePlayhead(video: HTMLVideoElement): number {
     const absolute = absolutePlayhead(video)
-    return Math.max(absolute, watchClockRef.current.accrued)
+    // Accrued wall-clock is only a gap-fill for brief remux glitches — never a
+    // runaway past the media timeline (that produced Resume 2:49 on 1h45 films).
+    const accrued = watchClockRef.current.accrued
+    const blended = Math.max(absolute, Math.min(accrued, absolute + 45))
+    const trusted = item.runtimeSeconds || getContinueEntry(item.id)?.runtimeSeconds || 0
+    if (isTrustedDuration(trusted)) {
+      return Math.min(blended, trusted)
+    }
+    return blended
   }
 
   function tickWatchClock(video: HTMLVideoElement) {
@@ -389,8 +453,71 @@ export function Player({
       if (absolute > watchClockRef.current.accrued) {
         watchClockRef.current.accrued = absolute
       }
+      // Cap accrued so stalled remux near a false EOF can't inflate forever.
+      if (watchClockRef.current.accrued > absolute + 45) {
+        watchClockRef.current.accrued = absolute + 45
+      }
+      const trusted = item.runtimeSeconds || getContinueEntry(item.id)?.runtimeSeconds || 0
+      if (isTrustedDuration(trusted) && watchClockRef.current.accrued > trusted) {
+        watchClockRef.current.accrued = trusted
+      }
     } else {
       watchClockRef.current.lastTs = 0
+    }
+  }
+
+  function trustedRuntimeSeconds(
+    playhead: number,
+    reportedAbsolute: number,
+    playbackUrl: string,
+  ): number {
+    const saved = getContinueEntry(item.id)
+    return resolveTrustedRuntimeSeconds({
+      runtimeSeconds: item.runtimeSeconds ?? saved?.runtimeSeconds,
+      savedDuration: saved?.duration,
+      reportedDuration: reportedAbsolute,
+      playbackUrl,
+      currentTime: playhead,
+    })
+  }
+
+  function updatePlaybackClock(video: HTMLVideoElement) {
+    const playbackUrl = activePlaylistItem.url || item.url || video.currentSrc
+    const playhead = absolutePlayhead(video)
+    const reported =
+      Number.isFinite(video.duration) && video.duration !== Infinity && video.duration > 0
+        ? video.duration + timelineOffsetRef.current
+        : 0
+    const trusted = trustedRuntimeSeconds(playhead, reported, playbackUrl)
+    // Prefer full title length; never show a remux stub (e.g. 0:07) as the total.
+    const duration =
+      trusted ||
+      (reported > playhead + 90 && !isLikelyPartialDuration(reported, playhead, { playbackUrl })
+        ? reported
+        : 0)
+    setPlaybackClock((prev) =>
+      Math.abs(prev.current - playhead) < 0.2 && prev.duration === duration
+        ? prev
+        : { current: playhead, duration },
+    )
+  }
+
+  function bufferedLeadSeconds(video: HTMLVideoElement): number {
+    try {
+      if (!video.buffered.length) return 0
+      const t = video.currentTime
+      let end = 0
+      for (let i = 0; i < video.buffered.length; i += 1) {
+        if (t >= video.buffered.start(i) - 0.1 && t <= video.buffered.end(i) + 0.1) {
+          end = Math.max(end, video.buffered.end(i))
+        }
+      }
+      if (end <= 0 && video.buffered.length > 0) {
+        end = video.buffered.end(video.buffered.length - 1)
+      }
+      return Math.max(0, end - t)
+    } catch {
+      return 0
     }
   }
 
@@ -404,10 +531,8 @@ export function Player({
         ? video.duration
         : 0
     // Absolute timeline: remux resume uses -ss offset so add it back for % complete.
-    const duration =
-      reportedDuration > 0
-        ? reportedDuration + timelineOffsetRef.current
-        : 0
+    const reportedAbsolute =
+      reportedDuration > 0 ? reportedDuration + timelineOffsetRef.current : 0
     const currentTime = effectivePlayhead(video)
     if (restartGuardRef.current) {
       // Drop stale mid-episode ticks until the restarted stream is actually at the start.
@@ -417,28 +542,26 @@ export function Player({
     }
     const saved = getContinueEntry(item.id)
     const playbackUrl = activePlaylistItem.url || item.url || video.currentSrc
-    // Prefer a trusted full length over progressive remux buffer duration.
-    let knownDuration =
-      duration >= 5 * 60
-        ? duration
-        : saved?.duration && saved.duration >= 5 * 60
-          ? saved.duration
-          : duration > 0
-            ? duration
-            : saved?.duration || 0
-    // Remux often reports buffer length as duration — never treat that as “finished”.
-    if (
-      isLikelyPartialDuration(knownDuration, currentTime, {
-        assumeProgressive: true,
-        playbackUrl,
-      })
-    ) {
+    const trusted = trustedRuntimeSeconds(currentTime, reportedAbsolute, playbackUrl)
+    // Prefer authoritative runtime; never persist a remux buffer stub as "duration".
+    let knownDuration = trusted
+    if (!knownDuration) {
       knownDuration =
-        saved?.duration &&
-        isTrustedDuration(saved.duration) &&
-        !isLikelyPartialDuration(saved.duration, currentTime, { assumeProgressive: true })
-          ? saved.duration
-          : 0
+        reportedAbsolute >= 5 * 60
+          ? reportedAbsolute
+          : saved?.duration && saved.duration >= 5 * 60
+            ? saved.duration
+            : reportedAbsolute > 0
+              ? reportedAbsolute
+              : saved?.duration || 0
+      if (
+        isLikelyPartialDuration(knownDuration, currentTime, {
+          assumeProgressive: true,
+          playbackUrl,
+        })
+      ) {
+        knownDuration = 0
+      }
     }
 
     // Don't clobber a real resume point with ~0 while seek/remux restart is still pending.
@@ -450,15 +573,22 @@ export function Player({
       return
     }
 
-    // Natural end always clears. %-complete only for non-remux with a real title length.
-    if (
-      video.ended ||
-      (knownDuration > 0 &&
-        isEpisodeComplete(currentTime, knownDuration, { playbackUrl }))
-    ) {
+    // Natural end clears — but remux often fires `ended` at a false buffer end.
+    // With trusted runtime, only finish at ~95% of that length.
+    const falseRemuxEnd =
+      video.ended &&
+      isRemuxFalseEnd(currentTime, reportedAbsolute || knownDuration, playbackUrl, trusted)
+    const reallyDone =
+      trusted > 0
+        ? isEpisodeComplete(currentTime, trusted, { authoritative: true })
+        : (video.ended && !falseRemuxEnd) ||
+          (knownDuration > 0 &&
+            isEpisodeComplete(currentTime, knownDuration, { playbackUrl }))
+    if (reallyDone) {
       removeContinueEntry(item.id)
       return
     }
+    if (falseRemuxEnd && !trusted) knownDuration = 0
 
     upsertContinueEntry(
       {
@@ -469,7 +599,8 @@ export function Player({
         playlistIndex,
         episodeTitle: hasPlaylist ? activePlaylistItem.title : undefined,
         currentTime,
-        duration: knownDuration,
+        duration: trusted || knownDuration,
+        runtimeSeconds: trusted || item.runtimeSeconds || saved?.runtimeSeconds,
         torrentUri: item.torrentUri,
         detailUrl: item.detailUrl,
         // Prefer a stable catalog/detail URL over the ephemeral 127.0.0.1 remux URL.
@@ -529,8 +660,23 @@ export function Player({
 
   function seekToResumeOffer() {
     const video = videoRef.current
-    const target = resumeOffer
+    let target = resumeOffer
     if (!video || target == null || target < 5) return
+    const runtimeHint = item.runtimeSeconds || getContinueEntry(item.id)?.runtimeSeconds || 0
+    if (isTrustedDuration(runtimeHint)) {
+      const normalized = normalizeContinuePlayhead(target, runtimeHint)
+      if (normalized.finished) {
+        setResumeOffer(null)
+        removeContinueEntry(item.id)
+        flash('That resume point was past the end of the title')
+        return
+      }
+      target = normalized.currentTime
+      if (normalized.repaired) {
+        setResumeOffer(target)
+        repairContinueWithRuntime(item.id, runtimeHint)
+      }
+    }
     const playbackUrl = activePlaylistItem.url || item.url || video.currentSrc
     if (isRemuxPlaybackUrl(playbackUrl)) {
       setTimelineOffsetSeconds(target)
@@ -604,9 +750,22 @@ export function Player({
     let lastCueEnd = 0
 
     async function loadSubtitles() {
-      // Don't wait on video 'playing' — stuck buffering used to delay subs forever.
-      // Main already buffers opening pieces before returning the subtitle URL.
-      await new Promise((resolve) => window.setTimeout(resolve, 800))
+      // Wait for remux to claim the swarm first — early sub polls used to restart
+      // ffmpeg extract on every 404 and starve slow SubsPlease peers.
+      const remux = isRemuxPlaybackUrl(activePlaylistItem.url || item.url || '')
+      const gateMs = remux ? 20_000 : 800
+      const gateDeadline = Date.now() + gateMs
+      while (!cancelled && Date.now() < gateDeadline) {
+        const video = videoRef.current
+        if (
+          video &&
+          !video.error &&
+          (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA || video.currentTime > 0.2)
+        ) {
+          break
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 400))
+      }
       if (cancelled) return
 
       while (!cancelled && Date.now() - startedAt < maxWaitMs) {
@@ -653,11 +812,14 @@ export function Player({
             }
           } else if (latestCount === 0 && response.status === 404) {
             const message = await response.text().catch(() => '')
-            if (/not ready|timed out|read failed|could not read/i.test(message)) {
-              /* retry */
-            } else if (/no subtitle track/i.test(message) && Date.now() - startedAt > 120_000) {
-              // Softsub probe needs a chunk of the MKV; don't give up while still downloading.
+            if (/no subtitle track/i.test(message)) {
+              // Probe finished: this release has no softsubs — stop the loading spinner.
               break
+            }
+            if (/not ready|timed out|read failed|could not read/i.test(message)) {
+              // Slow poll while remux owns the swarm.
+              await new Promise((resolve) => window.setTimeout(resolve, 5000))
+              continue
             }
           }
         } catch {
@@ -724,9 +886,14 @@ export function Player({
       setStatus('Loading episode…')
       setError(null)
       try {
-        // Drop the previous episode's swarm so the new one can fetch opening pieces.
-        await window.signalDesktop.torrentStop?.()
-        const result = await window.signalDesktop.torrentStream(entry.torrentUri!)
+        // Stop only this tile's prior swarm. A bare torrentStop() kills every
+        // multi-view torrent (and used to surface a WebRTC abort dialog).
+        const prevHash = /urn:btih:([a-z0-9]{32,40})/i.exec(item.torrentUri || '')?.[1]
+        if (prevHash) await window.signalDesktop.torrentStop?.(prevHash)
+        else if (!inMultiview) await window.signalDesktop.torrentStop?.()
+        const result = await window.signalDesktop.torrentStream(entry.torrentUri!, {
+          keepOthers: inMultiview,
+        })
         if (!result.ok || !result.url) {
           setError(result.error || 'Could not start episode')
           setEpisodeLoading(false)
@@ -984,22 +1151,27 @@ export function Player({
     const applyHlsQuality = () => {
       if (!hls || hls.levels.length === 0) return
       const preference = getViewingQuality()
-      if (preference === 'auto') {
-        hls.autoLevelCapping = -1
-        hls.currentLevel = -1
-        setEngineLabel('hls · auto')
-        return
-      }
       const levels = hls.levels
         .map((level, index) => ({ index, height: level.height || 0 }))
         .filter((level) => level.height > 0)
         .sort((a, b) => a.height - b.height)
       if (levels.length === 0) return
+      // Auto: let HLS abr pick, but never above what this device should decode.
+      const capHeight =
+        preference === 'auto' ? getPerformanceKnobs().maxQuality : preference
       const selected =
-        [...levels].reverse().find((level) => level.height <= preference) ?? levels[0]
+        [...levels].reverse().find((level) => level.height <= capHeight) ?? levels[0]
       hls.autoLevelCapping = selected.index
-      hls.currentLevel = selected.index
-      setEngineLabel(`hls · ${viewingQualityLabel(preference)}`)
+      if (preference !== 'auto') {
+        hls.currentLevel = selected.index
+      } else {
+        hls.currentLevel = -1
+      }
+      setEngineLabel(
+        preference === 'auto'
+          ? `hls · auto ≤${capHeight}p`
+          : `hls · ${viewingQualityLabel(preference)}`,
+      )
     }
     const onViewingQuality = () => applyHlsQuality()
     window.addEventListener('jiyu:viewing-quality', onViewingQuality)
@@ -1011,6 +1183,8 @@ export function Player({
 
     let waitingSince = 0
     let stallTimer: number | null = null
+    let pausePrefetchTimer = 0
+    let playPrefetchTimer = 0
     const clearStallWatch = () => {
       waitingSince = 0
       if (stallTimer != null) {
@@ -1018,13 +1192,51 @@ export function Player({
         stallTimer = null
       }
     }
+    function clearPausePrefetch() {
+      if (pausePrefetchTimer) {
+        window.clearInterval(pausePrefetchTimer)
+        pausePrefetchTimer = 0
+      }
+    }
+    function clearPlayPrefetch() {
+      if (playPrefetchTimer) {
+        window.clearInterval(playPrefetchTimer)
+        playPrefetchTimer = 0
+      }
+    }
+    function kickTorrentPrefetch() {
+      const hash = item.torrentInfoHash
+      if (!hash || !window.signalDesktop?.torrentEnsureDownloading) return
+      const playhead = effectivePlayhead(video)
+      const reported =
+        Number.isFinite(video.duration) && video.duration !== Infinity && video.duration > 0
+          ? video.duration + timelineOffsetRef.current
+          : 0
+      const trusted = trustedRuntimeSeconds(playhead, reported, activePlaylistItem.url)
+      // Ask for pieces ahead of the lead target so remux rarely runs dry.
+      const lead = getPerformanceKnobs().remuxLeadSeconds
+      void window.signalDesktop.torrentEnsureDownloading(
+        hash,
+        playhead + lead,
+        trusted || undefined,
+      )
+    }
 
     const onPlaying = () => {
       if (!cancelled) {
         clearStallWatch()
+        clearPausePrefetch()
+        leadBufferPauseRef.current = false
         setError(null)
         setStatus('Playing')
         setPaused(false)
+        // Keep torrent pieces ahead of the playhead while watching.
+        kickTorrentPrefetch()
+        clearPlayPrefetch()
+        playPrefetchTimer = window.setInterval(
+          kickTorrentPrefetch,
+          getPerformanceKnobs().pausePrefetchMs,
+        )
       }
     }
     const onWaiting = () => {
@@ -1034,51 +1246,241 @@ export function Player({
       if (!isEphemeralLocalStreamUrl(activePlaylistItem.url)) return
       if (!waitingSince) waitingSince = Date.now()
       if (stallTimer != null) return
+      // 1080p remux often needs >25s before the first fragment is playable
+      // even with an active swarm — only hard-fail when the buffer is also dead.
+      const perf = getPerformanceKnobs()
+      const stallLimitMs = isRemuxPlaybackUrl(activePlaylistItem.url)
+        ? perf.remuxStallMs
+        : perf.localStallMs
+      let lastBufferedEnd = 0
       stallTimer = window.setInterval(() => {
         if (cancelled || !waitingSince) return
         const videoEl = videoRef.current
-        if (videoEl && !videoEl.paused && videoEl.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
+        if (!videoEl) return
+        if (!videoEl.paused && videoEl.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
           clearStallWatch()
+          setError(null)
           setStatus('Playing')
           return
         }
-        if (Date.now() - waitingSince < 25000) return
+        let bufferedEnd = 0
+        try {
+          if (videoEl.buffered.length > 0) {
+            bufferedEnd = videoEl.buffered.end(videoEl.buffered.length - 1)
+          }
+        } catch {
+          /* ignore */
+        }
+        // Swarm/remux still making progress — keep waiting instead of erroring.
+        if (bufferedEnd > lastBufferedEnd + 0.25) {
+          lastBufferedEnd = bufferedEnd
+          waitingSince = Date.now()
+          setError(null)
+          setStatus('Buffering…')
+          return
+        }
+        // Stuck on the last seconds of a false remux duration (e.g. 1:01:25 / 1:01:35).
+        const duration = videoEl.duration
+        if (
+          isRemuxPlaybackUrl(activePlaylistItem.url) &&
+          Number.isFinite(duration) &&
+          duration > 0 &&
+          videoEl.currentTime >= Math.max(0, duration - 3)
+        ) {
+          const playhead = effectivePlayhead(videoEl)
+          const reported = remuxReportedAbsolute()
+          const trusted = remuxTrustedRuntime(playhead, activePlaylistItem.url)
+          if (isRemuxFalseEnd(playhead, reported, activePlaylistItem.url, trusted)) {
+            clearStallWatch()
+            if (continueRemuxPastGap('stall-eof')) return
+          }
+        }
+        if (Date.now() - waitingSince < stallLimitMs) return
         clearStallWatch()
         setError(
-          'Still buffering after 25s — peers may be slow. Tap Retry, or try another episode/quality.',
+          isRemuxPlaybackUrl(activePlaylistItem.url)
+            ? 'Still starting the stream — peers may be slow. Tap Resume if offered, or Retry / another quality.'
+            : 'Still buffering after 45s — peers may be slow. Tap Retry, or try another episode/quality.',
         )
         setStatus('Buffering…')
       }, 1000)
     }
-    const onPause = () => {
-      if (!cancelled) {
-        clearStallWatch()
-        setPaused(true)
-      }
-    }
-    const onEnded = () => {
-      // Torrent remux pipes sometimes fire `ended` mid-episode when the buffer
-      // stalls. Only auto-advance when the playhead is actually near the end.
-      const playhead = effectivePlayhead(video)
-      const reported =
-        Number.isFinite(video.duration) && video.duration !== Infinity && video.duration > 0
-          ? video.duration + timelineOffsetRef.current
-          : 0
-      const saved = getContinueEntry(item.id)
-      const knownDuration =
-        reported >= 5 * 60
-          ? reported
-          : saved?.duration && saved.duration >= 5 * 60
-            ? saved.duration
-            : reported
-      const nearEnd =
-        (knownDuration >= 5 * 60 && playhead / knownDuration >= 0.9) ||
-        (knownDuration < 5 * 60 && playhead >= 15 * 60)
+    let remuxRelays = 0
+    let lastRelayPlayhead = 0
+    let remuxContinueBusy = false
+    const MAX_REMUX_RELAYS = 12
 
+    function remuxReportedAbsolute() {
+      return Number.isFinite(video.duration) && video.duration !== Infinity && video.duration > 0
+        ? video.duration + timelineOffsetRef.current
+        : 0
+    }
+
+    function remuxTrustedRuntime(playhead: number, playbackUrl: string) {
+      return trustedRuntimeSeconds(playhead, remuxReportedAbsolute(), playbackUrl)
+    }
+
+    /** Restart remux from the current absolute playhead when the pipe dies early. */
+    function continueRemuxPastGap(reason: string): boolean {
+      if (cancelled || remuxContinueBusy) return false
+      const playbackUrl = activePlaylistItem.url
+      if (!isRemuxPlaybackUrl(playbackUrl)) return false
+      // Use media timeline only — never the wall-clock accrued value.
+      const playhead = absolutePlayhead(video)
+      if (playhead < 5) return false
+      const reported = remuxReportedAbsolute()
+      const trusted = remuxTrustedRuntime(playhead, playbackUrl)
+      if (!isRemuxFalseEnd(playhead, reported, playbackUrl, trusted)) return false
+      if (isTrustedDuration(trusted) && playhead >= trusted * 0.92) return false
+
+      if (playhead >= lastRelayPlayhead + 15) remuxRelays = 0
+      // Re-ended almost immediately at the same spot after a relay → real EOF.
+      const stuckAfterRelay = remuxRelays > 0 && playhead <= lastRelayPlayhead + 3
+      if (stuckAfterRelay) return false
+      if (remuxRelays >= MAX_REMUX_RELAYS) {
+        setError(
+          'Playback stopped mid-title — torrent buffer ran dry. Tap Retry, wait for more peers, or Restart.',
+        )
+        setStatus('Stopped')
+        return true
+      }
+
+      remuxRelays += 1
+      lastRelayPlayhead = playhead
+      remuxContinueBusy = true
       saveContinueProgress()
+      let resumeAt = Math.max(5, Math.floor(playhead) - 1)
+      if (isTrustedDuration(trusted)) {
+        resumeAt = Math.min(resumeAt, Math.floor(trusted * 0.9))
+      }
+      setTimelineOffsetSeconds(resumeAt)
+      watchClockRef.current = { lastTs: 0, accrued: resumeAt }
+      setStatus(reason === 'lead' ? 'Buffering ahead…' : 'Continuing stream…')
+      flash(reason === 'lead' ? 'Building buffer ahead…' : 'Continuing past buffer…')
+      setError(null)
+      setPaused(false)
+      console.info('[player] remux continue', { reason, resumeAt, remuxRelays })
+      const baseUrl = stripResumeOffset(playbackUrl)
+      video.src = withResumeOffset(baseUrl, resumeAt)
+      video.load()
+      void video.play().then(
+        () => {
+          remuxContinueBusy = false
+          setStatus('Playing')
+        },
+        () => {
+          remuxContinueBusy = false
+          setStatus('Press play')
+        },
+      )
+      return true
+    }
+
+    const onPause = () => {
+      if (cancelled || remuxContinueBusy) return
+      clearStallWatch()
+      clearPlayPrefetch()
+      // Our lead-buffer pause — don't treat as EOF / user pause.
+      if (leadBufferPauseRef.current) {
+        kickTorrentPrefetch()
+        return
+      }
+      // Chromium often pauses at a false remux EOF without firing `ended`.
+      const duration = video.duration
+      const nearRelativeEnd =
+        Number.isFinite(duration) &&
+        duration > 0 &&
+        (video.ended || video.currentTime >= Math.max(0, duration - 1.5))
+      if (nearRelativeEnd) {
+        const playhead = effectivePlayhead(video)
+        const reported = remuxReportedAbsolute()
+        const trusted = remuxTrustedRuntime(playhead, activePlaylistItem.url)
+        if (
+          isRemuxFalseEnd(playhead, reported, activePlaylistItem.url, trusted) &&
+          continueRemuxPastGap('pause')
+        ) {
+          return
+        }
+      }
+      setPaused(true)
+      // Keep torrent pieces flowing while paused so resume isn't into a hole.
+      kickTorrentPrefetch()
+      clearPausePrefetch()
+      pausePrefetchTimer = window.setInterval(
+        kickTorrentPrefetch,
+        getPerformanceKnobs().pausePrefetchMs,
+      )
+    }
+
+    const onEnded = () => {
+      // Torrent remux pipes often fire `ended` when the buffered fragment looks
+      // like the full title or ffmpeg hits a download gap.
+      if (continueRemuxPastGap('ended')) return
+
+      const playhead = effectivePlayhead(video)
+      const playbackUrl = activePlaylistItem.url
+      const trusted = remuxTrustedRuntime(playhead, playbackUrl)
+      saveContinueProgress()
+
+      const nearEnd =
+        isTrustedDuration(trusted) && playhead / trusted >= 0.9
+
       if (!cancelled && nearEnd && playlistIndex < playlist.length - 1) {
         // Re-resolve torrent URLs — don't just bump the index onto a dead remux link.
         void selectPlaylistItemRef.current(playlistIndex + 1)
+      }
+    }
+
+    const onRemuxGuard = () => {
+      if (cancelled || remuxContinueBusy) return
+      const playbackUrl = activePlaylistItem.url
+      if (!isRemuxPlaybackUrl(playbackUrl)) return
+      updatePlaybackClock(video)
+
+      const leadTarget = getPerformanceKnobs().remuxLeadSeconds
+      const resumeLead = leadTarget + 2
+      const lead = bufferedLeadSeconds(video)
+      const duration = video.duration
+      const playhead = absolutePlayhead(video)
+      const reported = remuxReportedAbsolute()
+      const trusted = remuxTrustedRuntime(playhead, playbackUrl)
+      const remuxLeft =
+        Number.isFinite(duration) && duration > 0 ? duration - video.currentTime : 0
+
+      // Prefetch pieces for the lead window — do NOT remux-restart early.
+      // Restarting at remuxLeft<=10s looked like the episode "rewinding" on buffer.
+      if (!video.paused && lead < leadTarget + 4) {
+        kickTorrentPrefetch()
+      }
+
+      // Thin playable lead with fragment still ahead: pause and wait (no reload).
+      if (
+        !video.paused &&
+        !video.ended &&
+        lead < Math.min(3, leadTarget * 0.4) &&
+        remuxLeft > 3 &&
+        video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
+      ) {
+        leadBufferPauseRef.current = true
+        kickTorrentPrefetch()
+        video.pause()
+        setStatus('Buffering…')
+        return
+      }
+
+      if (leadBufferPauseRef.current && lead >= Math.max(resumeLead * 0.5, 2.5)) {
+        leadBufferPauseRef.current = false
+        void video.play().then(
+          () => setStatus('Playing'),
+          () => setStatus('Press play'),
+        )
+      }
+
+      if (!Number.isFinite(duration) || duration <= 0) return
+      // Only relay at the true end of this remux fragment (not 10s early).
+      if (video.currentTime < duration - 1.75) return
+      if (isRemuxFalseEnd(playhead, reported, playbackUrl, trusted)) {
+        continueRemuxPastGap('near-end')
       }
     }
 
@@ -1086,6 +1488,7 @@ export function Player({
     video.addEventListener('waiting', onWaiting)
     video.addEventListener('pause', onPause)
     video.addEventListener('ended', onEnded)
+    video.addEventListener('timeupdate', onRemuxGuard)
 
     const cleanupPlayers = () => {
       if (hls) {
@@ -1239,11 +1642,13 @@ export function Player({
           }
           settled = true
           cleanup()
-          reject(new Error('Timed out loading stream — try another source or quality.'))
+          reject(new Error('Stream took too long to start — try another source or quality.'))
         }
 
-        // Remux -ss into undownloaded pieces can hang forever — bail out to t=0.
-        let loadTimer = window.setTimeout(onLoadTimeout, resumeAt >= 5 ? 22000 : 35000)
+        // Remux on a slow torrent often needs >35s before the first fragment plays.
+        const remux = isRemuxPlaybackUrl(activePlaylistItem.url)
+        const loadBudgetMs = resumeAt >= 5 ? 28_000 : remux ? 75_000 : 35_000
+        let loadTimer = window.setTimeout(onLoadTimeout, loadBudgetMs)
 
         video.addEventListener('error', onError)
         video.addEventListener('loadeddata', onReady)
@@ -1269,10 +1674,11 @@ export function Player({
         }
         setEngineLabel('hls')
         setStatus('Loading HLS…')
+        const perf = getPerformanceKnobs()
         hls = new Hls({
-          enableWorker: true,
-          lowLatencyMode: true,
-          maxBufferLength: 30,
+          enableWorker: perf.enableMediaWorkers,
+          lowLatencyMode: perf.hlsLowLatency,
+          maxBufferLength: perf.hlsMaxBufferLength,
           fragLoadingMaxRetry: 6,
           manifestLoadingMaxRetry: 5,
           levelLoadingMaxRetry: 5,
@@ -1334,7 +1740,7 @@ export function Player({
         tsPlayer = mpegts.createPlayer(
           { type: 'mse', isLive: true, url: activePlaylistItem.url },
           {
-            enableWorker: true,
+            enableWorker: getPerformanceKnobs().enableMediaWorkers,
             enableStashBuffer: false,
             liveBufferLatencyChasing: true,
             autoCleanupSourceBuffer: true,
@@ -1411,11 +1817,15 @@ export function Player({
     return () => {
       cancelled = true
       clearStallWatch()
+      clearPausePrefetch()
+      clearPlayPrefetch()
+      leadBufferPauseRef.current = false
       saveContinueProgress()
       video.removeEventListener('playing', onPlaying)
       video.removeEventListener('waiting', onWaiting)
       video.removeEventListener('pause', onPause)
       video.removeEventListener('ended', onEnded)
+      video.removeEventListener('timeupdate', onRemuxGuard)
       window.removeEventListener('jiyu:viewing-quality', onViewingQuality)
       cleanupPlayers()
     }
@@ -1428,6 +1838,7 @@ export function Player({
     const onTimeUpdate = () => {
       persist()
       const video = videoRef.current
+      if (video) updatePlaybackClock(video)
       // Clear a stale load-timeout overlay if the stream is clearly progressing.
       if (
         video &&
@@ -1643,8 +2054,9 @@ export function Player({
               <span>
                 {error ?? status}
                 {!error && engineLabel ? ` · ${engineLabel}` : ''}
-                {!error ? ` · ${muted ? 'Muted' : `${Math.round(volume * 100)}%`}` : ''}
+                {!error ? ` · ${muted ? 'Muted' : `Vol ${Math.round(volume * 100)}%`}` : ''}
                 {!error && showSubsLoading ? ' · Loading subtitles…' : ''}
+                {!error && subsStatus === 'missing' ? ' · No subs' : ''}
                 {!error && subsStatus === 'ready' ? ` · Subs ${subsEnabled ? 'on' : 'off'}` : ''}
                 {awaitingAdd ? ' · Multi-view: pick another channel' : ''}
               </span>
@@ -1783,7 +2195,9 @@ export function Player({
                   title={
                     awaitingAdd
                       ? 'Cancel — next channel will replace this one'
-                      : 'Add the next channel to multi-view instead of replacing'
+                      : item.transport === 'torrent' || item.sourceKind === 'torrent'
+                        ? 'Add another stream beside this one (two torrents share bandwidth)'
+                        : 'Add the next channel to multi-view instead of replacing'
                   }
                 >
                   {awaitingAdd ? 'Pick channel…' : 'Multi-view'}
@@ -1834,7 +2248,7 @@ export function Player({
       <div className="player-stage">
         <video
           ref={videoRef}
-          className="player-video"
+          className={`player-video${isRemuxPlaybackUrl(activePlaylistItem.url) ? ' is-remux' : ''}`}
           controls={!isPip}
           controlsList="nofullscreen nodownload noremoteplayback"
           disablePictureInPicture
@@ -1842,6 +2256,18 @@ export function Player({
           playsInline
           onDoubleClick={isPip ? undefined : toggleFullscreen}
         />
+        {!isPip && (playbackClock.duration > 0 || playbackClock.current > 0) && (
+          <div
+            className="player-clock"
+            title="Position in the full title (not the current remux fragment)"
+          >
+            <span>{formatClock(playbackClock.current)}</span>
+            <span className="player-clock-sep">/</span>
+            <span>
+              {playbackClock.duration > 0 ? formatClock(playbackClock.duration) : '—:—'}
+            </span>
+          </div>
+        )}
         {subsEnabled && subtitleLine && !isPip && (
           <div className="player-subtitles" aria-live="polite">
             {subtitleLine.split('\n').map((line, index) => (
@@ -1881,7 +2307,7 @@ export function Player({
             <p>{error}</p>
             <p className="player-error-hint">
               {isEphemeralLocalStreamUrl(activePlaylistItem.url)
-                ? 'Torrent playback needs peers and a short buffer before video starts. Retry, wait a moment, or pick another episode.'
+                ? 'This title needs a short head start before video can play. Retry, wait a moment, or try another episode or quality.'
                 : 'Status may show online while the stream still fails (DRM, expired token, or CDN block). Try another channel, use Web browser for YouTube / 1SpotMedia, or Refresh the playlist source.'}
             </p>
           </div>

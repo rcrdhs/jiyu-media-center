@@ -15,6 +15,13 @@ contextBridge.exposeInMainWorld('signalDesktop', {
   catalogReplaceAll: (sources) => ipcRenderer.invoke('catalog:replaceAll', sources),
   torrentSourcesList: () => ipcRenderer.invoke('torrentSources:list'),
   torrentSourcesSave: (sources) => ipcRenderer.invoke('torrentSources:save', sources),
+  tmdbPopularTv: (limit) => ipcRenderer.invoke('tmdb:popularTv', limit),
+  tmdbTvCatalog: (kind, limit) => ipcRenderer.invoke('tmdb:tvCatalog', kind, limit),
+  onTmdbProgress: (callback) => {
+    const listener = (_event, payload) => callback(payload)
+    ipcRenderer.on('tmdb:progress', listener)
+    return () => ipcRenderer.removeListener('tmdb:progress', listener)
+  },
   browserShow: (bounds) => ipcRenderer.invoke('browser:show', bounds),
   browserHide: (options) => ipcRenderer.invoke('browser:hide', options),
   browserSetBounds: (bounds) => ipcRenderer.invoke('browser:setBounds', bounds),
@@ -28,9 +35,14 @@ contextBridge.exposeInMainWorld('signalDesktop', {
   browserGetNav: () => ipcRenderer.invoke('browser:getNav'),
   quit: () => ipcRenderer.invoke('app:quit'),
   getVersion: () => ipcRenderer.invoke('app:getVersion'),
+  getSystemCapabilities: () => ipcRenderer.invoke('system:getCapabilities'),
+  setPerformanceKnobs: (knobs) => ipcRenderer.invoke('system:setPerformanceKnobs', knobs),
   fetchHtml: (url) => ipcRenderer.invoke('page:fetchHtml', url),
-  torrentStream: (magnet) => ipcRenderer.invoke('torrent:stream', magnet),
+  closeCfBrowser: (options) => ipcRenderer.invoke('cf:closeSystemBrowser', options),
+  torrentStream: (magnet, options) => ipcRenderer.invoke('torrent:stream', magnet, options),
   torrentStatus: (infoHash) => ipcRenderer.invoke('torrent:status', infoHash),
+  torrentEnsureDownloading: (infoHash, playheadSec, runtimeSec) =>
+    ipcRenderer.invoke('torrent:ensureDownloading', infoHash, playheadSec, runtimeSec),
   torrentStop: (infoHash) => ipcRenderer.invoke('torrent:stop', infoHash),
   onBrowserNav: (callback) => {
     const listener = (_event, payload) => callback(payload)

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { CATEGORIES, LOCAL_CHANNELS, resolveLocalChannels } from '../data/catalog'
 import { useCatalog } from '../context/CatalogContext'
@@ -9,11 +9,29 @@ import { LocalChannelLive } from '../components/LocalChannelLive'
 import { LocalYoutubeLiveNow } from '../components/LocalYoutubeLiveNow'
 import { isLikelyEnglish, shouldApplyEnglishFilter } from '../lib/language'
 import { VOD_CATEGORIES } from '../lib/continueWatching'
+import {
+  getCatalogGrowth,
+  recordCatalogTitleCount,
+  type SectionGrowth,
+} from '../lib/libraryGrowth'
 
 export function HomePage() {
-  const { byCategory, items, importedCount, englishOnly } = useCatalog()
+  const { byCategory, items, ready, englishOnly } = useCatalog()
   const { item: playingItem, mode } = usePlayback()
   const [homeQuery, setHomeQuery] = useState('')
+  const [catalogGrowth, setCatalogGrowth] = useState<SectionGrowth>(() =>
+    getCatalogGrowth(items.length),
+  )
+
+  useEffect(() => {
+    if (!ready) return
+    // Wait for the catalog to finish the daily load/sync before snapshotting,
+    // so a partial cold start isn't stored as today's baseline.
+    const timer = window.setTimeout(() => {
+      setCatalogGrowth(recordCatalogTitleCount(items.length))
+    }, 2000)
+    return () => window.clearTimeout(timer)
+  }, [ready, items.length])
 
   const localChannels = useMemo(() => resolveLocalChannels(items), [items])
   const tvjChannel = localChannels.find((c) => c.id === 'local-tvj') ?? LOCAL_CHANNELS[0]
@@ -65,9 +83,14 @@ export function HomePage() {
         <div className="hero-panel" aria-hidden>
           <div className="hero-glow" />
           <div className="hero-frame">
-            <span>Live</span>
-            <strong>{items.length}</strong>
-            <em>titles ready{importedCount > 0 ? ` · ${importedCount} imported` : ''}</em>
+            <span>Total titles</span>
+            <strong>{catalogGrowth.today.toLocaleString()}</strong>
+            <em>
+              Added today{' '}
+              {catalogGrowth.newToday > 0
+                ? catalogGrowth.newToday.toLocaleString()
+                : '0'}
+            </em>
           </div>
         </div>
       </header>
