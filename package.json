@@ -1,7 +1,7 @@
 {
   "name": "jiyu-media-center",
   "private": true,
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Jiyu — freedom-focused media center for sports, movies, anime, series, and news streams",
   "author": "Jiyu",
   "type": "module",

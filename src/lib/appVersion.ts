@@ -12,6 +12,11 @@ export const APP_VERSION_LABEL = `v${APP_VERSION}`
 /** Short milestone log — newest first — so progress is visible in-app. */
 export const APP_RELEASES: ReadonlyArray<{ version: string; summary: string }> = [
   {
+    version: '0.3.3',
+    summary:
+      'Curated Kids shelves (movies/shows/live) with PIN Kids mode, Real-Debrid/Torrentio TV paths, deeper YTS Popular sync',
+  },
+  {
     version: '0.3.2',
     summary:
       'TMDB + EZTV TV shelves, YTS Popular/New movies, remux resume past false ends, live sync progress, Home total/added-today, quieter shelf labels',
