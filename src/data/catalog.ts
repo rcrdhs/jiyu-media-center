@@ -31,6 +31,12 @@ export const CATEGORIES: CategoryMeta[] = [
     blurb: 'Rolling world and local bulletins.',
     accent: '#c4c9d4',
   },
+  {
+    id: 'kids',
+    label: 'Kids',
+    blurb: 'Curated movies, shows, and live channels for under 13.',
+    accent: '#6ec6ff',
+  },
 ]
 
 /** Jamaican local live channels shown on Home → Local channel */
@@ -204,5 +210,45 @@ export const BUILTIN_CATALOG: StreamItem[] = [
     poster: 'https://upload.wikimedia.org/wikipedia/commons/thumb/e/e8/Elephants_Dream_s5_both.jpg/480px-Elephants_Dream_s5_both.jpg',
     tags: ['mp4', 'demo'],
     source: 'Google sample bucket',
+  },
+  // Curated Kids starters (under 13) — public demo streams + shelf seeds.
+  {
+    id: 'kids-movie-bbb',
+    title: 'Big Buck Bunny',
+    description: 'Gentle open-movie short for the Kids Movies shelf.',
+    category: 'kids',
+    url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4',
+    poster:
+      'https://upload.wikimedia.org/wikipedia/commons/thumb/c/c5/Big_buck_bunny_poster_big.jpg/440px-Big_buck_bunny_poster_big.jpg',
+    tags: ['kids-movies', 'demo', 'mp4'],
+    source: 'Kids catalog',
+    sourceKind: 'builtin',
+    transport: 'direct',
+  },
+  {
+    id: 'kids-movie-sintel',
+    title: 'Sintel',
+    description: 'Blender Foundation short — Kids Movies sample.',
+    category: 'kids',
+    url: 'https://bitdash-a.akamaihd.net/content/sintel/hls/playlist.m3u8',
+    poster:
+      'https://upload.wikimedia.org/wikipedia/commons/thumb/8/8f/Sintel_poster.jpg/440px-Sintel_poster.jpg',
+    tags: ['kids-movies', 'demo', 'hls'],
+    source: 'Kids catalog',
+    sourceKind: 'builtin',
+    transport: 'direct',
+  },
+  {
+    id: 'kids-movie-elephants',
+    title: 'Elephants Dream',
+    description: 'Orange open movie — Kids Movies sample.',
+    category: 'kids',
+    url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4',
+    poster:
+      'https://upload.wikimedia.org/wikipedia/commons/thumb/e/e8/Elephants_Dream_s5_both.jpg/480px-Elephants_Dream_s5_both.jpg',
+    tags: ['kids-movies', 'demo', 'mp4'],
+    source: 'Kids catalog',
+    sourceKind: 'builtin',
+    transport: 'direct',
   },
 ]

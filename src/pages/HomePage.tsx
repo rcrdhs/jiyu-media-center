@@ -5,10 +5,12 @@ import { useCatalog } from '../context/CatalogContext'
 import { usePlayback } from '../context/PlaybackContext'
 import { CatalogGrid } from '../components/CatalogGrid'
 import { ContinueWatching } from '../components/ContinueWatching'
+import { WatchHistory } from '../components/WatchHistory'
 import { LocalChannelLive } from '../components/LocalChannelLive'
 import { LocalYoutubeLiveNow } from '../components/LocalYoutubeLiveNow'
 import { isLikelyEnglish, shouldApplyEnglishFilter } from '../lib/language'
 import { VOD_CATEGORIES } from '../lib/continueWatching'
+import { isKidsModeEnabled, subscribeKidsMode } from '../lib/kidsMode'
 import {
   getCatalogGrowth,
   recordCatalogTitleCount,
@@ -19,8 +21,20 @@ export function HomePage() {
   const { byCategory, items, ready, englishOnly } = useCatalog()
   const { item: playingItem, mode } = usePlayback()
   const [homeQuery, setHomeQuery] = useState('')
+  const [kidsMode, setKidsMode] = useState(isKidsModeEnabled)
   const [catalogGrowth, setCatalogGrowth] = useState<SectionGrowth>(() =>
     getCatalogGrowth(items.length),
+  )
+
+  useEffect(() => subscribeKidsMode(() => setKidsMode(isKidsModeEnabled())), [])
+
+  const homeCategories = useMemo(
+    () => (kidsMode ? CATEGORIES.filter((cat) => cat.id === 'kids') : CATEGORIES),
+    [kidsMode],
+  )
+  const homeVodCategories = useMemo(
+    () => (kidsMode ? VOD_CATEGORIES.filter((id) => id === 'kids') : VOD_CATEGORIES),
+    [kidsMode],
   )
 
   useEffect(() => {
@@ -63,8 +77,9 @@ export function HomePage() {
           <p className="eyebrow">Freedom to watch · your way</p>
           <h1>Jiyu</h1>
           <p className="lede">
-            Browse Sports, Movies, Anime, Series, and News — click a title, play the stream.
-            Import M3U playlists for live TV and VOD you already have access to.
+            {kidsMode
+              ? 'Kids mode is on — curated movies, shows, and live channels for under 13.'
+              : 'Browse Sports, Movies, Anime, Series, News, and Kids — click a title, play the stream. Import M3U playlists for live TV and VOD you already have access to.'}
           </p>
           <div className="home-search-wrap">
             <label className="sr-only" htmlFor="home-search">
@@ -96,9 +111,11 @@ export function HomePage() {
       </header>
 
       {!homeQuery.trim() &&
-        VOD_CATEGORIES.map((category) => (
+        homeVodCategories.map((category) => (
           <ContinueWatching key={category} category={category} />
         ))}
+
+      {!homeQuery.trim() && !kidsMode && <WatchHistory />}
 
       {homeQuery.trim() && (
         <section className="section-block">
@@ -124,7 +141,7 @@ export function HomePage() {
           <p>Pick a shelf — each one opens streams mapped to that category.</p>
         </div>
         <div className="section-tiles">
-          {CATEGORIES.map((cat) => {
+          {homeCategories.map((cat) => {
             const count = byCategory(cat.id).length
             return (
               <Link
@@ -144,25 +161,27 @@ export function HomePage() {
         </div>
       </section>
 
-      <section className="section-block">
-        <div className="section-head">
-          <h2>Local channels</h2>
-        </div>
-        {(tvjPlayingElsewhere || cvmPlayingElsewhere) && (
-          <p className="fine-print local-channel-note">
-            {(tvjPlayingElsewhere ? tvjChannel.title : cvmChannel.title) +
-              ' is playing in the corner — browse or search for another stream below.'}
-          </p>
-        )}
-        {(!tvjPlayingElsewhere || !cvmPlayingElsewhere) && (
-          <div className="local-channel-live-row">
-            {!tvjPlayingElsewhere && <LocalChannelLive item={tvjChannel} />}
-            {!cvmPlayingElsewhere && <LocalChannelLive item={cvmChannel} />}
+      {!kidsMode && (
+        <section className="section-block">
+          <div className="section-head">
+            <h2>Local channels</h2>
           </div>
-        )}
-        <LocalYoutubeLiveNow />
-        <CatalogGrid items={localChannels} autoCheck showToolbar autoHideUnresponsive={false} />
-      </section>
+          {(tvjPlayingElsewhere || cvmPlayingElsewhere) && (
+            <p className="fine-print local-channel-note">
+              {(tvjPlayingElsewhere ? tvjChannel.title : cvmChannel.title) +
+                ' is playing in the corner — browse or search for another stream below.'}
+            </p>
+          )}
+          {(!tvjPlayingElsewhere || !cvmPlayingElsewhere) && (
+            <div className="local-channel-live-row">
+              {!tvjPlayingElsewhere && <LocalChannelLive item={tvjChannel} />}
+              {!cvmPlayingElsewhere && <LocalChannelLive item={cvmChannel} />}
+            </div>
+          )}
+          <LocalYoutubeLiveNow />
+          <CatalogGrid items={localChannels} autoCheck showToolbar autoHideUnresponsive={false} />
+        </section>
+      )}
     </div>
   )
 }

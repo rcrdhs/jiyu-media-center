@@ -1,19 +1,23 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
+import { PlaybackLoadingScreen } from '../components/PlaybackLoadingScreen'
 import { resolvePlayableItem } from '../data/catalog'
 import { useCatalog } from '../context/CatalogContext'
 import { usePlayback } from '../context/PlaybackContext'
 import { getContinueEntry, mergeRuntimeSeconds } from '../lib/continueWatching'
 import { isWeakPosterUrl, resolveCatalogPoster } from '../lib/posterFallback'
+import { hasRealDebridToken } from '../lib/debridSettings'
 import {
   cleanShowDisplayTitle,
+  formatEpisodeListLabel,
+  isDebridHttpPlayUrl,
   isEztvSource,
   isShowBrowseItem,
-  labelQuality,
   resolveShowEpisodes,
-  torrentUrisForEpisode,
+  torrentUrisForEpisodeWithTorrentio,
   type EpisodeChoice,
 } from '../lib/torrents'
+import { TORRENTIO_TV_TRIAL } from '../lib/torrentio'
 import type { StreamItem, StreamPlaylistItem, TorrentStreamResult } from '../types'
 
 export function ShowPage() {
@@ -29,6 +33,7 @@ export function ShowPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [playError, setPlayError] = useState<string | null>(null)
+  const [prepareStatus, setPrepareStatus] = useState<string | null>(null)
   const [playingIndex, setPlayingIndex] = useState<number | null>(null)
   const [fallbackPoster, setFallbackPoster] = useState('')
 
@@ -91,18 +96,40 @@ export function ShowPage() {
     if (!chosen) return
     setPlayingIndex(index)
     setPlayError(null)
-    const candidates = torrentUrisForEpisode(chosen)
+    setPrepareStatus('Getting episode ready…')
     const keepOthers = awaitingAdd || slots.length > 1 || mode === 'multi'
+    const isDeadSwarm = (msg: string) =>
+      /no peers|no reachable seeds|no seeds found|swarm may be dead|unavailable/i.test(msg)
     try {
+      const useTorrentio =
+        TORRENTIO_TV_TRIAL && (item.category === 'series' || item.category === 'kids')
+      const useDebrid = useTorrentio && hasRealDebridToken()
+      if (useDebrid) setPrepareStatus('Checking debrid streams…')
+      else if (useTorrentio) setPrepareStatus('Checking more sources…')
+      const candidates = await torrentUrisForEpisodeWithTorrentio(chosen, item.title, {
+        enabled: useTorrentio,
+      })
       let result: TorrentStreamResult | null = null
       let usedUri = chosen.torrentUri
       let lastError = 'Could not start torrent stream'
+      let deadCount = 0
       for (let i = 0; i < candidates.length; i++) {
         const uri = candidates[i]
         usedUri = uri
-        if (i > 0) {
-          setPlayError(`Trying another release (${i + 1}/${candidates.length})…`)
+        if (isDebridHttpPlayUrl(uri)) {
+          setPrepareStatus(
+            candidates.length > 1
+              ? `Starting debrid stream (${i + 1}/${candidates.length})…`
+              : 'Starting debrid stream…',
+          )
+          result = { ok: true, url: uri }
+          break
         }
+        setPrepareStatus(
+          candidates.length > 1
+            ? `Connecting to peers (${i + 1}/${candidates.length})…`
+            : 'Connecting to peers…',
+        )
         const attempt = await Promise.race([
           window.signalDesktop.torrentStream(uri, { keepOthers }),
           new Promise<TorrentStreamResult>((resolve) => {
@@ -113,7 +140,7 @@ export function ShowPage() {
                   error:
                     'Taking too long to start — this release may be unavailable. Try another episode or quality.',
                 }),
-              55_000,
+              35_000,
             )
           }),
         ])
@@ -122,17 +149,29 @@ export function ShowPage() {
           break
         }
         lastError = attempt.error || 'Could not start torrent stream'
-        // Dead swarm — don't burn another minute on the same infohash via alternates
-        // that share the same release; still try distinct alternate magnets.
-        if (/no reachable seeds|no seeds found|swarm may be dead|no peers found/i.test(lastError)) {
+        if (isDeadSwarm(lastError)) {
+          deadCount += 1
+          if (i < candidates.length - 1) {
+            setPrepareStatus(
+              `No peers — trying another release (${i + 2}/${candidates.length})…`,
+            )
+          }
           continue
         }
       }
       if (!result?.ok || !result.url) {
-        setPlayError(lastError)
+        setPlayError(
+          deadCount > 0 && deadCount === candidates.length
+            ? candidates.length > 1
+              ? 'No peers found for any release of this episode. Try another episode.'
+              : 'No peers found for this episode. Try another episode or quality.'
+            : lastError,
+        )
         setPlayingIndex(null)
+        setPrepareStatus(null)
         return
       }
+      setPrepareStatus('Starting player…')
 
       const playlist: StreamPlaylistItem[] | undefined =
         episodes.length > 1
@@ -142,6 +181,8 @@ export function ShowPage() {
                     title: ep.title,
                     url: result.url!,
                     torrentUri: usedUri,
+                    torrentAlternates: ep.alternates,
+                    episodeKey: ep.key,
                     subtitleUrl: result.subtitleUrl ?? result.playlist?.[0]?.subtitleUrl,
                     subtitleKind: result.subtitleKind ?? result.playlist?.[0]?.subtitleKind,
                     fileName: result.fileName,
@@ -150,14 +191,18 @@ export function ShowPage() {
                     title: ep.title,
                     url: '',
                     torrentUri: ep.torrentUri,
+                    torrentAlternates: ep.alternates,
+                    episodeKey: ep.key,
                   },
             )
           : undefined
 
+      const showName = cleanShowDisplayTitle(item.title) || item.title
       const playable: StreamItem = {
         ...item,
-        title: chosen.title || result.name || result.fileName || item.title,
-        description: result.fileName ?? item.description,
+        // Human title for chrome / loading — keep release name in description.
+        title: chosen.key ? `${showName} · ${chosen.key}` : showName,
+        description: result.fileName || chosen.title || item.description,
         url: result.url,
         subtitleUrl: result.subtitleUrl ?? result.playlist?.[0]?.subtitleUrl,
         subtitleKind: result.subtitleKind ?? result.playlist?.[0]?.subtitleKind,
@@ -165,8 +210,9 @@ export function ShowPage() {
         torrentUri: usedUri,
         transport: 'direct',
         runtimeSeconds: mergeRuntimeSeconds(result.runtimeSeconds, item.runtimeSeconds),
-        torrentInfoHash: result.infoHash,
+        torrentInfoHash: isDebridHttpPlayUrl(usedUri || '') ? undefined : result.infoHash,
       }
+      setPlayError(null)
       play(playable, {
         forceFull: true,
         returnTo: `/show/${item.id}`,
@@ -175,6 +221,7 @@ export function ShowPage() {
       setPlayError(err instanceof Error ? err.message : 'Playback failed')
     } finally {
       setPlayingIndex(null)
+      setPrepareStatus(null)
     }
   }
 
@@ -192,16 +239,36 @@ export function ShowPage() {
   }
 
   const display = item ?? raw!
+  const preparingEpisode =
+    playingIndex != null ? episodes[playingIndex] ?? null : null
+  const preparingTitle = preparingEpisode
+    ? `${cleanShowDisplayTitle(display.title) || display.title} · ${
+        preparingEpisode.key || formatEpisodeListLabel(preparingEpisode)
+      }`
+    : cleanShowDisplayTitle(display.title) || display.title
 
   return (
     <div className="page show-page">
+      {playingIndex != null && (
+        <PlaybackLoadingScreen
+          title={preparingTitle}
+          status={prepareStatus || 'Getting episode ready…'}
+          variant="page"
+        />
+      )}
       <header className="page-header show-page-header">
         <div className="show-page-heading">
           <Link className="ghost-btn" to={returnTo}>
             ← Back
           </Link>
           <div className="show-page-title-block">
-            <p className="eyebrow">{display.category === 'anime' ? 'Anime' : 'TV Series'}</p>
+            <p className="eyebrow">
+              {display.category === 'anime'
+                ? 'Anime'
+                : display.category === 'kids'
+                  ? 'Kids'
+                  : 'TV Series'}
+            </p>
             <h1>{cleanShowDisplayTitle(display.title) || display.title}</h1>
             {display.description && !/^https?:\/\//i.test(display.description.trim()) && (
               <p className="show-page-summary">{display.description}</p>
@@ -228,7 +295,7 @@ export function ShowPage() {
             episodes.length > 0 &&
             isEztvSource(display.detailUrl || display.url || '', display.source) &&
             episodes.every((ep) => (ep.seeders ?? 0) > 0)
-              ? ' · seeded only'
+              ? ' · ready'
               : ''}
             {continueEntry?.episodeTitle
               ? ` · Continue ${continueEntry.episodeTitle}`
@@ -264,14 +331,19 @@ export function ShowPage() {
                     onClick={() => void playEpisode(index)}
                   >
                     <span className="show-episode-key">{ep.key}</span>
-                    <span className="show-episode-name">{ep.title}</span>
+                    <span className="show-episode-name" title={ep.title}>
+                      {formatEpisodeListLabel(ep)}
+                    </span>
                     <span className="show-episode-meta">
-                      {ep.quality > 0 ? labelQuality(ep.quality) : ''}
-                      {typeof ep.seeders === 'number' && ep.seeders > 0
-                        ? `${ep.quality > 0 ? ' · ' : ''}${ep.seeders} seeds`
-                        : ''}
-                      {isContinue ? ' · Resume' : ''}
-                      {busy ? ' · Starting…' : ''}
+                      {[
+                        typeof ep.seeders === 'number' && ep.seeders > 0
+                          ? `ready (${ep.seeders})`
+                          : '',
+                        isContinue ? 'Resume' : '',
+                        busy ? 'Connecting…' : '',
+                      ]
+                        .filter(Boolean)
+                        .join(' · ')}
                     </span>
                   </button>
                 </li>

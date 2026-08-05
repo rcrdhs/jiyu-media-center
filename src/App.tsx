@@ -6,6 +6,7 @@ import { PlaybackProvider } from './context/PlaybackContext'
 import { EpgProvider } from './context/EpgContext'
 import { WebBrowserProvider } from './context/WebBrowserContext'
 import { Sidebar } from './components/Sidebar'
+import { KidsModeGate } from './components/KidsModeGate'
 import { GlobalPlayer } from './components/GlobalPlayer'
 import { WebBrowserPip } from './components/WebBrowserPip'
 import { BackToTop } from './components/BackToTop'
@@ -16,7 +17,6 @@ import { ShowPage } from './pages/ShowPage'
 import { LibraryPage } from './pages/LibraryPage'
 import { BrowsePage } from './pages/BrowsePage'
 import { WebBrowserPage } from './pages/WebBrowserPage'
-import { GuidePage } from './pages/GuidePage'
 import { MultiviewPage } from './pages/MultiviewPage'
 import { FORCE_SAVE_CONTINUE_EVENT } from './lib/continueWatching'
 import { ensurePerformanceProfile } from './lib/deviceProfile'
@@ -61,19 +61,21 @@ export default function App() {
                 <div className="app-shell">
                   <Sidebar />
                   <main className="main-stage">
-                    <Routes>
-                      <Route path="/" element={<HomePage />} />
-                      <Route path="/section/:id" element={<SectionRoute />} />
-                      <Route path="/show/:id" element={<ShowPage />} />
-                      <Route path="/watch/:id" element={<WatchPage />} />
-                      <Route path="/library" element={<LibraryPage />} />
-                      <Route path="/browse" element={<BrowsePage />} />
-                      <Route path="/web" element={<WebBrowserPage />} />
-                      <Route path="/guide" element={<GuidePage />} />
-                      <Route path="/torrents" element={<Navigate to="/library?section=websites" replace />} />
-                      <Route path="/multiview" element={<MultiviewPage />} />
-                      <Route path="*" element={<Navigate to="/" replace />} />
-                    </Routes>
+                    <KidsModeGate>
+                      <Routes>
+                        <Route path="/" element={<HomePage />} />
+                        <Route path="/section/:id" element={<SectionRoute />} />
+                        <Route path="/show/:id" element={<ShowPage />} />
+                        <Route path="/watch/:id" element={<WatchPage />} />
+                        <Route path="/library" element={<LibraryPage />} />
+                        <Route path="/browse" element={<BrowsePage />} />
+                        <Route path="/web" element={<WebBrowserPage />} />
+                        <Route path="/guide" element={<Navigate to="/" replace />} />
+                        <Route path="/torrents" element={<Navigate to="/library?section=websites" replace />} />
+                        <Route path="/multiview" element={<MultiviewPage />} />
+                        <Route path="*" element={<Navigate to="/" replace />} />
+                      </Routes>
+                    </KidsModeGate>
                   </main>
                   <BackToTop />
                   <GlobalPlayer />

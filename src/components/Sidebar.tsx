@@ -1,16 +1,25 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { NavLink } from 'react-router-dom'
 import { CATEGORIES } from '../data/catalog'
 import { usePlayback } from '../context/PlaybackContext'
 import { FORCE_SAVE_CONTINUE_EVENT } from '../lib/continueWatching'
 import { APP_RELEASES, APP_VERSION_LABEL } from '../lib/appVersion'
+import { isKidsModeEnabled, subscribeKidsMode } from '../lib/kidsMode'
 import { CatalogSyncBar } from './CatalogSyncBar'
 
 export function Sidebar() {
   const { mode, minimizeToPip, slots, awaitingAdd } = usePlayback()
   const pipOpen = mode === 'pip'
   const [brandMenuOpen, setBrandMenuOpen] = useState(false)
+  const [kidsMode, setKidsMode] = useState(isKidsModeEnabled)
   const brandRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => subscribeKidsMode(() => setKidsMode(isKidsModeEnabled())), [])
+
+  const browseCategories = useMemo(
+    () => (kidsMode ? CATEGORIES.filter((cat) => cat.id === 'kids') : CATEGORIES),
+    [kidsMode],
+  )
 
   function onNavClick() {
     window.dispatchEvent(new Event(FORCE_SAVE_CONTINUE_EVENT))
@@ -103,7 +112,7 @@ export function Sidebar() {
           >
             Home
           </NavLink>
-          {CATEGORIES.map((cat, index) => (
+          {browseCategories.map((cat, index) => (
             <NavLink
               key={cat.id}
               to={`/section/${cat.id}`}
@@ -117,33 +126,27 @@ export function Sidebar() {
           ))}
         </div>
 
-        <div className="side-nav-group">
-          <p className="side-nav-label">Watch</p>
-          <NavLink
-            to="/web"
-            className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
-            style={{ ['--i' as string]: 6 }}
-            onClick={onNavClick}
-          >
-            Web browser
-          </NavLink>
-          <NavLink
-            to="/guide"
-            className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
-            style={{ ['--i' as string]: 7 }}
-            onClick={onNavClick}
-          >
-            Guide
-          </NavLink>
-          <NavLink
-            to="/multiview"
-            className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
-            style={{ ['--i' as string]: 8 }}
-            onClick={onNavClick}
-          >
-            {multiLabel}
-          </NavLink>
-        </div>
+        {!kidsMode && (
+          <div className="side-nav-group">
+            <p className="side-nav-label">Watch</p>
+            <NavLink
+              to="/web"
+              className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
+              style={{ ['--i' as string]: 6 }}
+              onClick={onNavClick}
+            >
+              Web browser
+            </NavLink>
+            <NavLink
+              to="/multiview"
+              className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
+              style={{ ['--i' as string]: 7 }}
+              onClick={onNavClick}
+            >
+              {multiLabel}
+            </NavLink>
+          </div>
+        )}
       </nav>
 
       <div className="side-footer">

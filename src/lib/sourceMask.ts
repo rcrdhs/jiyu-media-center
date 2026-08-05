@@ -1,7 +1,7 @@
 import type { StreamItem, StreamSourceKind } from '../types'
 
 const TORRENT_HOST_RE =
-  /torlock|yts\.|yify|eztv|subsplease|1337x|rarbg|nyaa|torrentgalaxy|tgx\.|limetorrent|zooqle|piratebay|thepiratebay|magnet:?/i
+  /torlock|yts\.|yify|eztv|subsplease|torrentfunk|1337x|rarbg|nyaa|torrentgalaxy|tgx\.|limetorrent|zooqle|piratebay|thepiratebay|magnet:?/i
 
 /** True if a label/URL looks like a torrent index site. */
 export function looksLikeCatalogWebsite(text?: string | null): boolean {
@@ -39,7 +39,7 @@ export function maskActivityMessage(raw: string): string {
   let text = raw
   text = text.replace(/https?:\/\/[^\s]+/gi, '[link]')
   text = text.replace(
-    /\b(?:www\.)?(?:torlock|yts|yify|eztv|subsplease)[a-z0-9.-]*/gi,
+    /\b(?:www\.)?(?:torlock|yts|yify|eztv|subsplease|torrentfunk)[a-z0-9.-]*/gi,
     'website',
   )
   text = text.replace(/\bfrom\s+website\b/gi, 'to the catalog')

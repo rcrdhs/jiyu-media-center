@@ -67,6 +67,9 @@ try {
  * WebTorrent destroys peers by closing RTCDataChannels; webrtc-polyfill then
  * emits OperationError("User-Initiated Abort…") on a timer. That is expected
  * teardown, not a fatal crash — suppress the Electron error dialog.
+ *
+ * EPIPE on console.log is also benign: stdout/stderr closed after a restart or
+ * detached console. Logging failed; playback/subtitle work is unaffected.
  */
 function isBenignWebRtcTeardownError(err) {
   const msg = String(err?.message || err || '')
@@ -75,12 +78,36 @@ function isBenignWebRtcTeardownError(err) {
     (/OperationError/i.test(String(err?.name || '')) && /Close called/i.test(msg))
   )
 }
+function isBenignMainProcessError(err) {
+  if (isBenignWebRtcTeardownError(err)) return true
+  const code = err?.code || ''
+  const msg = String(err?.message || err || '')
+  return code === 'EPIPE' || /EPIPE:\s*broken pipe/i.test(msg)
+}
+for (const stream of [process.stdout, process.stderr]) {
+  try {
+    stream?.on?.('error', (err) => {
+      if (err?.code === 'EPIPE') return
+    })
+  } catch {
+    /* ignore */
+  }
+}
 process.on('uncaughtException', (err) => {
-  if (isBenignWebRtcTeardownError(err)) {
-    console.warn('[torrent] ignored WebRTC teardown:', err?.message || err)
+  if (isBenignMainProcessError(err)) {
+    if (!isBenignWebRtcTeardownError(err)) return // EPIPE: don't log (would EPIPE again)
+    try {
+      console.warn('[torrent] ignored WebRTC teardown:', err?.message || err)
+    } catch {
+      /* ignore */
+    }
     return
   }
-  console.error('[main] uncaughtException:', err)
+  try {
+    console.error('[main] uncaughtException:', err)
+  } catch {
+    /* ignore */
+  }
   try {
     if (app.isReady()) {
       dialog.showErrorBox('Jiyu error', String(err?.stack || err?.message || err))
@@ -90,11 +117,20 @@ process.on('uncaughtException', (err) => {
   }
 })
 process.on('unhandledRejection', (reason) => {
-  if (isBenignWebRtcTeardownError(reason)) {
-    console.warn('[torrent] ignored WebRTC teardown rejection:', reason?.message || reason)
+  if (isBenignMainProcessError(reason)) {
+    if (!isBenignWebRtcTeardownError(reason)) return
+    try {
+      console.warn('[torrent] ignored WebRTC teardown rejection:', reason?.message || reason)
+    } catch {
+      /* ignore */
+    }
     return
   }
-  console.error('[main] unhandledRejection:', reason)
+  try {
+    console.error('[main] unhandledRejection:', reason)
+  } catch {
+    /* ignore */
+  }
 })
 
 /** Keep in lockstep with package.json (also injected into the UI as __JIYU_VERSION__). */
@@ -1702,6 +1738,25 @@ function emitTmdbProgress(payload) {
   }
 }
 
+/** Pause/cancel for long TMDB catalog fetches (driven by renderer sync controls). */
+const tmdbFetchControl = { paused: false, cancelled: false }
+
+function resetTmdbFetchControl() {
+  tmdbFetchControl.paused = false
+  tmdbFetchControl.cancelled = false
+}
+
+async function awaitTmdbFetchControl() {
+  while (tmdbFetchControl.paused && !tmdbFetchControl.cancelled) {
+    await new Promise((resolve) => setTimeout(resolve, 200))
+  }
+  if (tmdbFetchControl.cancelled) {
+    const err = new Error('Catalog sync cancelled')
+    err.code = 'TMDB_SYNC_CANCELLED'
+    throw err
+  }
+}
+
 /**
  * TMDB TV lists with IMDb ids.
  * kind: 'popular' (discover 2010+) | 'on_the_air' (currently airing)
@@ -1718,106 +1773,135 @@ async function fetchTmdbTvCatalog(kind = 'popular', limit = 3000) {
   const pageSize = 20
   const pagesNeeded = Math.ceil(target / pageSize)
   const shows = []
-  emitTmdbProgress({ phase: 'discover', kind: mode, page: 0, pagesNeeded, done: 0, total: target })
-  for (let page = 1; page <= pagesNeeded; page += 1) {
-    const url =
-      mode === 'on_the_air'
-        ? new URL('https://api.themoviedb.org/3/tv/on_the_air')
-        : new URL('https://api.themoviedb.org/3/discover/tv')
-    url.searchParams.set('api_key', apiKey)
-    url.searchParams.set('language', 'en-US')
-    url.searchParams.set('page', String(page))
-    if (mode === 'popular') {
-      url.searchParams.set('sort_by', 'popularity.desc')
-      url.searchParams.set('first_air_date.gte', '2010-01-01')
-      url.searchParams.set('include_null_first_air_dates', 'false')
-    }
-    const res = await fetch(url)
-    if (!res.ok) {
-      const body = await res.text().catch(() => '')
-      return {
-        ok: false,
-        shows: [],
-        error: `TMDB ${mode} HTTP ${res.status}: ${body.slice(0, 160)}`,
+  try {
+    await awaitTmdbFetchControl()
+    emitTmdbProgress({ phase: 'discover', kind: mode, page: 0, pagesNeeded, done: 0, total: target })
+    for (let page = 1; page <= pagesNeeded; page += 1) {
+      await awaitTmdbFetchControl()
+      const url =
+        mode === 'on_the_air'
+          ? new URL('https://api.themoviedb.org/3/tv/on_the_air')
+          : new URL('https://api.themoviedb.org/3/discover/tv')
+      url.searchParams.set('api_key', apiKey)
+      url.searchParams.set('language', 'en-US')
+      url.searchParams.set('page', String(page))
+      if (mode === 'popular') {
+        url.searchParams.set('sort_by', 'popularity.desc')
+        url.searchParams.set('first_air_date.gte', '2010-01-01')
+        url.searchParams.set('include_null_first_air_dates', 'false')
       }
-    }
-    const json = await res.json()
-    const results = Array.isArray(json.results) ? json.results : []
-    if (results.length === 0) break
-    shows.push(...results)
-    emitTmdbProgress({
-      phase: 'discover',
-      kind: mode,
-      page,
-      pagesNeeded,
-      done: Math.min(shows.length, target),
-      total: target,
-    })
-    const totalPages = Number(json.total_pages) || pagesNeeded
-    if (page >= totalPages) break
-  }
-  const top = shows.slice(0, target)
-  const out = new Array(top.length)
-  let cursor = 0
-  let idsDone = 0
-  const workers = Array.from({ length: Math.min(8, top.length) }, async () => {
-    while (cursor < top.length) {
-      const idx = cursor
-      cursor += 1
-      const show = top[idx]
-      let imdbId = ''
-      try {
-        const extUrl = new URL(`https://api.themoviedb.org/3/tv/${show.id}/external_ids`)
-        extUrl.searchParams.set('api_key', apiKey)
-        const extRes = await fetch(extUrl)
-        if (extRes.ok) {
-          const ext = await extRes.json()
-          imdbId = String(ext.imdb_id || '').replace(/^tt/i, '')
-          if (!/^\d+$/.test(imdbId)) imdbId = ''
+      const res = await fetch(url)
+      if (!res.ok) {
+        const body = await res.text().catch(() => '')
+        return {
+          ok: false,
+          shows: [],
+          error: `TMDB ${mode} HTTP ${res.status}: ${body.slice(0, 160)}`,
         }
-      } catch {
-        imdbId = ''
       }
-      out[idx] = {
-        tmdbId: show.id,
-        name: show.name || show.original_name || '',
-        firstAirDate: show.first_air_date || '',
-        popularity: show.popularity ?? 0,
-        imdbId,
-        overview: String(show.overview || '')
-          .replace(/\s+/g, ' ')
-          .trim(),
-        poster: show.poster_path
-          ? `https://image.tmdb.org/t/p/w342${show.poster_path}`
-          : '',
-      }
-      idsDone += 1
-      if (idsDone === 1 || idsDone === top.length || idsDone % 40 === 0) {
-        emitTmdbProgress({
-          phase: 'ids',
-          kind: mode,
-          page: idsDone,
-          pagesNeeded: top.length,
-          done: idsDone,
-          total: top.length,
-        })
-      }
+      const json = await res.json()
+      const results = Array.isArray(json.results) ? json.results : []
+      if (results.length === 0) break
+      shows.push(...results)
+      emitTmdbProgress({
+        phase: 'discover',
+        kind: mode,
+        page,
+        pagesNeeded,
+        done: Math.min(shows.length, target),
+        total: target,
+      })
+      const totalPages = Number(json.total_pages) || pagesNeeded
+      if (page >= totalPages) break
     }
-  })
-  await Promise.all(workers)
-  emitTmdbProgress({
-    phase: 'done',
-    kind: mode,
-    page: top.length,
-    pagesNeeded: top.length,
-    done: top.length,
-    total: top.length,
-  })
-  return { ok: true, shows: out.filter(Boolean), error: null }
+    const top = shows.slice(0, target)
+    const out = new Array(top.length)
+    let cursor = 0
+    let idsDone = 0
+    const workers = Array.from({ length: Math.min(8, top.length) }, async () => {
+      while (cursor < top.length) {
+        await awaitTmdbFetchControl()
+        const idx = cursor
+        cursor += 1
+        const show = top[idx]
+        let imdbId = ''
+        try {
+          const extUrl = new URL(`https://api.themoviedb.org/3/tv/${show.id}/external_ids`)
+          extUrl.searchParams.set('api_key', apiKey)
+          const extRes = await fetch(extUrl)
+          if (extRes.ok) {
+            const ext = await extRes.json()
+            imdbId = String(ext.imdb_id || '').replace(/^tt/i, '')
+            if (!/^\d+$/.test(imdbId)) imdbId = ''
+          }
+        } catch {
+          imdbId = ''
+        }
+        out[idx] = {
+          tmdbId: show.id,
+          name: show.name || show.original_name || '',
+          firstAirDate: show.first_air_date || '',
+          popularity: show.popularity ?? 0,
+          imdbId,
+          overview: String(show.overview || '')
+            .replace(/\s+/g, ' ')
+            .trim(),
+          poster: show.poster_path
+            ? `https://image.tmdb.org/t/p/w342${show.poster_path}`
+            : '',
+        }
+        idsDone += 1
+        if (idsDone === 1 || idsDone === top.length || idsDone % 40 === 0) {
+          emitTmdbProgress({
+            phase: 'ids',
+            kind: mode,
+            page: idsDone,
+            pagesNeeded: top.length,
+            done: idsDone,
+            total: top.length,
+          })
+        }
+      }
+    })
+    await Promise.all(workers)
+    await awaitTmdbFetchControl()
+    emitTmdbProgress({
+      phase: 'done',
+      kind: mode,
+      page: top.length,
+      pagesNeeded: top.length,
+      done: top.length,
+      total: top.length,
+    })
+    return { ok: true, shows: out.filter(Boolean), error: null }
+  } catch (err) {
+    if (err?.code === 'TMDB_SYNC_CANCELLED' || /Catalog sync cancelled/i.test(String(err?.message || ''))) {
+      return { ok: false, shows: [], error: 'Catalog sync cancelled', cancelled: true }
+    }
+    throw err
+  }
 }
 
 ipcMain.handle('tmdb:popularTv', async (_event, limit) => fetchTmdbTvCatalog('popular', limit))
 ipcMain.handle('tmdb:tvCatalog', async (_event, kind, limit) => fetchTmdbTvCatalog(kind, limit))
+ipcMain.handle('tmdb:syncControl', async (_event, action) => {
+  const cmd = String(action || '').toLowerCase()
+  if (cmd === 'pause') {
+    tmdbFetchControl.paused = true
+  } else if (cmd === 'resume') {
+    tmdbFetchControl.paused = false
+  } else if (cmd === 'cancel') {
+    tmdbFetchControl.cancelled = true
+    tmdbFetchControl.paused = false
+  } else if (cmd === 'reset') {
+    resetTmdbFetchControl()
+  }
+  return {
+    ok: true,
+    paused: tmdbFetchControl.paused,
+    cancelled: tmdbFetchControl.cancelled,
+  }
+})
 
 ipcMain.handle('dialog:openPlaylist', async () => {
   const result = await dialog.showOpenDialog({
@@ -2533,9 +2617,15 @@ async function getTorrentClient() {
 const VIDEO_FILE_RE = /\.(mp4|mkv|webm|m4v|mov|avi|ts|mpg|mpeg)$/i
 const METADATA_TIMEOUT_MS = 45000
 const METADATA_PEER_GRACE_MS = 15000
-/** How long to wait for the first peer/bytes after metadata (DHT can be slow). */
-const PEER_PROBE_MS = 25_000
+/** First wait for peers/bytes after metadata (DHT can be slow). */
+const PEER_PROBE_MS = 12_000
+/** Shorter probe when re-adding a magnet after a dead cached .torrent. */
+const PEER_PROBE_RETRY_MS = 8_000
+const MAGNET_METADATA_MS = 10_000
+const MAGNET_RETRY_READY_MS = 12_000
 const OPENING_BYTES_WAIT_MS = 35_000
+const NO_PEERS_ERROR =
+  'No peers found for this release — try another episode or quality.'
 const DEFAULT_TORRENT_TRACKERS = [
   'udp://tracker.opentrackr.org:1337/announce',
   'udp://open.stealth.si:80/announce',
@@ -2665,8 +2755,10 @@ function waitForTorrentReady(torrent, timeoutMs = METADATA_TIMEOUT_MS) {
 }
 // Every common container except webm: torrent releases (including MP4 WEB-DLs)
 // routinely carry AC3/EAC3/DTS audio that Chromium cannot decode, which plays
-// video with no sound. Video is copied; only audio is re-encoded to AAC.
+// video with no sound. Video is copied when Chromium-safe; only audio is
+// re-encoded to AAC. HEVC/x265 must be re-encoded — Electron can't paint it.
 const AUDIO_TRANSCODE_RE = /\.(mp4|m4v|mov|mkv|avi|ts|mts|m2ts|mpg|mpeg)$/i
+const HEVC_VIDEO_RE = /\b(x265|h\.?265|hevc)\b/i
 const SUBTITLE_FILE_RE = /\.(srt|ass|ssa|vtt)$/i
 const EMBEDDED_SUBS_RE = /\.(mkv|mp4|m4v|mov)$/i
 
@@ -2785,21 +2877,38 @@ function isImageSubtitleCodec(codec) {
   return /pgs|hdmv|dvd_sub|dvdsub|dvb_sub|xsub|vobsub/.test(c)
 }
 
+/**
+ * FFmpeg 6+ often prints `Stream #0:3[0x0](eng): Subtitle: ass`.
+ * Older builds omit the `[…]` id — accept both.
+ */
+const FFMPEG_STREAM_LINE_RE =
+  /^\s*Stream #0:(\d+)(?:\[[^\]]*\])?(?:\(([^)]*)\))?:\s*(Audio|Subtitle|Video|Attachment):\s*([^\s,(]+)/i
+
 /** Parse `ffmpeg -i` stderr into subtitle stream descriptors. */
 function parseFfmpegSubtitleStreams(stderr) {
   const tracks = []
   const lines = String(stderr || '').split(/\r?\n/)
   let current = null
   for (const line of lines) {
-    const stream = /^\s*Stream #0:(\d+)(?:\(([^)]*)\))?: Subtitle:\s*([^\s,(]+)/i.exec(line)
-    if (stream) {
+    const stream = FFMPEG_STREAM_LINE_RE.exec(line)
+    if (stream && /^Subtitle$/i.test(stream[3])) {
       if (current) tracks.push(current)
       current = {
         index: Number(stream[1]),
         language: (stream[2] || '').trim().toLowerCase(),
-        codec: stream[3].trim().toLowerCase(),
+        codec: stream[4].trim().toLowerCase(),
         title: '',
         isDefault: /\(default\)/i.test(line),
+        isForced: /\(forced\)/i.test(line),
+        isHearingImpaired: /\(hearing\s*impaired\)/i.test(line),
+      }
+      continue
+    }
+    if (stream) {
+      // Hit a non-subtitle stream — close the previous subtitle descriptor.
+      if (current) {
+        tracks.push(current)
+        current = null
       }
       continue
     }
@@ -2810,6 +2919,128 @@ function parseFfmpegSubtitleStreams(stderr) {
   }
   if (current) tracks.push(current)
   return tracks
+}
+
+/** Parse `ffmpeg -i` stderr into audio stream descriptors (absolute stream index). */
+function parseFfmpegAudioStreams(stderr) {
+  const tracks = []
+  const lines = String(stderr || '').split(/\r?\n/)
+  let current = null
+  let audioOrdinal = -1
+  for (const line of lines) {
+    const stream = FFMPEG_STREAM_LINE_RE.exec(line)
+    if (stream && /^Audio$/i.test(stream[3])) {
+      if (current) tracks.push(current)
+      audioOrdinal += 1
+      current = {
+        index: Number(stream[1]),
+        audioOrdinal,
+        language: (stream[2] || '').trim().toLowerCase(),
+        codec: stream[4].trim().toLowerCase(),
+        title: '',
+        isDefault: /\(default\)/i.test(line),
+      }
+      continue
+    }
+    if (stream) {
+      if (current) {
+        tracks.push(current)
+        current = null
+      }
+      continue
+    }
+    if (current) {
+      const title = /^\s*title\s*:\s*(.+)\s*$/i.exec(line)
+      if (title) current.title = title[1].trim()
+    }
+  }
+  if (current) tracks.push(current)
+  return tracks
+}
+
+function scoreAudioTrack(track) {
+  if (!track) return -Infinity
+  let score = 0
+  const lang = track.language || ''
+  const title = (track.title || '').toLowerCase()
+
+  if (/^(eng?|en)$/i.test(lang) || lang.startsWith('en')) score += 80
+  else if (!lang || lang === 'und' || lang === 'unknown') score += 15
+  else if (/^(fre?|fr|fra)$/i.test(lang) || lang.startsWith('fr')) score -= 60
+  else if (/^(spa|es|ger|de|deu|ita|jpn|ja|rus|hin)/i.test(lang)) score -= 40
+
+  if (/\b(english|eng|original)\b/i.test(title)) score += 40
+  if (/\b(french|fran[cç]ais|vff|vfq|truefrench|deutsch|german|latino)\b/i.test(title))
+    score -= 50
+  if (/\b(commentary|descriptive|ad\b|director)\b/i.test(title)) score -= 70
+  if (track.isDefault) score += 5
+  // Prefer earlier tracks when language is equal (usually main mix).
+  score -= track.audioOrdinal * 0.1
+
+  return score
+}
+
+function pickBestAudioTrack(tracks) {
+  const ranked = [...(tracks || [])]
+    .map((track) => ({ track, score: scoreAudioTrack(track) }))
+    .sort((a, b) => b.score - a.score)
+  return ranked[0]?.track || null
+}
+
+/**
+ * Prefer English audio on MULTI packs (track 0 is often French).
+ * Returns the audio stream ordinal for `-map 0:a:N` (not absolute stream index).
+ */
+function probePreferredAudioOrdinal(httpSource) {
+  return new Promise((resolve) => {
+    const ffmpegPath = resolveFfmpegPath()
+    if (!ffmpegPath || !httpSource) {
+      resolve(0)
+      return
+    }
+    const proc = spawn(
+      ffmpegPath,
+      [
+        '-hide_banner',
+        '-probesize',
+        '4M',
+        '-analyzeduration',
+        '3000000',
+        '-i',
+        httpSource,
+      ],
+      { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] },
+    )
+    let stderr = ''
+    const timer = setTimeout(() => {
+      try {
+        if (!proc.killed) proc.kill()
+      } catch {
+        /* ignore */
+      }
+    }, 12000)
+    proc.stderr.on('data', (chunk) => {
+      stderr += String(chunk)
+    })
+    proc.once('error', () => {
+      clearTimeout(timer)
+      resolve(0)
+    })
+    proc.once('close', () => {
+      clearTimeout(timer)
+      const tracks = parseFfmpegAudioStreams(stderr)
+      const best = pickBestAudioTrack(tracks)
+      if (best && tracks.length > 1) {
+        console.log('[torrent audio] preferred track', {
+          ordinal: best.audioOrdinal,
+          language: best.language || 'und',
+          title: best.title || '',
+          total: tracks.length,
+        })
+      }
+      resolve(best && Number.isFinite(best.audioOrdinal) ? best.audioOrdinal : 0)
+    })
+  })
 }
 
 function scoreSubtitleTrack(track) {
@@ -2829,6 +3060,9 @@ function scoreSubtitleTrack(track) {
 
   if (/\b(full|dialogue|dialog|english)\b/i.test(title)) score += 25
   if (/\b(signs?|songs?|forced|commentary)\b/i.test(title)) score -= 40
+  if (/\b(sdh|hearing\s*impaired|cc)\b/i.test(title)) score -= 20
+  if (track.isHearingImpaired) score -= 20
+  if (track.isForced) score -= 35
   if (track.isDefault) score += 8
 
   return score
@@ -2843,13 +3077,71 @@ function pickBestTextSubtitleTrack(tracks) {
 }
 
 /**
- * Probe subtitle streams on a local WebTorrent HTTP URL via ffmpeg -i.
+ * Absolute on-disk path for a WebTorrent file when pieces have been written.
+ * Prefer this for softsub probe/extract — HTTP /torrent-file often misses MKV
+ * subtitle tracks even when the same file on disk lists them clearly.
+ */
+function resolveTorrentFileDiskPath(file) {
+  if (!file) return null
+  try {
+    const rel = String(file.path || '')
+    const name = String(file.name || '')
+    const torrent = file._torrent || file.torrent || null
+    const roots = []
+    if (torrent?.path) roots.push(torrent.path)
+    roots.push(path.join(os.tmpdir(), 'webtorrent'))
+    const candidates = []
+    if (rel && path.isAbsolute(rel)) candidates.push(rel)
+    for (const root of roots) {
+      if (!root) continue
+      if (rel) candidates.push(path.join(root, rel))
+      if (name) candidates.push(path.join(root, name))
+      if (torrent?.name && name) candidates.push(path.join(root, torrent.name, name))
+    }
+    for (const candidate of candidates) {
+      try {
+        if (candidate && fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+          return candidate
+        }
+      } catch {
+        /* try next */
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return null
+}
+
+/**
+ * @param {'probe' | 'extract'} mode
+ * Probe can use a partial on-disk file (MKV headers live near the start).
+ * Extract must NOT — sparse torrent files make ffmpeg die mid-track on holes,
+ * freezing subs halfway. Use HTTP until the file is mostly complete.
+ */
+function ffmpegInputForSubtitles(file, httpSource, mode = 'extract') {
+  try {
+    const local = resolveTorrentFileDiskPath(file)
+    if (local) {
+      const size = fs.statSync(local).size
+      if (size < 2 * 1024 * 1024) return httpSource
+      if (mode === 'probe') return local
+      if (mode === 'extract' && torrentFileMostlyComplete(file)) return local
+    }
+  } catch {
+    /* fall through */
+  }
+  return httpSource
+}
+
+/**
+ * Probe subtitle streams via ffmpeg -i (local path preferred over HTTP).
  * @returns {Promise<Array<{ index: number, language: string, codec: string, title: string, isDefault: boolean }>>}
  */
-function probeSubtitleTracks(httpSource) {
+function probeSubtitleTracks(inputSource) {
   return new Promise((resolve) => {
     const ffmpegPath = resolveFfmpegPath()
-    if (!ffmpegPath || !httpSource) {
+    if (!ffmpegPath || !inputSource) {
       resolve([])
       return
     }
@@ -2858,11 +3150,11 @@ function probeSubtitleTracks(httpSource) {
       [
         '-hide_banner',
         '-probesize',
-        '16M',
+        '32M',
         '-analyzeduration',
-        '15000000',
+        '20000000',
         '-i',
-        httpSource,
+        inputSource,
       ],
       { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] },
     )
@@ -2883,7 +3175,26 @@ function probeSubtitleTracks(httpSource) {
     })
     proc.once('close', () => {
       clearTimeout(timer)
-      resolve(parseFfmpegSubtitleStreams(stderr))
+      const tracks = parseFfmpegSubtitleStreams(stderr)
+      if (tracks.length === 0) {
+        if (/Subtitle:/i.test(stderr)) {
+          const hint = stderr
+            .split(/\r?\n/)
+            .filter((line) => /Subtitle:/i.test(line))
+            .slice(0, 4)
+          console.warn('[torrent subs] subtitle lines not parsed', hint)
+        } else {
+          const hint = stderr
+            .split(/\r?\n/)
+            .filter((line) => /Stream #|error|Invalid|404|Connection/i.test(line))
+            .slice(0, 8)
+          console.warn('[torrent subs] empty probe stderr', {
+            input: String(inputSource).slice(0, 160),
+            hint,
+          })
+        }
+      }
+      resolve(tracks)
     })
   })
 }
@@ -3030,13 +3341,14 @@ function abortSubtitleExtractors(exceptKey = null) {
     }
     subtitleExtractors.delete(key)
     const job = subtitleJobs.get(key)
-    // Keep successful caches; allow incomplete jobs to be restarted later.
+    // Keep successful caches; never finalize incomplete progressive jobs here —
+    // that made the player stop polling while cues were still only halfway in.
     if (!job) continue
     if (!subtitleCache.has(key)) {
       subtitleJobs.delete(key)
     } else {
-      job.done = true
-      job.retryable = false
+      job.done = false
+      job.retryable = true
     }
   }
 }
@@ -3078,8 +3390,18 @@ function startProgressiveSubtitleExtract(file, cacheKey) {
   const existing = subtitleJobs.get(cacheKey)
   if (existing && !existing.done && subtitleExtractors.has(cacheKey)) return
   if (existing?.done && !existing.retryable && existing.error && !subtitleCache.has(cacheKey)) {
-    // Allow another attempt once more of the file has arrived.
-    if (downloaded < 8 * 1024 * 1024) {
+    // Allow another attempt once more of the file has arrived, or when a prior
+    // HTTP-only probe falsely reported "no subtitle track" but disk now has the file.
+    const local = resolveTorrentFileDiskPath(file)
+    let localSize = 0
+    try {
+      localSize = local ? fs.statSync(local).size : 0
+    } catch {
+      localSize = 0
+    }
+    const retryFalseNegative =
+      /no subtitle track/i.test(String(existing.error || '')) && localSize >= 12 * 1024 * 1024
+    if (downloaded < 8 * 1024 * 1024 || retryFalseNegative) {
       subtitleJobs.delete(cacheKey)
     } else {
       return
@@ -3217,49 +3539,63 @@ function startProgressiveSubtitleExtract(file, cacheKey) {
     console.warn('[torrent subs]', message, { file: file.name })
   }
 
-  const extractTrack = (track) => {
-    if (!httpSource || !track) {
+  const extractTrack = (track, options = {}) => {
+    const inputSource = ffmpegInputForSubtitles(file, httpSource, 'extract')
+    if (!inputSource || !track) {
       markRetryable('Subtitle source URL missing')
       return
     }
     selectedTrack = track
     killActive()
+    const startAt = Math.max(0, Number(options.startAt) || 0)
+    const beforeCount = cues.length
     console.log('[torrent subs] extracting track', {
       index: track.index,
       language: track.language || 'und',
       codec: track.codec,
       title: track.title || '',
       score: scoreSubtitleTrack(track),
+      via: path.isAbsolute(String(inputSource)) ? 'disk' : 'http',
+      startAt: startAt > 0 ? Math.round(startAt) : 0,
+      haveCues: beforeCount,
     })
 
-    const ffmpeg = spawn(
-      ffmpegPath,
-      [
-        '-hide_banner',
-        '-loglevel',
-        'error',
-        '-probesize',
-        '16M',
-        '-analyzeduration',
-        '15000000',
-        '-i',
-        httpSource,
-        '-map',
-        `0:${track.index}`,
-        '-c:s',
-        'ass',
-        '-flush_packets',
-        '1',
-        '-f',
-        'ass',
-        'pipe:1',
-      ],
-      { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] },
+    const args = [
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-probesize',
+      '32M',
+      '-analyzeduration',
+      '20000000',
+    ]
+    // Skip cues we already have — critical when resuming after a sparse-file stall.
+    if (startAt >= 1) {
+      args.push('-ss', startAt.toFixed(3))
+    }
+    args.push(
+      '-i',
+      inputSource,
+      '-map',
+      `0:${track.index}`,
+      '-c:s',
+      'ass',
+      '-flush_packets',
+      '1',
+      '-f',
+      'ass',
+      'pipe:1',
     )
+
+    const ffmpeg = spawn(ffmpegPath, args, {
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
 
     activeFfmpeg = ffmpeg
     let buf = ''
     let sawCue = false
+    let lastLoggedCount = beforeCount
 
     ffmpeg.stdout.on('data', (chunk) => {
       buf += String(chunk)
@@ -3269,13 +3605,18 @@ function startProgressiveSubtitleExtract(file, cacheKey) {
       for (const line of lines) {
         const cue = parseAssDialogueLine(line)
         if (!cue) continue
+        // Ignore overlap from -ss restarts.
+        if (startAt > 0 && cue.end <= startAt + 0.05) continue
         cues.push(cue)
         sawCue = true
         grew = true
       }
       if (grew) {
         publishSubtitleCues(cacheKey, cues, job)
-        console.log('[torrent subs] cues', job.cueCount)
+        if (job.cueCount > lastLoggedCount) {
+          lastLoggedCount = job.cueCount
+          console.log('[torrent subs] cues', job.cueCount)
+        }
       }
     })
 
@@ -3286,17 +3627,18 @@ function startProgressiveSubtitleExtract(file, cacheKey) {
 
     ffmpeg.once('error', (err) => {
       console.warn('[torrent subs] ffmpeg error:', err?.message || err)
-      if (!sawCue) markRetryable(err?.message || 'Subtitle extract failed')
-      else {
+      if (!sawCue && cues.length === 0) {
+        markRetryable(err?.message || 'Subtitle extract failed')
+      } else {
         publishSubtitleCues(cacheKey, cues, job)
-        job.done = true
         subtitleExtractors.delete(cacheKey)
+        scheduleSubtitleExtractResume()
       }
     })
 
     ffmpeg.once('close', (code) => {
       if (subtitleExtractors.get(cacheKey)?.kill !== killActive) return
-      if (!sawCue) {
+      if (!sawCue && cues.length === 0) {
         const downloaded = Number(file.downloaded) || 0
         const progress = Number(file.progress) || 0
         if (downloaded < 8 * 1024 * 1024 && progress < 0.08) {
@@ -3308,23 +3650,11 @@ function startProgressiveSubtitleExtract(file, cacheKey) {
       }
       publishSubtitleCues(cacheKey, cues, job)
       subtitleExtractors.delete(cacheKey)
-      if (torrentFileMostlyComplete(file)) {
+      if (torrentFileMostlyComplete(file) && !(code && code !== 0)) {
         job.done = true
         job.retryable = false
       } else {
-        job.done = false
-        job.retryable = true
-        console.warn('[torrent subs] extract paused early with', cues.length, 'cues — will resume')
-        setTimeout(() => {
-          const current = subtitleJobs.get(cacheKey)
-          if (!current || current.done || subtitleExtractors.has(cacheKey)) return
-          if (subtitleCache.has(cacheKey) && torrentFileMostlyComplete(file)) {
-            current.done = true
-            current.retryable = false
-            return
-          }
-          if (selectedTrack) extractTrack(selectedTrack)
-        }, 4000)
+        scheduleSubtitleExtractResume()
       }
       if (code && code !== 0) {
         console.warn('[torrent subs] ffmpeg exit', code, `(${cues.length} cues kept)`)
@@ -3332,8 +3662,48 @@ function startProgressiveSubtitleExtract(file, cacheKey) {
     })
   }
 
+  const scheduleSubtitleExtractResume = () => {
+    job.done = false
+    job.retryable = true
+    const lastEnd = cues.reduce((max, cue) => Math.max(max, cue.end || 0), 0)
+    const downloadedAtPause = Number(file.downloaded) || 0
+    console.warn(
+      '[torrent subs] extract paused early with',
+      cues.length,
+      'cues — will resume',
+      { lastEnd: Math.round(lastEnd), downloaded: downloadedAtPause },
+    )
+
+    let attempts = 0
+    const tryResume = () => {
+      attempts += 1
+      const current = subtitleJobs.get(cacheKey)
+      if (!current || current.done || subtitleExtractors.has(cacheKey)) return
+      if (!selectedTrack) return
+
+      if (torrentFileMostlyComplete(file)) {
+        // Finished downloading — one clean disk pass from the last cue.
+        extractTrack(selectedTrack, { startAt: Math.max(0, lastEnd - 1) })
+        return
+      }
+
+      const downloadedNow = Number(file.downloaded) || 0
+      const progress = Number(file.progress) || 0
+      // Wait until more pieces arrive so we don't hammer the same sparse hole.
+      const grew =
+        downloadedNow >= downloadedAtPause + 6 * 1024 * 1024 || progress >= 0.97
+      if (!grew && attempts < 60) {
+        setTimeout(tryResume, 5000)
+        return
+      }
+      extractTrack(selectedTrack, { startAt: Math.max(0, lastEnd - 1) })
+    }
+    setTimeout(tryResume, 5000)
+  }
+
   void (async () => {
-    if (!httpSource) {
+    const probeSource = ffmpegInputForSubtitles(file, httpSource, 'probe')
+    if (!probeSource) {
       markRetryable('Subtitle source URL missing')
       return
     }
@@ -3344,22 +3714,31 @@ function startProgressiveSubtitleExtract(file, cacheKey) {
       return
     }
 
-    const tracks = await probeSubtitleTracks(httpSource)
+    const tracks = await probeSubtitleTracks(probeSource)
     if (subtitleExtractors.get(cacheKey)?.kill !== killActive) return
 
-    console.log(
-      '[torrent subs] probed',
-      tracks.map((t) => ({
+    console.log('[torrent subs] probed', {
+      via: path.isAbsolute(String(probeSource)) ? 'disk' : 'http',
+      tracks: tracks.map((t) => ({
         index: t.index,
         lang: t.language || 'und',
         codec: t.codec,
         title: t.title || '',
         score: scoreSubtitleTrack(t),
       })),
-    )
+    })
 
     if (tracks.length === 0) {
-      if (downloaded < 10 * 1024 * 1024 && progress < 0.1) {
+      const local = resolveTorrentFileDiskPath(file)
+      let localSize = 0
+      try {
+        localSize = local ? fs.statSync(local).size : 0
+      } catch {
+        localSize = 0
+      }
+      // HTTP probes often miss softsubs; only declare missing after a large on-disk probe.
+      const probedDisk = path.isAbsolute(String(probeSource))
+      if (!probedDisk || localSize < 20 * 1024 * 1024 || progress < 0.35) {
         markRetryable('Subtitles not ready')
       } else {
         finishMissing('No subtitle track found')
@@ -3453,13 +3832,17 @@ async function waitForRemuxSeekPoint(source, startAtSec) {
 async function handleAudioTranscode(req, res, source) {
   let startAt = 0
   let exact = false
+  let forceHevcTranscode = false
   try {
     const url = new URL(req.url || '/', 'http://127.0.0.1')
     startAt = Math.max(0, Number(url.searchParams.get('t')) || 0)
     exact = url.searchParams.get('exact') === '1'
+    forceHevcTranscode =
+      url.searchParams.get('hevc') === '1' || HEVC_VIDEO_RE.test(decodeURIComponent(source || ''))
   } catch {
     startAt = 0
     exact = false
+    forceHevcTranscode = HEVC_VIDEO_RE.test(String(source || ''))
   }
 
   if (req.method === 'HEAD') {
@@ -3486,6 +3869,9 @@ async function handleAudioTranscode(req, res, source) {
     await waitForRemuxSeekPoint(source, startAt)
   }
 
+  // MULTI packs often put French on a:0 — pick English when tagged.
+  const audioOrdinal = await probePreferredAudioOrdinal(source)
+
   res.writeHead(200, {
     'Content-Type': 'video/mp4',
     'Cache-Control': 'no-store',
@@ -3493,7 +3879,8 @@ async function handleAudioTranscode(req, res, source) {
     'Access-Control-Allow-Origin': '*',
   })
 
-  // Video is stream-copied; audio is re-encoded to AAC for Chromium.
+  // Default: copy video, re-encode audio to AAC for Chromium.
+  // HEVC/x265 copy → black screen in Electron; re-encode those to H.264.
   // Softsubs stay on the VTT overlay (ffmpeg subtitles filter can't reliably
   // read progressive HTTP torrent sources).
   //
@@ -3503,6 +3890,11 @@ async function handleAudioTranscode(req, res, source) {
   // - Don't use aresample=async=* — continuous stretch drifts against copied
   //   video timestamps in fragmented MP4.
   // - muxdelay/muxpreload 0 also breaks interleaving for fMP4 in Chromium.
+  if (forceHevcTranscode) {
+    console.log('[torrent audio] HEVC source — transcoding video to H.264', {
+      startAt: Math.floor(startAt),
+    })
+  }
   const args = [
     '-hide_banner',
     '-loglevel',
@@ -3512,15 +3904,15 @@ async function handleAudioTranscode(req, res, source) {
     // Smaller probe on cold start so the first fMP4 fragment arrives sooner
     // while the torrent head is still filling (1080p MKV was timing out at 25s).
     '-probesize',
-    exact ? '5M' : '1M',
+    exact || forceHevcTranscode ? '5M' : '1M',
     '-analyzeduration',
-    exact ? '5000000' : '1000000',
+    exact || forceHevcTranscode ? '5000000' : '1000000',
   ]
   if (startAt >= 1) {
     // Coarse input seek for speed, then a short accurate output seek so
     // copied video and re-encoded audio share the same cut point.
-    // exact=1 (Skip Intro): decode-seek only for frame-accurate cut.
-    if (exact) {
+    // exact=1 / HEVC re-encode: decode-seek only for clean timestamps.
+    if (exact || forceHevcTranscode) {
       args.push('-i', source, '-ss', startAt.toFixed(3))
     } else {
       const coarse = Math.max(0, startAt - 3)
@@ -3530,13 +3922,24 @@ async function handleAudioTranscode(req, res, source) {
   } else {
     args.push('-i', source)
   }
+  args.push('-map', '0:v:0', '-map', `0:a:${audioOrdinal}?`)
+  if (forceHevcTranscode) {
+    args.push(
+      '-c:v',
+      'libx264',
+      '-preset',
+      'veryfast',
+      '-crf',
+      '22',
+      '-pix_fmt',
+      'yuv420p',
+      '-profile:v',
+      'main',
+    )
+  } else {
+    args.push('-c:v', 'copy')
+  }
   args.push(
-    '-map',
-    '0:v:0',
-    '-map',
-    '0:a:0?',
-    '-c:v',
-    'copy',
     '-c:a',
     'aac',
     '-b:a',
@@ -4098,6 +4501,54 @@ function playableTorrentFiles(torrent) {
   return (substantial.length ? substantial : candidates).sort(naturalVideoCompare)
 }
 
+/** Torrentio season packs send fileIdx / filename — honor them so S01E10 isn't file 0. */
+function parseJiyuMagnetHints(uri) {
+  const idxMatch = /[?&]_jiyuFileIdx=(\d+)/i.exec(String(uri || ''))
+  const nameMatch = /[?&]_jiyuFileName=([^&]+)/i.exec(String(uri || ''))
+  let fileName
+  if (nameMatch) {
+    try {
+      fileName = decodeURIComponent(nameMatch[1].replace(/\+/g, ' '))
+    } catch {
+      fileName = nameMatch[1]
+    }
+  }
+  const fileIndex = idxMatch ? Number(idxMatch[1]) : NaN
+  return {
+    fileIndex: Number.isFinite(fileIndex) && fileIndex >= 0 ? fileIndex : undefined,
+    fileName: fileName || undefined,
+  }
+}
+
+function pickTorrentVideoFile(torrent, hints = {}) {
+  const playlistFiles = playableTorrentFiles(torrent)
+  if (!playlistFiles.length) return { file: null, playlistFiles }
+
+  const fileIndex =
+    Number.isFinite(hints.fileIndex) && hints.fileIndex >= 0 ? hints.fileIndex : undefined
+  if (fileIndex != null && torrent.files?.[fileIndex]) {
+    const byIdx = torrent.files[fileIndex]
+    if (VIDEO_FILE_RE.test(byIdx.name)) {
+      return { file: byIdx, playlistFiles }
+    }
+  }
+
+  const want = String(hints.fileName || '')
+    .trim()
+    .toLowerCase()
+  if (want) {
+    const byName =
+      playlistFiles.find((f) => f.name.toLowerCase() === want) ||
+      playlistFiles.find((f) => f.name.toLowerCase().endsWith(want)) ||
+      torrent.files.find(
+        (f) => VIDEO_FILE_RE.test(f.name) && f.name.toLowerCase().includes(want),
+      )
+    if (byName) return { file: byName, playlistFiles }
+  }
+
+  return { file: playlistFiles[0], playlistFiles }
+}
+
 async function torrentFilePlaybackUrl(torrent, file) {
   // Ensure index-based /torrent-file URLs are available before building source.
   await getTranscodeServer()
@@ -4105,7 +4556,8 @@ async function torrentFilePlaybackUrl(torrent, file) {
   if (!AUDIO_TRANSCODE_RE.test(file.name)) return sourceUrl
 
   const port = transcodeServerPort
-  return `http://127.0.0.1:${port}/stream.mp4?source=${encodeURIComponent(sourceUrl)}`
+  const hevc = HEVC_VIDEO_RE.test(file.name || '') ? '&hevc=1' : ''
+  return `http://127.0.0.1:${port}/stream.mp4?source=${encodeURIComponent(sourceUrl)}${hevc}`
 }
 
 const MAX_CONCURRENT_TORRENTS = 4
@@ -4117,6 +4569,13 @@ ipcMain.handle('torrent:stream', async (_event, input, options) => {
     }
     const uri = input.trim()
     const keepOthers = Boolean(options && options.keepOthers)
+    const magnetHints = {
+      ...parseJiyuMagnetHints(uri),
+      ...(Number.isFinite(options?.fileIndex) ? { fileIndex: Number(options.fileIndex) } : {}),
+      ...(typeof options?.fileName === 'string' && options.fileName.trim()
+        ? { fileName: options.fileName.trim() }
+        : {}),
+    }
     const isMagnet = /^magnet:\?/i.test(uri)
     let isTorrentUrl = false
     try {
@@ -4212,7 +4671,7 @@ ipcMain.handle('torrent:stream', async (_event, input, options) => {
           torrent = await Promise.race([
             waitForTorrentReady(addedMagnet),
             new Promise((_, reject) =>
-              setTimeout(() => reject(new Error('magnet-metadata-timeout')), 14_000),
+              setTimeout(() => reject(new Error('magnet-metadata-timeout')), MAGNET_METADATA_MS),
             ),
           ])
         } catch (err) {
@@ -4253,15 +4712,23 @@ ipcMain.handle('torrent:stream', async (_event, input, options) => {
       torrent = await waitForTorrentReady(torrent)
     }
 
-    async function selectAndProbe(activeTorrent) {
+    async function selectAndProbe(activeTorrent, options = {}) {
+      const probeMs = Number(options.probeMs) > 0 ? Number(options.probeMs) : PEER_PROBE_MS
       const files = [...activeTorrent.files].sort((a, b) => b.length - a.length)
-      const playlistFiles = playableTorrentFiles(activeTorrent)
-      const file = playlistFiles[0]
+      const { file, playlistFiles } = pickTorrentVideoFile(activeTorrent, magnetHints)
       if (!file) {
         return {
           ok: false,
           error: `Torrent has no playable video file (largest file: ${files[0]?.name ?? 'none'})`,
         }
+      }
+      if (magnetHints.fileIndex != null || magnetHints.fileName) {
+        console.log('[torrent] selected episode file', {
+          infoHash: activeTorrent.infoHash,
+          file: file.name,
+          fileIndex: magnetHints.fileIndex,
+          wantedName: magnetHints.fileName || '',
+        })
       }
 
       // Deselect extras, then fully select the active video so WebTorrent keeps
@@ -4312,10 +4779,10 @@ ipcMain.handle('torrent:stream', async (_event, input, options) => {
         console.log('[torrent] probing for peers', {
           infoHash: activeTorrent.infoHash,
           name: activeTorrent.name,
-          waitMs: PEER_PROBE_MS,
+          waitMs: probeMs,
         })
         foundPeer = await new Promise((resolve) => {
-          const deadline = setTimeout(() => finish(false), PEER_PROBE_MS)
+          const deadline = setTimeout(() => finish(false), probeMs)
           const poll = setInterval(() => {
             if (activeTorrent.downloaded > 0 || activeTorrent.numPeers > 0) finish(true)
           }, 250)
@@ -4350,7 +4817,7 @@ ipcMain.handle('torrent:stream', async (_event, input, options) => {
     }
 
     // Cached .torrent + announce opts can sit at 0 peers; rebuild from the magnet
-    // (trackers in the URI) before declaring the swarm dead.
+    // (trackers in the URI) before declaring the swarm dead — keep this short.
     if (
       !prepared.gotOpening &&
       torrent.downloaded === 0 &&
@@ -4374,16 +4841,24 @@ ipcMain.handle('torrent:stream', async (_event, input, options) => {
         infoHash: hash,
         retry: 'magnet',
       })
-      const added = client.add(magnetWithDefaultTrackers(uri), {
-        destroyStoreOnDestroy: true,
-        announce,
-        strategy: 'sequential',
-      })
-      torrent = await waitForTorrentReady(added)
-      prepared = await selectAndProbe(torrent)
-      if (!prepared.ok) {
-        torrent.destroy()
-        return { ok: false, error: prepared.error }
+      try {
+        const added = client.add(magnetWithDefaultTrackers(uri), {
+          destroyStoreOnDestroy: true,
+          announce,
+          strategy: 'sequential',
+        })
+        torrent = await waitForTorrentReady(added, MAGNET_RETRY_READY_MS)
+        prepared = await selectAndProbe(torrent, { probeMs: PEER_PROBE_RETRY_MS })
+        if (!prepared.ok) {
+          torrent.destroy()
+          return { ok: false, error: prepared.error }
+        }
+      } catch (err) {
+        console.log('[torrent] magnet retry failed', {
+          infoHash: hash,
+          error: err?.message || String(err),
+        })
+        return { ok: false, error: NO_PEERS_ERROR }
       }
     }
 
@@ -4397,8 +4872,7 @@ ipcMain.handle('torrent:stream', async (_event, input, options) => {
       if (addedHere) torrent.destroy()
       return {
         ok: false,
-        error:
-          'Could not start this release — try another episode or quality.',
+        error: NO_PEERS_ERROR,
       }
     }
     if (!gotOpening) {

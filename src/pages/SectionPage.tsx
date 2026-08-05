@@ -30,12 +30,17 @@ import {
   loadTorrentSources,
   lookupEztvShowCard,
 } from '../lib/torrents'
+import {
+  isKidsLiveItem,
+  isKidsMovieItem,
+  isKidsShowItem,
+} from '../lib/kidsCatalog'
 import { getMainStage, getSectionView, setSectionView } from '../lib/viewState'
 import type { CategoryId, StreamItem } from '../types'
 
 const PAGE = 120
-const MIXED_SECTIONS = new Set<CategoryId>(['movies', 'series', 'anime'])
-type ShelfTabId = 'primary' | 'full-shows'
+const MIXED_SECTIONS = new Set<CategoryId>(['movies', 'series', 'anime', 'kids'])
+type ShelfTabId = 'primary' | 'full-shows' | 'live'
 
 function shelfTabStorageKey(category: CategoryId): string {
   return `jiyu.${category}.shelf-tab`
@@ -44,7 +49,7 @@ function shelfTabStorageKey(category: CategoryId): string {
 function readShelfTab(category: CategoryId, fallback: ShelfTabId): ShelfTabId {
   try {
     const raw = localStorage.getItem(shelfTabStorageKey(category))
-    if (raw === 'primary' || raw === 'full-shows') return raw
+    if (raw === 'primary' || raw === 'full-shows' || raw === 'live') return raw
     // Migrate older anime key values.
     if (category === 'anime' && (raw === 'new-releases' || raw === 'full-shows')) {
       return raw === 'new-releases' ? 'primary' : 'full-shows'
@@ -150,7 +155,8 @@ function prepareShelfList(
   },
 ) {
   let next = list
-  if (options.showSourceTools && options.hideIptv) {
+  // Kids Live is IPTV — never strip it when Hide IPTV is on for other shelves.
+  if (options.showSourceTools && options.hideIptv && options.categoryId !== 'kids') {
     next = next.filter((item) => !isIptvShelfItem(item))
   }
   const collapse = options.collapseEpisodes !== false
@@ -268,12 +274,16 @@ export function SectionPage() {
       return {
         primaryLabel: 'New Releases',
         fullLabel: 'Full Shows',
+        liveLabel: undefined as string | undefined,
         primaryBlurb: '',
         fullBlurb: '',
+        liveBlurb: undefined as string | undefined,
         primaryEmpty: 'No new releases yet — sync the anime website in Library.',
         fullEmpty: 'No full shows yet — sync the anime website in Library.',
+        liveEmpty: undefined as string | undefined,
         primary,
         fullShows,
+        live: undefined as StreamItem[] | undefined,
         other,
       }
     }
@@ -298,12 +308,16 @@ export function SectionPage() {
       return {
         primaryLabel: 'Full Shows',
         fullLabel: 'Now Airing',
+        liveLabel: undefined as string | undefined,
         primaryBlurb: '',
         fullBlurb: '',
+        liveBlurb: undefined as string | undefined,
         primaryEmpty: 'No full shows yet — sync the TV website in Library.',
         fullEmpty: 'No airing titles yet — sync the TV website in Library.',
+        liveEmpty: undefined as string | undefined,
         primary,
         fullShows,
+        live: undefined as StreamItem[] | undefined,
         other,
       }
     }
@@ -326,12 +340,56 @@ export function SectionPage() {
       return {
         primaryLabel: 'Popular Movies',
         fullLabel: 'New Movies',
+        liveLabel: undefined as string | undefined,
         primaryBlurb: '',
         fullBlurb: '',
+        liveBlurb: undefined as string | undefined,
         primaryEmpty: 'No popular movies yet — sync the movies website in Library.',
         fullEmpty: 'No new movies yet — sync the movies website in Library.',
+        liveEmpty: undefined as string | undefined,
         primary,
         fullShows,
+        live: undefined as StreamItem[] | undefined,
+        other,
+      }
+    }
+
+    if (categoryId === 'kids') {
+      const primary = prepareShelfList(
+        items.filter((item) => isKidsMovieItem(item) && match(item)),
+        { ...shelfOpts, newestFirst: true },
+      )
+      const fullShows = prepareShelfList(
+        items.filter((item) => isKidsShowItem(item) && match(item)),
+        shelfOpts,
+      )
+      const live = prepareShelfList(
+        items.filter((item) => isKidsLiveItem(item) && match(item)),
+        shelfOpts,
+      )
+      const other = prepareShelfList(
+        items.filter(
+          (item) =>
+            !isKidsMovieItem(item) &&
+            !isKidsShowItem(item) &&
+            !isKidsLiveItem(item) &&
+            match(item),
+        ),
+        shelfOpts,
+      )
+      return {
+        primaryLabel: 'Movies',
+        fullLabel: 'Shows',
+        liveLabel: 'Live',
+        primaryBlurb: '',
+        fullBlurb: '',
+        liveBlurb: '',
+        primaryEmpty: 'No Kids movies yet — sync YTS in Library (Family / Animation).',
+        fullEmpty: 'No Kids shows yet — sync EZTV in Library for the curated list.',
+        liveEmpty: 'No Kids live channels yet — IPTV-Org Kids imports on first launch.',
+        primary,
+        fullShows,
+        live,
         other,
       }
     }
@@ -393,6 +451,29 @@ export function SectionPage() {
         ),
       ]
     }
+    if (categoryId === 'kids') {
+      return [
+        ...prepareShelfList(
+          items.filter((item) => isKidsMovieItem(item)),
+          { ...shelfOpts, newestFirst: true },
+        ),
+        ...prepareShelfList(
+          items.filter((item) => isKidsShowItem(item)),
+          shelfOpts,
+        ),
+        ...prepareShelfList(
+          items.filter((item) => isKidsLiveItem(item)),
+          shelfOpts,
+        ),
+        ...prepareShelfList(
+          items.filter(
+            (item) =>
+              !isKidsMovieItem(item) && !isKidsShowItem(item) && !isKidsLiveItem(item),
+          ),
+          shelfOpts,
+        ),
+      ]
+    }
     return prepareShelfList(items, shelfOpts)
   }, [items, categoryId, shelfOpts])
 
@@ -450,6 +531,7 @@ export function SectionPage() {
     splitShelves &&
       (splitShelves.primary.length > 0 ||
         splitShelves.fullShows.length > 0 ||
+        (splitShelves.live?.length ?? 0) > 0 ||
         splitShelves.other.length > 0),
   )
 
@@ -458,7 +540,11 @@ export function SectionPage() {
   useEffect(() => {
     if (!splitShelves || userPickedShelfTabRef.current) return
     if (shelfTab === 'primary' && splitShelves.primary.length === 0) {
-      if (splitShelves.fullShows.length > 0 || splitShelves.other.length > 0) {
+      if (splitShelves.fullShows.length > 0) {
+        setShelfTab('full-shows')
+      } else if ((splitShelves.live?.length ?? 0) > 0) {
+        setShelfTab('live')
+      } else if (splitShelves.other.length > 0) {
         setShelfTab('full-shows')
       }
     }
@@ -478,8 +564,10 @@ export function SectionPage() {
   const activeShelfList = useMemo(() => {
     if (!splitShelves) return null
     if (shelfTab === 'primary') return splitShelves.primary
+    if (shelfTab === 'live') return splitShelves.live ?? []
+    if (categoryId === 'kids') return splitShelves.fullShows
     return [...splitShelves.fullShows, ...splitShelves.other]
-  }, [splitShelves, shelfTab])
+  }, [splitShelves, shelfTab, categoryId])
 
   const pagedList = activeShelfList ?? filtered
   const effectiveVisible = Math.min(
@@ -607,7 +695,7 @@ export function SectionPage() {
             setVisible(PAGE)
           }}
         />
-        {!showSourceTools && (
+        {(!showSourceTools || (meta.id === 'kids' && shelfTab === 'live')) && (
           <label className="check-toggle tool-toggle">
             <input
               type="checkbox"
@@ -619,14 +707,16 @@ export function SectionPage() {
         )}
         {showSourceTools && (
           <>
-            <label className="check-toggle tool-toggle">
-              <input
-                type="checkbox"
-                checked={sourcePrefs.hideIptv}
-                onChange={(e) => updateSourcePrefs({ hideIptv: e.target.checked })}
-              />
-              Hide IPTV
-            </label>
+            {meta.id !== 'kids' && (
+              <label className="check-toggle tool-toggle">
+                <input
+                  type="checkbox"
+                  checked={sourcePrefs.hideIptv}
+                  onChange={(e) => updateSourcePrefs({ hideIptv: e.target.checked })}
+                />
+                Hide IPTV
+              </label>
+            )}
             <label className="check-toggle tool-toggle">
               <input
                 type="checkbox"
@@ -675,24 +765,45 @@ export function SectionPage() {
               >
                 {splitShelves.fullLabel}
               </button>
+              {splitShelves.liveLabel ? (
+                <button
+                  type="button"
+                  role="tab"
+                  className={`anime-shelf-tab${shelfTab === 'live' ? ' is-active' : ''}`}
+                  aria-selected={shelfTab === 'live'}
+                  onClick={() => selectShelfTab('live')}
+                >
+                  {splitShelves.liveLabel}
+                </button>
+              ) : null}
             </div>
             {((shelfTab === 'primary'
               ? splitShelves.primaryBlurb
-              : splitShelves.fullBlurb) || ''
+              : shelfTab === 'live'
+                ? splitShelves.liveBlurb
+                : splitShelves.fullBlurb) || ''
             ).trim() ? (
               <p>
-                {shelfTab === 'primary' ? splitShelves.primaryBlurb : splitShelves.fullBlurb}
+                {shelfTab === 'primary'
+                  ? splitShelves.primaryBlurb
+                  : shelfTab === 'live'
+                    ? splitShelves.liveBlurb
+                    : splitShelves.fullBlurb}
                 <span className="count-chip">{pagedList.length.toLocaleString()}</span>
               </p>
             ) : null}
           </div>
           <CatalogGrid
             items={shown}
-            autoCheck={false}
-            showHealthFilters={false}
+            autoCheck={categoryId === 'kids' && shelfTab === 'live' ? autoCheck : false}
+            showHealthFilters={categoryId === 'kids' && shelfTab === 'live'}
             autoHideUnresponsive={false}
             emptyHint={
-              shelfTab === 'primary' ? splitShelves.primaryEmpty : splitShelves.fullEmpty
+              shelfTab === 'primary'
+                ? splitShelves.primaryEmpty
+                : shelfTab === 'live'
+                  ? (splitShelves.liveEmpty ?? splitShelves.fullEmpty)
+                  : splitShelves.fullEmpty
             }
           />
         </section>

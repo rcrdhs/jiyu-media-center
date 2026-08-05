@@ -3,6 +3,7 @@ import Hls from 'hls.js'
 import mpegts from 'mpegts.js'
 import { useEpg } from '../context/EpgContext'
 import { usePlayback } from '../context/PlaybackContext'
+import { PlaybackLoadingScreen } from './PlaybackLoadingScreen'
 import { isHlsUrl, isMpegTsUrl } from '../lib/iptv'
 import {
   formatClock,
@@ -27,9 +28,18 @@ import {
 } from '../lib/animeSkip'
 import { activeSubtitleText, parseSubtitleCues, type SubtitleCue } from '../lib/subtitles'
 import { getPerformanceKnobs } from '../lib/deviceProfile'
-import { fetchYtsRuntimeSeconds } from '../lib/torrents'
+import { hasRealDebridToken } from '../lib/debridSettings'
+import {
+  cleanShowDisplayTitle,
+  fetchYtsRuntimeSeconds,
+  isDebridHttpPlayUrl,
+  parseEpisodeKey,
+  torrentUrisForEpisodeWithTorrentio,
+  type EpisodeChoice,
+} from '../lib/torrents'
+import { TORRENTIO_TV_TRIAL } from '../lib/torrentio'
 import { getViewingQuality, viewingQualityLabel } from '../lib/viewingQuality'
-import type { StreamItem, StreamPlaylistItem } from '../types'
+import type { StreamItem, StreamPlaylistItem, TorrentStreamResult } from '../types'
 
 /** Remux pipe (`/stream.mp4`) is not byte-seekable — resume via ffmpeg `-ss` query. */
 function withResumeOffset(
@@ -100,6 +110,30 @@ function isEphemeralLocalStreamUrl(url: string | undefined): boolean {
   }
 }
 
+function playerErrorHint(error: string, url: string | undefined): string {
+  if (/no peers|no reachable seeds|swarm may be dead|unavailable/i.test(error)) {
+    return 'This swarm looks dead or empty. Open Episodes and pick another release, or try a different quality.'
+  }
+  if (/taking too long|still starting|still buffering|not enough torrent|buffer ran dry/i.test(error)) {
+    return 'Peers may be slow or the remux needs more data. Tap Retry, wait a moment, or try another episode or quality.'
+  }
+  if (isEphemeralLocalStreamUrl(url)) {
+    return 'Torrent playback stalled. Tap Retry, wait for more peers, or try another episode or quality.'
+  }
+  return 'Status may show online while the stream still fails (DRM, expired token, or CDN block). Try another channel, use Web browser for YouTube / 1SpotMedia, or Refresh the playlist source.'
+}
+
+/** SxxExx (or similar) for a playlist row — not the 1-based list slot. */
+function playlistEpisodeKey(entry: StreamPlaylistItem | undefined): string | null {
+  if (!entry) return null
+  return (
+    entry.episodeKey ||
+    parseEpisodeKey(entry.title || '') ||
+    parseEpisodeKey(entry.fileName || '') ||
+    null
+  )
+}
+
 interface PlayerProps {
   item: StreamItem
   onClose: () => void
@@ -115,6 +149,30 @@ type Engine = 'hls' | 'ts' | 'native'
 const VOLUME_KEY = 'jiyu.player.volume'
 const MUTE_KEY = 'jiyu.player.muted'
 const CHROME_IDLE_MS = 2800
+/** Failed torrent loads on one episode before auto-skipping to the next. */
+const EPISODE_FAILS_BEFORE_SKIP = 3
+/** Don't sit forever on magnet #1 when an alternate exists. */
+const TORRENT_CANDIDATE_TIMEOUT_MS = 28_000
+const DEAD_SWARM_RE =
+  /no peers|no reachable seeds|swarm may be dead|unavailable|taking too long|timed? ?out|took too long/i
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      reject(new Error(label))
+    }, ms)
+    promise.then(
+      (value) => {
+        window.clearTimeout(timer)
+        resolve(value)
+      },
+      (err) => {
+        window.clearTimeout(timer)
+        reject(err)
+      },
+    )
+  })
+}
 function pickEngines(url: string): Engine[] {
   const engines: Engine[] = []
   const hls = isHlsUrl(url)
@@ -122,6 +180,10 @@ function pickEngines(url: string): Engine[] {
 
   // Local torrent streams (webtorrent HTTP server) are plain progressive video
   if (/^https?:\/\/127\.0\.0\.1:\d+\//.test(url) && !hls && !ts) {
+    return ['native']
+  }
+  // Real-Debrid / Torrentio resolve links are progressive HTTP — skip HLS/TS probes.
+  if (isDebridHttpPlayUrl(url) && !hls && !ts) {
     return ['native']
   }
 
@@ -176,6 +238,8 @@ export function Player({
   const [error, setError] = useState<string | null>(null)
   const [status, setStatus] = useState('Connecting…')
   const [engineLabel, setEngineLabel] = useState('')
+  /** Hide black stage until the first frame / playing event. */
+  const [mediaReady, setMediaReady] = useState(false)
   const [retryTick, setRetryTick] = useState(0)
   const [paused, setPaused] = useState(false)
   const [muted, setMuted] = useState(loadSavedMuted)
@@ -188,10 +252,15 @@ export function Player({
   /** Local copy so we can fill in torrent URLs as episodes are resolved. */
   const [localPlaylist, setLocalPlaylist] = useState<StreamPlaylistItem[] | null>(null)
   const [episodeLoading, setEpisodeLoading] = useState(false)
+  /** UI episode while Next/Prev resolves — playlistIndex only advances after a stream URL exists. */
+  const [loadingPlaylistIndex, setLoadingPlaylistIndex] = useState<number | null>(null)
   const [subsEnabled, setSubsEnabled] = useState(true)
   const [subtitleCues, setSubtitleCues] = useState<SubtitleCue[]>([])
   const [subtitleLine, setSubtitleLine] = useState('')
   const [subsStatus, setSubsStatus] = useState<'idle' | 'loading' | 'ready' | 'missing'>('idle')
+  /** Positive = delay subs (later); negative = show earlier. Fixes out-of-sync softsubs. */
+  const [subtitleDelaySec, setSubtitleDelaySec] = useState(0)
+  const subtitleDelayRef = useRef(0)
   const hintTimer = useRef<number | null>(null)
   const chromeTimer = useRef<number | null>(null)
   const resumeKeyRef = useRef<string | null>(null)
@@ -210,7 +279,14 @@ export function Player({
   const skipDismissedRef = useRef<string | null>(null)
   /** True while we paused to rebuild the remux lead buffer (not a user pause). */
   const leadBufferPauseRef = useRef(false)
-  const selectPlaylistItemRef = useRef<(index: number) => Promise<void>>(async () => {})
+  /** After the user hits Play, don't auto-pause again for a few seconds. */
+  const leadBufferGraceUntilRef = useRef(0)
+  const selectPlaylistItemRef = useRef<
+    (index: number, options?: { force?: boolean; rotateTorrent?: boolean }) => Promise<void>
+  >(async () => {})
+  const episodeFailRef = useRef({ index: -1, fails: 0 })
+  const episodeFailTimerRef = useRef(0)
+  const episodeFailGenRef = useRef(0)
   const skipAnimeIntervalRef = useRef<
     (interval: AnimeSkipInterval, options?: { auto?: boolean }) => void
   >(() => {})
@@ -242,6 +318,29 @@ export function Player({
     subtitleUrl: item.subtitleUrl,
     subtitleKind: item.subtitleKind,
   }
+  const uiPlaylistIndex =
+    loadingPlaylistIndex != null && loadingPlaylistIndex >= 0 && loadingPlaylistIndex < playlist.length
+      ? loadingPlaylistIndex
+      : playlistIndex
+  const uiPlaylistItem = playlist[uiPlaylistIndex] ?? activePlaylistItem
+  const uiEpisodeKey = playlistEpisodeKey(uiPlaylistItem)
+  /** Chrome / loading label — never a raw scene release filename. */
+  const displayTitle = (() => {
+    const seeded = item.title?.trim() || ''
+    const show = (
+      cleanShowDisplayTitle(seeded) ||
+      cleanShowDisplayTitle(uiPlaylistItem.title || '') ||
+      seeded
+    )
+      .replace(/\s*·\s*S\d{1,2}E\d{1,3}\s*$/i, '')
+      .replace(/\s*·\s*$/g, '')
+      .trim()
+    if (show && uiEpisodeKey) return `${show} · ${uiEpisodeKey}`
+    return show || seeded || 'Loading…'
+  })()
+  const episodesChipLabel = uiEpisodeKey
+    ? `Episodes · ${uiEpisodeKey} · ${uiPlaylistIndex + 1}/${playlist.length}`
+    : `Episodes · ${uiPlaylistIndex + 1}/${playlist.length}`
   const hasPlaylist = playlist.length > 1
   // Prefer the active episode's subs only — never fall back to episode 1's URL.
   const subtitleUrl = hasPlaylist
@@ -254,6 +353,8 @@ export function Player({
   const showSubsLoading = subsStatus === 'loading' && Boolean(subtitleUrl)
   const showSubsControls = Boolean(subtitleUrl) && subsStatus !== 'missing'
 
+  // Only re-bootstrap the episode list when a new play session starts.
+  // Do not depend on runtimeSeconds — that used to snap Next back to episode 1.
   useEffect(() => {
     const list =
       item.playlist && item.playlist.length > 0
@@ -265,9 +366,12 @@ export function Player({
     const maxIndex = Math.max(0, (list?.length ?? 1) - 1)
     let nextIndex = 0
     if (list && list.length > 0) {
-      // Resume must win over URL matching — remux URLs are ephemeral and can
-      // point at whichever episode was started first in WatchPage.
-      if (saved && saved.currentTime >= 5) {
+      // Prefer the playlist row that already has the active stream URL (the
+      // episode that was just started). Resume only when that row is unclear.
+      const byUrl = list.findIndex((entry) => entry.url && entry.url === item.url)
+      if (byUrl >= 0) {
+        nextIndex = byUrl
+      } else if (saved && saved.currentTime >= 5) {
         if (saved.episodeTitle) {
           const byTitle = list.findIndex((entry) => entry.title === saved.episodeTitle)
           if (byTitle >= 0) nextIndex = byTitle
@@ -275,9 +379,6 @@ export function Player({
         } else {
           nextIndex = Math.min(Math.max(0, saved.playlistIndex), maxIndex)
         }
-      } else {
-        const byUrl = list.findIndex((entry) => entry.url && entry.url === item.url)
-        if (byUrl >= 0) nextIndex = byUrl
       }
     }
     setPlaylistIndex(nextIndex)
@@ -286,6 +387,13 @@ export function Player({
     playlistOpenRef.current = false
     setSubsEnabled(true)
     setEpisodeLoading(false)
+    setLoadingPlaylistIndex(null)
+    episodeFailRef.current = { index: -1, fails: 0 }
+    episodeFailGenRef.current += 1
+    if (episodeFailTimerRef.current) {
+      window.clearTimeout(episodeFailTimerRef.current)
+      episodeFailTimerRef.current = 0
+    }
     resumeKeyRef.current = null
     timelineOffsetRef.current = 0
     setTimelineOffset(0)
@@ -307,7 +415,7 @@ export function Player({
     setSkipIntervals([])
     setSkipTarget(null)
     skipDismissedRef.current = null
-  }, [item.id, item.playlist?.length, item.url, item.runtimeSeconds])
+  }, [item.id, item.url])
 
   // When ffprobe/YTS runtime arrives (or is fetched), fold a bloated Resume (e.g. 2:49 → ~1:05).
   useEffect(() => {
@@ -585,6 +693,24 @@ export function Player({
           (knownDuration > 0 &&
             isEpisodeComplete(currentTime, knownDuration, { playbackUrl }))
     if (reallyDone) {
+      void import('../lib/watchHistory').then(({ recordWatchHistory }) => {
+        recordWatchHistory({
+          id: item.id,
+          title: item.title,
+          poster: item.poster,
+          category: item.category,
+          playlistIndex,
+          episodeTitle: hasPlaylist ? activePlaylistItem.title : undefined,
+          currentTime,
+          duration: trusted || knownDuration,
+          runtimeSeconds: trusted || item.runtimeSeconds || saved?.runtimeSeconds,
+          finished: true,
+          torrentUri: item.torrentUri,
+          detailUrl: item.detailUrl,
+          playUrl: item.detailUrl || item.torrentUri,
+          source: item.source,
+        })
+      })
       removeContinueEntry(item.id)
       return
     }
@@ -794,19 +920,29 @@ export function Player({
             }
             const extractDone = response.headers.get('X-Jiyu-Subs-Done') === '1'
             const playhead = videoRef.current ? absolutePlayhead(videoRef.current) : 0
+            const mediaDuration = Number(videoRef.current?.duration) || 0
+            // Cues ending well before the title runtime means extract stalled mid-file.
+            const cuesLookShort =
+              mediaDuration > 120 && lastCueEnd > 0 && lastCueEnd < mediaDuration * 0.85
 
             // Only stop polling once extract is finished AND we're not about to run past
             // the last cue (progressive jobs sometimes flip "done" too early).
-            if (extractDone && latestCount > 0 && playhead < lastCueEnd - 90) {
+            if (extractDone && latestCount > 0 && playhead < lastCueEnd - 90 && !cuesLookShort) {
               await new Promise((resolve) => window.setTimeout(resolve, 5000))
               continue
             }
-            if (extractDone && latestCount > 0 && lastCueEnd > 0 && playhead >= lastCueEnd - 5) {
+            if (
+              extractDone &&
+              latestCount > 0 &&
+              lastCueEnd > 0 &&
+              playhead >= lastCueEnd - 5 &&
+              !cuesLookShort
+            ) {
               break
             }
 
             // If playback is catching up to the last known cue, poll faster.
-            if (!extractDone && lastCueEnd > 0 && playhead > lastCueEnd - 45) {
+            if (lastCueEnd > 0 && playhead > lastCueEnd - 45) {
               await new Promise((resolve) => window.setTimeout(resolve, 800))
               continue
             }
@@ -839,6 +975,12 @@ export function Player({
   }, [subtitleUrl, playlistIndex])
 
   useEffect(() => {
+    // Each episode/release can have its own sync; don't carry delay across titles.
+    subtitleDelayRef.current = 0
+    setSubtitleDelaySec(0)
+  }, [subtitleUrl, playlistIndex])
+
+  useEffect(() => {
     const video = videoRef.current
     if (!video) return
 
@@ -848,7 +990,13 @@ export function Player({
         return
       }
       // Remux resume uses ffmpeg -ss, so video.currentTime is relative — add offset.
-      setSubtitleLine(activeSubtitleText(subtitleCues, absolutePlayhead(video)))
+      // Subtract delay so positive delay pushes cues later (VLC-style).
+      setSubtitleLine(
+        activeSubtitleText(
+          subtitleCues,
+          absolutePlayhead(video) - subtitleDelayRef.current,
+        ),
+      )
     }
 
     syncCue()
@@ -858,47 +1006,242 @@ export function Player({
       video.removeEventListener('timeupdate', syncCue)
       video.removeEventListener('seeked', syncCue)
     }
-  }, [subtitleCues, subsEnabled, activePlaylistItem.url, playlistIndex, timelineOffset])
+  }, [
+    subtitleCues,
+    subsEnabled,
+    activePlaylistItem.url,
+    playlistIndex,
+    timelineOffset,
+    subtitleDelaySec,
+  ])
 
   function toggleSubtitles() {
     setSubsEnabled((on) => !on)
     bumpChrome()
   }
 
-  async function selectPlaylistItem(index: number) {
-    if (index < 0 || index >= playlist.length || index === playlistIndex || episodeLoading) return
+  function nudgeSubtitleDelay(delta: number) {
+    const next = Math.round((subtitleDelayRef.current + delta) * 10) / 10
+    const clamped = Math.max(-15, Math.min(15, next))
+    subtitleDelayRef.current = clamped
+    setSubtitleDelaySec(clamped)
+    bumpChrome()
+  }
+
+  async function selectPlaylistItem(
+    index: number,
+    options?: { force?: boolean; rotateTorrent?: boolean },
+  ) {
+    if (index < 0 || index >= playlist.length || episodeLoading) return
+    if (index === playlistIndex && !options?.force) return
     const entry = playlist[index]
+    const episodeKey = playlistEpisodeKey(entry) || ''
+    let baseCandidates = [entry.torrentUri, ...(entry.torrentAlternates || [])].filter(
+      (uri, i, arr): uri is string => Boolean(uri) && arr.indexOf(uri) === i,
+    )
+    // Mid-playback stall: skip the dead release and try the next alternate first.
+    if (options?.rotateTorrent && baseCandidates.length > 1) {
+      baseCandidates = [...baseCandidates.slice(1), baseCandidates[0]!]
+    }
+    const useTorrentio =
+      TORRENTIO_TV_TRIAL &&
+      (item.category === 'series' || item.category === 'kids') &&
+      /^S\d{1,2}E\d{1,3}$/i.test(episodeKey)
     // Always re-resolve torrent episodes. Sibling entries often still hold a
     // 127.0.0.1 remux URL from earlier, but torrentStop() kills that swarm —
     // reusing it shows "Native playback failed".
     const needsTorrent =
-      Boolean(entry.torrentUri) &&
-      (!entry.url ||
+      (baseCandidates.length > 0 || useTorrentio) &&
+      (options?.force ||
+        !entry.url ||
         !/^https?:\/\//i.test(entry.url) ||
         isEphemeralLocalStreamUrl(entry.url))
 
+    // Show the target episode in chrome immediately.
+    setLoadingPlaylistIndex(index)
+    if (episodeFailTimerRef.current) {
+      window.clearTimeout(episodeFailTimerRef.current)
+      episodeFailTimerRef.current = 0
+    }
+    const failGen = ++episodeFailGenRef.current
+
+    const clearVideoSource = () => {
+      const video = videoRef.current
+      if (!video) return
+      try {
+        video.pause()
+        video.removeAttribute('src')
+        video.load()
+      } catch {
+        /* ignore */
+      }
+    }
+
+    const failOnEpisode = (message: string) => {
+      setEpisodeLoading(false)
+      setMediaReady(false)
+      setLoadingPlaylistIndex(null)
+      // Stay on the episode the user chose (don't snap back to episode 1).
+      setPlaylistIndex(index)
+      clearVideoSource()
+
+      const dead = DEAD_SWARM_RE.test(message)
+      if (!dead) {
+        episodeFailRef.current = { index: -1, fails: 0 }
+        setError(message)
+        setStatus(message)
+        return
+      }
+
+      const fails =
+        episodeFailRef.current.index === index ? episodeFailRef.current.fails + 1 : 1
+      episodeFailRef.current = { index, fails }
+
+      if (fails < EPISODE_FAILS_BEFORE_SKIP) {
+        setError(null)
+        setStatus(`No peers — retrying (${fails}/${EPISODE_FAILS_BEFORE_SKIP})…`)
+        episodeFailTimerRef.current = window.setTimeout(() => {
+          if (episodeFailGenRef.current !== failGen) return
+          void selectPlaylistItemRef.current(index, { force: true })
+        }, 700)
+        return
+      }
+
+      const next = index + 1
+      if (next < playlist.length) {
+        episodeFailRef.current = { index: -1, fails: 0 }
+        const nextKey =
+          playlistEpisodeKey(playlist[next]) || `episode ${next + 1}`
+        setError(null)
+        setStatus(`No peers — skipping to ${nextKey}…`)
+        flash(`Skipping dead episode → ${nextKey}`)
+        episodeFailTimerRef.current = window.setTimeout(() => {
+          if (episodeFailGenRef.current !== failGen) return
+          void selectPlaylistItemRef.current(next)
+        }, 650)
+        return
+      }
+
+      setError(message)
+      setStatus(message)
+    }
+
     if (needsTorrent) {
       if (!window.signalDesktop?.torrentStream) {
-        setError('Playback needs the Jiyu desktop app.')
+        failOnEpisode('Playback needs the Jiyu desktop app.')
         return
       }
       setEpisodeLoading(true)
-      setStatus('Loading episode…')
+      setMediaReady(false)
+      setStatus(
+        useTorrentio && hasRealDebridToken()
+          ? 'Checking debrid streams…'
+          : useTorrentio
+            ? 'Checking more sources…'
+            : 'Loading episode…',
+      )
       setError(null)
       try {
-        // Stop only this tile's prior swarm. A bare torrentStop() kills every
-        // multi-view torrent (and used to surface a WebRTC abort dialog).
-        const prevHash = /urn:btih:([a-z0-9]{32,40})/i.exec(item.torrentUri || '')?.[1]
-        if (prevHash) await window.signalDesktop.torrentStop?.(prevHash)
-        else if (!inMultiview) await window.signalDesktop.torrentStop?.()
-        const result = await window.signalDesktop.torrentStream(entry.torrentUri!, {
-          keepOthers: inMultiview,
-        })
-        if (!result.ok || !result.url) {
-          setError(result.error || 'Could not start episode')
-          setEpisodeLoading(false)
+        let candidates = baseCandidates
+        if (useTorrentio) {
+          const showName =
+            cleanShowDisplayTitle(item.title) ||
+            cleanShowDisplayTitle(entry.title) ||
+            item.title
+          const epChoice: EpisodeChoice = {
+            key: episodeKey,
+            title: entry.title,
+            torrentUri: entry.torrentUri || baseCandidates[0] || '',
+            quality: 0,
+            alternates: entry.torrentAlternates,
+          }
+          candidates = await torrentUrisForEpisodeWithTorrentio(epChoice, showName, {
+            enabled: true,
+          })
+          if (episodeFailGenRef.current !== failGen) return
+        }
+        if (candidates.length === 0) {
+          failOnEpisode('No torrent link for this episode')
           return
         }
+
+        // Episode switches: drop other swarms so a stuck prior release can't starve
+        // this one. Multi-view keeps siblings alive via keepOthers.
+        let result: TorrentStreamResult | null = null
+        let usedUri = candidates[0]
+        let lastError = 'Could not start episode'
+        for (let i = 0; i < candidates.length; i++) {
+          const uri = candidates[i]
+          usedUri = uri
+          if (isDebridHttpPlayUrl(uri)) {
+            setStatus(
+              candidates.length > 1
+                ? `Starting debrid stream (${i + 1}/${candidates.length})…`
+                : 'Starting debrid stream…',
+            )
+            result = { ok: true, url: uri }
+            break
+          }
+          if (candidates.length > 1) {
+            setStatus(`Loading episode… (${i + 1}/${candidates.length})`)
+          } else {
+            setStatus('Loading episode…')
+          }
+          let attempt: TorrentStreamResult
+          try {
+            attempt = await withTimeout(
+              window.signalDesktop.torrentStream(uri, {
+                keepOthers: inMultiview,
+              }),
+              TORRENT_CANDIDATE_TIMEOUT_MS,
+              'Release took too long to start — trying another source.',
+            )
+          } catch (err) {
+            lastError = err instanceof Error ? err.message : 'Could not start episode'
+            if (i < candidates.length - 1) {
+              setStatus(`Slow release — trying another (${i + 2}/${candidates.length})…`)
+              try {
+                const hash = /urn:btih:([a-z0-9]{32,40})/i.exec(uri)?.[1]
+                if (hash) await window.signalDesktop.torrentStop?.(hash)
+              } catch {
+                /* ignore */
+              }
+              continue
+            }
+            break
+          }
+          if (attempt.ok && attempt.url) {
+            result = attempt
+            break
+          }
+          lastError = attempt.error || lastError
+          if (i < candidates.length - 1 && DEAD_SWARM_RE.test(lastError)) {
+            setStatus(`No peers — trying another release (${i + 2}/${candidates.length})…`)
+            continue
+          }
+          if (i < candidates.length - 1) {
+            setStatus(`Trying another release (${i + 2}/${candidates.length})…`)
+            continue
+          }
+        }
+        if (!result?.ok || !result.url) {
+          failOnEpisode(lastError)
+          return
+        }
+        if (episodeFailGenRef.current !== failGen) return
+        setStatus('Starting playback…')
+
+        const prevUri = activePlaylistItem.torrentUri || item.torrentUri || ''
+        const prevHash = /urn:btih:([a-z0-9]{32,40})/i.exec(prevUri)?.[1]?.toLowerCase()
+        const nextHash = /urn:btih:([a-z0-9]{32,40})/i.exec(usedUri)?.[1]?.toLowerCase()
+        if (prevHash && prevHash !== nextHash) {
+          await window.signalDesktop.torrentStop?.(prevHash)
+        } else if (!prevHash && !inMultiview && prevUri && !isDebridHttpPlayUrl(usedUri)) {
+          await window.signalDesktop.torrentStop?.()
+        } else if (!inMultiview && isDebridHttpPlayUrl(usedUri) && prevHash) {
+          await window.signalDesktop.torrentStop?.(prevHash)
+        }
+
         setLocalPlaylist((prev) => {
           const base = prev ?? item.playlist ?? []
           return base.map((row, i) => {
@@ -906,6 +1249,11 @@ export function Player({
               return {
                 ...row,
                 url: result.url!,
+                torrentUri: usedUri,
+                torrentAlternates: candidates
+                  .filter((cand) => cand !== usedUri)
+                  .slice(0, 8),
+                episodeKey: row.episodeKey || episodeKey || undefined,
                 subtitleUrl: result.subtitleUrl ?? result.playlist?.[0]?.subtitleUrl,
                 subtitleKind: result.subtitleKind ?? result.playlist?.[0]?.subtitleKind,
                 fileName: result.fileName,
@@ -919,11 +1267,18 @@ export function Player({
           })
         })
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Could not start episode')
-        setEpisodeLoading(false)
+        failOnEpisode(err instanceof Error ? err.message : 'Could not start episode')
         return
       }
       setEpisodeLoading(false)
+    }
+
+    // Success — clear dead-swarm retry state.
+    episodeFailRef.current = { index: -1, fails: 0 }
+    episodeFailGenRef.current += 1
+    if (episodeFailTimerRef.current) {
+      window.clearTimeout(episodeFailTimerRef.current)
+      episodeFailTimerRef.current = 0
     }
 
     // Always start a freshly selected episode at 0 — don't remux-seek into
@@ -937,6 +1292,7 @@ export function Player({
     skipDismissedRef.current = null
     setSkipTarget(null)
     setPlaylistIndex(index)
+    setLoadingPlaylistIndex(null)
     setPlaylistOpenState(false)
     bumpChrome()
   }
@@ -947,19 +1303,22 @@ export function Player({
   }
 
   function toggleMultiviewAdd() {
-    if (awaitingAdd) cancelMultiviewAdd()
-    else {
-      armMultiviewAdd()
-      flash('Multi-view: open another channel')
+    if (awaitingAdd) {
+      cancelMultiviewAdd()
+      bumpChrome()
+      return
     }
-    bumpChrome()
+    armMultiviewAdd()
+    flash('Multi-view: pick another channel')
+    // Leave full player so shelves are reachable; PiP keeps the first stream.
+    onClose()
   }
 
   function bumpChrome() {
     setChromeVisible(true)
     if (chromeTimer.current) window.clearTimeout(chromeTimer.current)
-    // Keep chrome up while the episode list is open.
-    if (playlistOpenRef.current || isPip) return
+    // Keep chrome up while the episode list is open, or until the first frame.
+    if (playlistOpenRef.current || isPip || !mediaReady) return
     chromeTimer.current = window.setTimeout(() => setChromeVisible(false), CHROME_IDLE_MS)
   }
 
@@ -1021,14 +1380,19 @@ export function Player({
     const video = videoRef.current
     if (!video) return
     if (video.paused) {
+      // User wants playback — cancel lead-buffer auto-pause so we don't fight them.
+      leadBufferPauseRef.current = false
+      leadBufferGraceUntilRef.current = Date.now() + 8_000
       void video.play().then(
         () => {
           setPaused(false)
+          setStatus('Playing')
           flash('Playing')
         },
         () => flash('Press play'),
       )
     } else {
+      leadBufferPauseRef.current = false
       video.pause()
       setPaused(true)
       flash('Paused')
@@ -1180,13 +1544,18 @@ export function Player({
     setStatus('Connecting…')
     setEngineLabel('')
     setPaused(false)
+    setMediaReady(false)
 
     let waitingSince = 0
+    /** First moment this wait streak began — not reset by tiny buffer blips. */
+    let waitingOrigin = 0
     let stallTimer: number | null = null
     let pausePrefetchTimer = 0
     let playPrefetchTimer = 0
+    let leadBufferResumeTimer = 0
     const clearStallWatch = () => {
       waitingSince = 0
+      waitingOrigin = 0
       if (stallTimer != null) {
         window.clearInterval(stallTimer)
         stallTimer = null
@@ -1203,6 +1572,45 @@ export function Player({
         window.clearInterval(playPrefetchTimer)
         playPrefetchTimer = 0
       }
+    }
+    function clearLeadBufferResume() {
+      if (leadBufferResumeTimer) {
+        window.clearInterval(leadBufferResumeTimer)
+        leadBufferResumeTimer = 0
+      }
+    }
+    function tryResumeAfterLeadBuffer() {
+      if (cancelled || !leadBufferPauseRef.current) {
+        clearLeadBufferResume()
+        return
+      }
+      const el = videoRef.current
+      if (!el) return
+      const lead = bufferedLeadSeconds(el)
+      // Resume as soon as there's a small playable cushion — don't wait for the
+      // full remux lead target (that stranded playback until the user hit Play).
+      if (lead < 1.25 && el.readyState < HTMLMediaElement.HAVE_FUTURE_DATA) {
+        kickTorrentPrefetch()
+        return
+      }
+      leadBufferPauseRef.current = false
+      clearLeadBufferResume()
+      void el.play().then(
+        () => {
+          setPaused(false)
+          setStatus('Playing')
+        },
+        () => {
+          leadBufferPauseRef.current = true
+          setStatus('Buffering…')
+          startLeadBufferResume()
+        },
+      )
+    }
+    function startLeadBufferResume() {
+      if (leadBufferResumeTimer) return
+      kickTorrentPrefetch()
+      leadBufferResumeTimer = window.setInterval(tryResumeAfterLeadBuffer, 400)
     }
     function kickTorrentPrefetch() {
       const hash = item.torrentInfoHash
@@ -1222,14 +1630,31 @@ export function Player({
       )
     }
 
+    const onPlay = () => {
+      if (cancelled) return
+      // Native controls / autoplay resume — give the buffer a moment before
+      // the lead-buffer guard can pause again.
+      if (leadBufferPauseRef.current) {
+        leadBufferPauseRef.current = false
+        leadBufferGraceUntilRef.current = Date.now() + 8_000
+        clearLeadBufferResume()
+      }
+      setPaused(false)
+    }
+
     const onPlaying = () => {
       if (!cancelled) {
         clearStallWatch()
         clearPausePrefetch()
+        clearLeadBufferResume()
         leadBufferPauseRef.current = false
         setError(null)
         setStatus('Playing')
         setPaused(false)
+        // Only dismiss the loading screen once frames are actually painting.
+        // loadeddata alone was leaving a black stage with no title overlay.
+        const el = videoRef.current
+        if (el && el.videoWidth > 0) setMediaReady(true)
         // Keep torrent pieces ahead of the playhead while watching.
         kickTorrentPrefetch()
         clearPlayPrefetch()
@@ -1244,17 +1669,21 @@ export function Player({
       setStatus('Buffering…')
       // Remux can spin forever when peers stall — surface a recoverable error.
       if (!isEphemeralLocalStreamUrl(activePlaylistItem.url)) return
-      if (!waitingSince) waitingSince = Date.now()
+      const now = Date.now()
+      if (!waitingSince) waitingSince = now
+      if (!waitingOrigin) waitingOrigin = now
       if (stallTimer != null) return
-      // 1080p remux often needs >25s before the first fragment is playable
-      // even with an active swarm — only hard-fail when the buffer is also dead.
+      // Soft limit: no meaningful buffer growth. Hard cap: never sit here for 15 minutes
+      // because 0.25s blips kept resetting the soft timer.
       const perf = getPerformanceKnobs()
       const stallLimitMs = isRemuxPlaybackUrl(activePlaylistItem.url)
         ? perf.remuxStallMs
         : perf.localStallMs
+      const hardCapMs = Math.max(stallLimitMs * 2, 120_000)
       let lastBufferedEnd = 0
+      let bufferedAtOrigin = -1
       stallTimer = window.setInterval(() => {
-        if (cancelled || !waitingSince) return
+        if (cancelled || !waitingSince || !waitingOrigin) return
         const videoEl = videoRef.current
         if (!videoEl) return
         if (!videoEl.paused && videoEl.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
@@ -1271,13 +1700,13 @@ export function Player({
         } catch {
           /* ignore */
         }
-        // Swarm/remux still making progress — keep waiting instead of erroring.
-        if (bufferedEnd > lastBufferedEnd + 0.25) {
+        if (bufferedAtOrigin < 0) bufferedAtOrigin = bufferedEnd
+        // Swarm/remux still making progress — keep waiting, but don't erase the hard cap.
+        if (bufferedEnd > lastBufferedEnd + 0.35) {
           lastBufferedEnd = bufferedEnd
           waitingSince = Date.now()
           setError(null)
           setStatus('Buffering…')
-          return
         }
         // Stuck on the last seconds of a false remux duration (e.g. 1:01:25 / 1:01:35).
         const duration = videoEl.duration
@@ -1295,8 +1724,22 @@ export function Player({
             if (continueRemuxPastGap('stall-eof')) return
           }
         }
-        if (Date.now() - waitingSince < stallLimitMs) return
+        const softStalled = Date.now() - waitingSince >= stallLimitMs
+        const hardStalled = Date.now() - waitingOrigin >= hardCapMs
+        const almostNoLead = bufferedEnd - bufferedAtOrigin < 3
+        if (!softStalled && !hardStalled) return
+        if (hardStalled && !almostNoLead && !softStalled) return
         clearStallWatch()
+        const hasAlt = (activePlaylistItem.torrentAlternates?.length || 0) > 0
+        if (hasAlt) {
+          setError(null)
+          setStatus('Peers stalled — trying another release…')
+          void selectPlaylistItemRef.current(playlistIndex, {
+            force: true,
+            rotateTorrent: true,
+          })
+          return
+        }
         setError(
           isRemuxPlaybackUrl(activePlaylistItem.url)
             ? 'Still starting the stream — peers may be slow. Tap Resume if offered, or Retry / another quality.'
@@ -1438,7 +1881,6 @@ export function Player({
       updatePlaybackClock(video)
 
       const leadTarget = getPerformanceKnobs().remuxLeadSeconds
-      const resumeLead = leadTarget + 2
       const lead = bufferedLeadSeconds(video)
       const duration = video.duration
       const playhead = absolutePlayhead(video)
@@ -1453,11 +1895,14 @@ export function Player({
         kickTorrentPrefetch()
       }
 
-      // Thin playable lead with fragment still ahead: pause and wait (no reload).
+      // Thin playable lead: pause briefly and rebuild — but only when critically
+      // empty. A higher threshold caused a play→pause loop that needed manual Play.
+      const inLeadGrace = Date.now() < leadBufferGraceUntilRef.current
       if (
+        !inLeadGrace &&
         !video.paused &&
         !video.ended &&
-        lead < Math.min(3, leadTarget * 0.4) &&
+        lead < 0.75 &&
         remuxLeft > 3 &&
         video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
       ) {
@@ -1465,15 +1910,13 @@ export function Player({
         kickTorrentPrefetch()
         video.pause()
         setStatus('Buffering…')
+        // timeupdate stops while paused — poll to auto-resume.
+        startLeadBufferResume()
         return
       }
 
-      if (leadBufferPauseRef.current && lead >= Math.max(resumeLead * 0.5, 2.5)) {
-        leadBufferPauseRef.current = false
-        void video.play().then(
-          () => setStatus('Playing'),
-          () => setStatus('Press play'),
-        )
+      if (leadBufferPauseRef.current) {
+        tryResumeAfterLeadBuffer()
       }
 
       if (!Number.isFinite(duration) || duration <= 0) return
@@ -1484,6 +1927,7 @@ export function Player({
       }
     }
 
+    video.addEventListener('play', onPlay)
     video.addEventListener('playing', onPlaying)
     video.addEventListener('waiting', onWaiting)
     video.addEventListener('pause', onPause)
@@ -1801,6 +2245,17 @@ export function Player({
         return
       }
       if (!cancelled) {
+        const hasAlt = (activePlaylistItem.torrentAlternates?.length || 0) > 0
+        const slowStart = /took too long|timed? ?out|stalled|not enough torrent/i.test(lastError)
+        if (hasAlt && slowStart) {
+          setError(null)
+          setStatus('Slow start — trying another release…')
+          void selectPlaylistItemRef.current(playlistIndex, {
+            force: true,
+            rotateTorrent: true,
+          })
+          return
+        }
         if (
           isEphemeralLocalStreamUrl(activePlaylistItem.url) &&
           /offline|blocked|unsupported/i.test(lastError)
@@ -1819,8 +2274,10 @@ export function Player({
       clearStallWatch()
       clearPausePrefetch()
       clearPlayPrefetch()
+      clearLeadBufferResume()
       leadBufferPauseRef.current = false
       saveContinueProgress()
+      video.removeEventListener('play', onPlay)
       video.removeEventListener('playing', onPlaying)
       video.removeEventListener('waiting', onWaiting)
       video.removeEventListener('pause', onPause)
@@ -1926,6 +2383,19 @@ export function Player({
             toggleSubtitles()
           }
           break
+        case '[':
+          if (showSubsControls && subsStatus === 'ready') {
+            e.preventDefault()
+            // Earlier — use when subs lag behind dialogue.
+            nudgeSubtitleDelay(-0.5)
+          }
+          break
+        case ']':
+          if (showSubsControls && subsStatus === 'ready') {
+            e.preventDefault()
+            nudgeSubtitleDelay(0.5)
+          }
+          break
         case 'f':
         case 'F':
           e.preventDefault()
@@ -1957,7 +2427,7 @@ export function Player({
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [onClose, muted, volume, isTile, showSubsControls, subsStatus])
+  }, [onClose, muted, volume, isTile, showSubsControls, subsStatus, subtitleDelaySec])
 
   useEffect(() => {
     if (isTile || isPip) return
@@ -2037,9 +2507,9 @@ export function Player({
   return (
     <div
       ref={shellRef}
-      className={`player-shell ${isPip ? 'player-shell-pip' : ''} ${chromeVisible || isPip ? 'chrome-visible' : 'chrome-hidden'}`}
+      className={`player-shell ${isPip ? 'player-shell-pip' : ''} ${chromeVisible || isPip || !mediaReady ? 'chrome-visible' : 'chrome-hidden'}`}
       role="dialog"
-      aria-label={`Playing ${item.title}`}
+      aria-label={`Playing ${displayTitle}`}
       onMouseMove={isPip ? undefined : bumpChrome}
       onMouseEnter={isPip ? undefined : bumpChrome}
     >
@@ -2048,7 +2518,7 @@ export function Player({
           {isPip ? '×' : '← Back'}
         </button>
         <div className="player-meta">
-          <h2>{hasPlaylist ? activePlaylistItem.title : item.title}</h2>
+          <h2>{displayTitle}</h2>
           {!isPip && (
             <p className="player-meta-status">
               <span>
@@ -2057,7 +2527,13 @@ export function Player({
                 {!error ? ` · ${muted ? 'Muted' : `Vol ${Math.round(volume * 100)}%`}` : ''}
                 {!error && showSubsLoading ? ' · Loading subtitles…' : ''}
                 {!error && subsStatus === 'missing' ? ' · No subs' : ''}
-                {!error && subsStatus === 'ready' ? ` · Subs ${subsEnabled ? 'on' : 'off'}` : ''}
+                {!error && subsStatus === 'ready'
+                  ? ` · Subs ${subsEnabled ? 'on' : 'off'}${
+                      subsEnabled && subtitleDelaySec !== 0
+                        ? ` ${subtitleDelaySec > 0 ? '+' : ''}${subtitleDelaySec.toFixed(1)}s`
+                        : ''
+                    }`
+                  : ''}
                 {awaitingAdd ? ' · Multi-view: pick another channel' : ''}
               </span>
             </p>
@@ -2072,7 +2548,7 @@ export function Player({
                 aria-controls="player-episode-strip"
                 title={playlistOpen ? 'Hide episodes' : 'Show episodes'}
               >
-                Episodes · {playlistIndex + 1}/{playlist.length}
+                {episodesChipLabel}
                 <span aria-hidden>{playlistOpen ? ' ▴' : ' ▾'}</span>
               </button>
             </div>
@@ -2163,29 +2639,65 @@ export function Player({
                 />
               </label>
               {showSubsControls && (
-                <button
-                  type="button"
-                  className={`ghost-btn control-btn${subsEnabled && subsStatus === 'ready' ? ' is-armed' : ''}`}
-                  onClick={toggleSubtitles}
-                  disabled={subsStatus === 'missing'}
-                  title={
-                    showSubsLoading
-                      ? 'Detecting and loading the best subtitle track for this file…'
+                <>
+                  <button
+                    type="button"
+                    className={`ghost-btn control-btn${subsEnabled && subsStatus === 'ready' ? ' is-armed' : ''}`}
+                    onClick={toggleSubtitles}
+                    disabled={subsStatus === 'missing'}
+                    title={
+                      showSubsLoading
+                        ? 'Detecting and loading the best subtitle track for this file…'
+                        : subsStatus === 'missing'
+                          ? 'No text subtitles on this release (image/PGS-only or none)'
+                          : subsEnabled
+                            ? 'Hide subtitles (C)'
+                            : 'Show subtitles (C)'
+                    }
+                  >
+                    {showSubsLoading
+                      ? 'Subs…'
                       : subsStatus === 'missing'
-                        ? 'No text subtitles on this release (image/PGS-only or none)'
+                        ? 'No Subs'
                         : subsEnabled
-                          ? 'Hide subtitles'
-                          : 'Show subtitles'
-                  }
-                >
-                  {showSubsLoading
-                    ? 'Subs…'
-                    : subsStatus === 'missing'
-                      ? 'No Subs'
-                      : subsEnabled
-                        ? 'Subs On'
-                        : 'Subs Off'}
-                </button>
+                          ? 'Subs On'
+                          : 'Subs Off'}
+                  </button>
+                  {subsStatus === 'ready' && subsEnabled && (
+                    <span className="sub-sync-control" title="Subtitle sync — [ earlier, ] later">
+                      <button
+                        type="button"
+                        className="ghost-btn control-btn sub-sync-btn"
+                        onClick={() => nudgeSubtitleDelay(-0.5)}
+                        title="Show subtitles earlier (subs behind) — ["
+                      >
+                        Subs −
+                      </button>
+                      <button
+                        type="button"
+                        className={`ghost-btn control-btn sub-sync-btn${subtitleDelaySec !== 0 ? ' is-armed' : ''}`}
+                        onClick={() => {
+                          subtitleDelayRef.current = 0
+                          setSubtitleDelaySec(0)
+                          bumpChrome()
+                        }}
+                        title="Click to reset sync offset"
+                      >
+                        {subtitleDelaySec === 0
+                          ? '±0s'
+                          : `${subtitleDelaySec > 0 ? '+' : ''}${subtitleDelaySec.toFixed(1)}s`}
+                      </button>
+                      <button
+                        type="button"
+                        className="ghost-btn control-btn sub-sync-btn"
+                        onClick={() => nudgeSubtitleDelay(0.5)}
+                        title="Show subtitles later (subs ahead) — ]"
+                      >
+                        Subs +
+                      </button>
+                    </span>
+                  )}
+                </>
               )}
               {!inMultiview && (
                 <button
@@ -2209,7 +2721,20 @@ export function Player({
             </>
           )}
           {error && !isPip && (
-            <button type="button" className="ghost-btn" onClick={() => setRetryTick((n) => n + 1)}>
+            <button
+              type="button"
+              className="ghost-btn"
+              disabled={episodeLoading}
+              onClick={() => {
+                const entry = playlist[playlistIndex]
+                const canRetorrent = Boolean(entry?.torrentUri)
+                if (canRetorrent) {
+                  void selectPlaylistItem(playlistIndex, { force: true })
+                  return
+                }
+                setRetryTick((n) => n + 1)
+              }}
+            >
               Retry
             </button>
           )}
@@ -2256,6 +2781,19 @@ export function Player({
           playsInline
           onDoubleClick={isPip ? undefined : toggleFullscreen}
         />
+        {!isPip && !error && (!mediaReady || episodeLoading) && (
+          <PlaybackLoadingScreen
+            title={displayTitle}
+            status={
+              status && status !== 'Playing' && status !== 'Ready'
+                ? status
+                : episodeLoading
+                  ? 'Loading episode…'
+                  : 'Starting playback…'
+            }
+            variant="stage"
+          />
+        )}
         {!isPip && (playbackClock.duration > 0 || playbackClock.current > 0) && (
           <div
             className="player-clock"
@@ -2306,9 +2844,7 @@ export function Player({
           <div className="player-error">
             <p>{error}</p>
             <p className="player-error-hint">
-              {isEphemeralLocalStreamUrl(activePlaylistItem.url)
-                ? 'This title needs a short head start before video can play. Retry, wait a moment, or try another episode or quality.'
-                : 'Status may show online while the stream still fails (DRM, expired token, or CDN block). Try another channel, use Web browser for YouTube / 1SpotMedia, or Refresh the playlist source.'}
+              {playerErrorHint(error, activePlaylistItem.url)}
             </p>
           </div>
         )}

@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld('signalDesktop', {
   torrentSourcesSave: (sources) => ipcRenderer.invoke('torrentSources:save', sources),
   tmdbPopularTv: (limit) => ipcRenderer.invoke('tmdb:popularTv', limit),
   tmdbTvCatalog: (kind, limit) => ipcRenderer.invoke('tmdb:tvCatalog', kind, limit),
+  tmdbSyncControl: (action) => ipcRenderer.invoke('tmdb:syncControl', action),
   onTmdbProgress: (callback) => {
     const listener = (_event, payload) => callback(payload)
     ipcRenderer.on('tmdb:progress', listener)

@@ -138,7 +138,9 @@ export function ContinueWatching({
           ? 'Continue watching · Series'
           : category === 'anime'
             ? 'Continue watching · Anime'
-            : 'Continue watching'
+            : category === 'kids'
+              ? 'Continue watching · Kids'
+              : 'Continue watching'
 
   return (
     <section className="section-block continue-watching">

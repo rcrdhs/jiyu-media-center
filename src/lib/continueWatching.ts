@@ -1,5 +1,14 @@
 import type { CategoryId, StreamItem, StreamSourceKind, StreamTransport } from '../types'
 
+function mirrorWatchHistory(
+  entry: Omit<ContinueWatchingEntry, 'updatedAt'> & { updatedAt?: number; finished?: boolean },
+) {
+  // Dynamic import avoids a static cycle with watchHistory helpers.
+  void import('./watchHistory').then(({ recordWatchHistory }) => {
+    recordWatchHistory(entry)
+  })
+}
+
 const KEY = 'jiyu.continue.v1'
 /** Max resume titles kept per VOD shelf — movies / series / anime never evict each other. */
 const MAX_PER_CATEGORY = 8
@@ -10,11 +19,16 @@ export const COMPLETE_RATIO = 0.95
 export const FORCE_SAVE_CONTINUE_EVENT = 'jiyu:force-save-continue'
 
 /** Titles that support Continue watching / mid-playback resume. */
-export const VOD_CATEGORIES = ['movies', 'series', 'anime'] as const
+export const VOD_CATEGORIES = ['movies', 'series', 'anime', 'kids'] as const
 export type VodCategoryId = (typeof VOD_CATEGORIES)[number]
 
 export function isVodCategory(category: CategoryId | undefined): category is VodCategoryId {
-  return category === 'movies' || category === 'series' || category === 'anime'
+  return (
+    category === 'movies' ||
+    category === 'series' ||
+    category === 'anime' ||
+    category === 'kids'
+  )
 }
 
 export interface ContinueWatchingEntry {
@@ -444,6 +458,7 @@ export function upsertContinueEntry(
     0
   const normalized = normalizeContinuePlayhead(entry.currentTime, runtimeHint)
   if (normalized.finished) {
+    mirrorWatchHistory({ ...existing, ...entry, currentTime: entry.currentTime, finished: true })
     removeContinueEntry(entry.id)
     return
   }
@@ -469,7 +484,7 @@ export function upsertContinueEntry(
         ? runtimeHint
         : 0
 
-  // Finished (≥95%) — drop from Continue watching instead of saving.
+  // Finished (≥95%) — keep in History, drop from Continue watching.
   if (
     isEpisodeComplete(playhead, durationForComplete, {
       playbackUrl,
@@ -477,6 +492,13 @@ export function upsertContinueEntry(
       authoritative: isTrustedDuration(runtimeHint) || isTrustedDuration(durationForComplete),
     })
   ) {
+    mirrorWatchHistory({
+      ...existing,
+      ...entry,
+      currentTime: playhead,
+      duration: durationForComplete || entry.duration,
+      finished: true,
+    })
     removeContinueEntry(entry.id)
     return
   }
@@ -515,9 +537,12 @@ export function upsertContinueEntry(
       authoritative: isTrustedDuration(next.duration || runtimeHint),
     })
   ) {
+    mirrorWatchHistory({ ...next, finished: true })
     removeContinueEntry(entry.id)
     return
   }
+
+  mirrorWatchHistory(next)
 
   // Replace only this title id — never drop other categories' resumes.
   const others = readAll().filter((item) => item.id !== next.id)

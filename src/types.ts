@@ -20,7 +20,7 @@ export interface PlaylistFetchResult {
   error: string
 }
 
-export type CategoryId = 'sports' | 'movies' | 'anime' | 'series' | 'news'
+export type CategoryId = 'sports' | 'movies' | 'anime' | 'series' | 'news' | 'kids'
 
 export type StreamTransport = 'direct' | 'torrent'
 export type StreamSourceKind = 'builtin' | 'iptv' | 'torrent'
@@ -75,6 +75,10 @@ export interface StreamPlaylistItem {
   subtitleKind?: 'file' | 'embedded'
   /** Magnet / .torrent to resolve when switching episodes (SubsPlease-style shows). */
   torrentUri?: string
+  /** Fallback magnets when the primary swarm is dead. */
+  torrentAlternates?: string[]
+  /** Stable episode token for chrome (e.g. S01E02). */
+  episodeKey?: string
 }
 
 export interface CategoryMeta {
@@ -187,7 +191,12 @@ declare global {
           poster: string
         }>
         error?: string | null
+        cancelled?: boolean
       }>
+      /** Pause / resume / cancel / reset a running TMDB catalog fetch in Electron. */
+      tmdbSyncControl?: (
+        action: 'pause' | 'resume' | 'cancel' | 'reset',
+      ) => Promise<{ ok: boolean; paused: boolean; cancelled: boolean }>
       onTmdbProgress?: (
         callback: (payload: {
           phase: 'discover' | 'ids' | 'done'

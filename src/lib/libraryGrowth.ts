@@ -1,7 +1,7 @@
 import type { CategoryId } from '../types'
 
 const STORAGE_KEY = 'jiyu.library.growth.v1'
-const TRACKED = new Set<CategoryId>(['movies', 'series', 'anime'])
+const TRACKED = new Set<CategoryId>(['movies', 'series', 'anime', 'kids'])
 
 type DayCounts = Record<string, number> // YYYY-MM-DD → title count
 

@@ -56,6 +56,30 @@ export async function upsertTorrentItems(items: StreamItem[]): Promise<number> {
   return items.length
 }
 
+export async function listTorrentItemsForSource(sourceId: string): Promise<StreamItem[]> {
+  const db = await openDb()
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readonly')
+    const req = tx.objectStore(STORE).index('torrentSourceId').getAll(sourceId)
+    req.onsuccess = () => resolve((req.result as StreamItem[]) ?? [])
+    req.onerror = () => reject(req.error ?? new Error('Failed to list source torrent items'))
+  })
+}
+
+export async function deleteTorrentItemsByIds(ids: string[]): Promise<void> {
+  if (ids.length === 0) return
+  const batchSize = 400
+  for (let i = 0; i < ids.length; i += batchSize) {
+    const chunk = ids.slice(i, i + batchSize)
+    const db = await openDb()
+    const tx = db.transaction(STORE, 'readwrite')
+    const store = tx.objectStore(STORE)
+    for (const id of chunk) store.delete(id)
+    await txDone(tx)
+    await new Promise((r) => setTimeout(r, 0))
+  }
+}
+
 export async function deleteTorrentItemsForSource(sourceId: string): Promise<void> {
   const db = await openDb()
   const keys = await new Promise<IDBValidKey[]>((resolve, reject) => {

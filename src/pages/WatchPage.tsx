@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
+import { PlaybackLoadingScreen } from '../components/PlaybackLoadingScreen'
 import { resolvePlayableItem } from '../data/catalog'
 import { useCatalog } from '../context/CatalogContext'
 import { usePlayback } from '../context/PlaybackContext'
@@ -9,8 +10,11 @@ import {
   streamItemFromContinueEntry,
   type ContinueWatchingEntry,
 } from '../lib/continueWatching'
+import { hasRealDebridToken } from '../lib/debridSettings'
 import {
+  cleanShowDisplayTitle,
   getConnectionDownlinkMbps,
+  isDebridHttpPlayUrl,
   isTorrentInput,
   buildEpisodeChoices,
   isShowBrowseItem,
@@ -19,9 +23,10 @@ import {
   pickBestStream,
   resolveShowEpisodes,
   scrapePage,
-  torrentUrisForEpisode,
+  torrentUrisForEpisodeWithTorrentio,
   type EpisodeChoice,
 } from '../lib/torrents'
+import { TORRENTIO_TV_TRIAL } from '../lib/torrentio'
 import { getViewingQuality } from '../lib/viewingQuality'
 import { isYouTubeUrl } from '../lib/webBrowser'
 import { isVimeoLiveEventUrl, resolveVimeoLiveHls } from '../lib/vimeoLive'
@@ -83,6 +88,13 @@ export function WatchPage() {
         ? `/section/${continued.category}`
         : null
 
+  // Read at torrent-start time — must NOT be effect deps. If they are, arming
+  // Multi-view or Back→PiP re-runs start() and forceFull undoes both.
+  const multiviewGuardRef = useRef({ awaitingAdd, slotsLen: slots.length, mode })
+  multiviewGuardRef.current = { awaitingAdd, slotsLen: slots.length, mode }
+  const playingIdRef = useRef(playing?.id)
+  playingIdRef.current = playing?.id
+
   useEffect(() => {
     if (!item) return
     if (isYouTubeUrl(item.url)) {
@@ -94,6 +106,10 @@ export function WatchPage() {
 
     async function start() {
       setError(null)
+
+      // Already owning this title (full / PiP / multi) — do not call play() again.
+      // Re-entry with forceFull was clearing Multi-view arm and snapping PiP back to full.
+      if (playingIdRef.current === item!.id) return
 
       // CVM (and similar): Vimeo live event → fresh tokenized HLS
       if (isVimeoLiveEventUrl(item!.url)) {
@@ -131,7 +147,9 @@ export function WatchPage() {
           const preference = getViewingQuality()
           const downlink = getConnectionDownlinkMbps()
           const isShowShelf =
-            item!.category === 'series' || item!.category === 'anime'
+            item!.category === 'series' ||
+            item!.category === 'anime' ||
+            (item!.category === 'kids' && isShowBrowseItem(item!))
 
           if (isShowShelf && isShowBrowseItem(item!)) {
             const saved = getContinueEntry(item!.id)
@@ -175,6 +193,8 @@ export function WatchPage() {
               title: ep.title,
               url: '',
               torrentUri: ep.torrentUri,
+              torrentAlternates: ep.alternates,
+              episodeKey: ep.key,
             }))
           } else if (!uri || !isTorrentInput(uri)) {
             const detail = item!.detailUrl || item!.url
@@ -199,6 +219,8 @@ export function WatchPage() {
                 title: ep.title,
                 url: '',
                 torrentUri: ep.torrentUri,
+                torrentAlternates: ep.alternates,
+                episodeKey: ep.key,
               }))
             } else {
               const pick = pickBestStream(outcome.results, downlink, requestedQuality)
@@ -211,16 +233,42 @@ export function WatchPage() {
             }
           }
 
+          const useTorrentio =
+            TORRENTIO_TV_TRIAL &&
+            (item!.category === 'series' || item!.category === 'kids') &&
+            Boolean(episodeAlternates)
+          const useDebrid = useTorrentio && hasRealDebridToken()
+          if (useDebrid) setError('Checking debrid streams…')
+          else if (useTorrentio) setError('Checking more sources…')
           const candidates = episodeAlternates
-            ? torrentUrisForEpisode(episodeAlternates)
+            ? await torrentUrisForEpisodeWithTorrentio(episodeAlternates, item!.title, {
+                enabled: useTorrentio,
+              })
             : [uri].filter(Boolean)
+          if (cancelled) return
           // Multi-view add must not destroy the first tile's swarm while we resolve.
-          const keepOthers = awaitingAdd || slots.length > 1 || mode === 'multi'
+          const guard = multiviewGuardRef.current
+          const keepOthers =
+            guard.awaitingAdd || guard.slotsLen > 1 || guard.mode === 'multi'
           let result: TorrentStreamResult | null = null
           let usedUri = uri
           let lastError = 'Could not start torrent stream'
-          for (const candidate of candidates) {
+          let deadCount = 0
+          for (let i = 0; i < candidates.length; i++) {
+            const candidate = candidates[i]
             usedUri = candidate
+            if (isDebridHttpPlayUrl(candidate)) {
+              if (candidates.length > 1) {
+                setError(`Starting debrid stream (${i + 1}/${candidates.length})…`)
+              } else {
+                setError('Starting debrid stream…')
+              }
+              result = { ok: true, url: candidate }
+              break
+            }
+            if (candidates.length > 1) {
+              setError(`Connecting to peers (${i + 1}/${candidates.length})…`)
+            }
             const attempt = await window.signalDesktop.torrentStream(candidate, {
               keepOthers,
             })
@@ -230,9 +278,24 @@ export function WatchPage() {
               break
             }
             lastError = attempt.error || lastError
+            if (/no peers|no reachable seeds|swarm may be dead|unavailable/i.test(lastError)) {
+              deadCount += 1
+              if (i < candidates.length - 1) {
+                setError(
+                  `No peers — trying another release (${i + 2}/${candidates.length})…`,
+                )
+              }
+              continue
+            }
           }
           if (!result?.ok || !result.url) {
-            setError(lastError)
+            setError(
+              deadCount > 0 && deadCount === candidates.length
+                ? candidates.length > 1
+                  ? 'No peers found for any release of this title. Try another episode or quality.'
+                  : 'No peers found for this title. Try another episode or quality.'
+                : lastError,
+            )
             return
           }
           uri = usedUri
@@ -255,10 +318,15 @@ export function WatchPage() {
             playlist = result.playlist
           }
 
+          const showName = cleanShowDisplayTitle(item!.title) || item!.title
+          const epKey =
+            episodeAlternates?.key ||
+            parseEpisodeKey(title || '') ||
+            parseEpisodeKey(result.fileName || result.name || '')
           const playable: StreamItem = {
             ...item!,
-            title: title || result.name || result.fileName || item!.title,
-            description: result.fileName ?? item!.description,
+            title: epKey ? `${showName} · ${epKey}` : showName,
+            description: result.fileName || title || item!.description,
             url: result.url,
             subtitleUrl: result.subtitleUrl ?? result.playlist?.[0]?.subtitleUrl,
             subtitleKind: result.subtitleKind ?? result.playlist?.[0]?.subtitleKind,
@@ -301,9 +369,6 @@ export function WatchPage() {
     play,
     navigate,
     returnTo,
-    awaitingAdd,
-    slots.length,
-    mode,
   ])
 
   useEffect(() => {
@@ -345,18 +410,11 @@ export function WatchPage() {
           </Link>
         </div>
       ) : streamReady ? null : (
-        <>
-          <img
-            className="watch-loading-logo"
-            src="./jiyu-logo.png"
-            alt={`Loading ${display.title}`}
-            width={224}
-            height={224}
-          />
-          <div className="watch-loading-line" role="progressbar" aria-label={`Loading ${display.title}`}>
-            <span />
-          </div>
-        </>
+        <PlaybackLoadingScreen
+          title={cleanShowDisplayTitle(display.title) || display.title}
+          status="Getting episode ready…"
+          variant="page"
+        />
       )}
     </div>
   )

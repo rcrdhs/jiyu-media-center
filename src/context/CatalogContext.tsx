@@ -33,13 +33,21 @@ import {
 import { appendActivity } from '../lib/activityLog'
 import { maskActivityMessage } from '../lib/sourceMask'
 import { listTorrentCatalog, loadTorrentCatalogMeta } from '../lib/torrentCatalogStore'
-import { isEztvSource, isSubsPleaseUrl, loadTorrentSources } from '../lib/torrents'
+import { isEztvSource, isSubsPleaseUrl, isYtsSource, loadTorrentSources } from '../lib/torrents'
 import {
   TORRENT_SCRAPER_VERSION,
   syncAllTorrentSources,
   syncTorrentSource,
 } from '../lib/torrentSync'
+import { getTorrentSyncControlState } from '../lib/torrentSyncControl'
 import { clearTorrentSyncStatus, setTorrentSyncMessage } from '../lib/torrentSyncStatus'
+import { isKidsModeEnabled, subscribeKidsMode } from '../lib/kidsMode'
+
+function setSyncProgressMessage(message: string, percent: number | null): void {
+  // Keep the frozen "Paused · …" line — don't advance counts while parked.
+  if (getTorrentSyncControlState().paused) return
+  setTorrentSyncMessage(message, percent)
+}
 import type { CategoryId, StreamItem } from '../types'
 
 export interface AddPlaylistInput {
@@ -101,6 +109,7 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
   const [torrentItems, setTorrentItems] = useState<StreamItem[]>([])
   const [englishOnly, setEnglishOnlyState] = useState(() => getEnglishOnlyPref())
   const [hideDuplicates, setHideDuplicatesState] = useState(() => getHideDuplicatesPref())
+  const [kidsMode, setKidsMode] = useState(isKidsModeEnabled)
 
   const setEnglishOnly = useCallback((value: boolean) => {
     setEnglishOnlyPref(value)
@@ -206,6 +215,8 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
     }
   }, [reload, reloadTorrentCatalog])
 
+  useEffect(() => subscribeKidsMode(() => setKidsMode(isKidsModeEnabled())), [])
+
   const imported = useMemo(() => {
     const all: StreamItem[] = []
     for (const source of sources) {
@@ -213,6 +224,11 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
         ...parseM3U(source.content, {
           sourceId: source.id,
           sourceLabel: source.label,
+          fallbackCategory:
+            source.id === 'builtin-iptv-org-kids' ||
+            /categories\/kids\.m3u/i.test(source.url || '')
+              ? 'kids'
+              : undefined,
         }),
       )
     }
@@ -226,8 +242,10 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
       transport: item.transport ?? ('direct' as const),
     }))
     const merged = [...builtins, ...torrentItems, ...imported]
-    return hideDuplicates ? dedupeStreams(merged) : merged
-  }, [imported, torrentItems, hideDuplicates])
+    const deduped = hideDuplicates ? dedupeStreams(merged) : merged
+    if (!kidsMode) return deduped
+    return deduped.filter((item) => item.category === 'kids')
+  }, [imported, torrentItems, hideDuplicates, kidsMode])
 
   const byCategory = useCallback(
     (id: CategoryId) => {
@@ -358,8 +376,20 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
       setTorrentSyncMessage('Starting catalog update…', 1)
       try {
         const result = await syncTorrentSource(source, (p) => {
-          setTorrentSyncMessage(maskActivityMessage(p.message), p.percent ?? null)
+          setSyncProgressMessage(maskActivityMessage(p.message), p.percent ?? null)
         })
+        if (result.cancelled) {
+          setTorrentSyncMessage('Catalog sync cancelled', null)
+          appendActivity('sync', 'Catalog sync cancelled')
+          window.setTimeout(() => clearTorrentSyncStatus(), 2500)
+          if (isEztvSource(source.url, source.label)) {
+            void window.signalDesktop?.closeCfBrowser?.({
+              soon: true,
+              reason: 'eztv-sync-cancelled',
+            })
+          }
+          return { added: 0, error: 'Catalog sync cancelled' }
+        }
         // Only reload shelves once at the end — mid-sync reloads froze TV Series.
         if (result.added > 0 || result.error) {
           await reloadTorrentCatalog()
@@ -401,8 +431,22 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
     if (list.length === 0) return { added: 0, sources: 0 }
     setTorrentSyncMessage('Starting catalog update…', 1)
     const results = await syncAllTorrentSources(list, (p) => {
-      setTorrentSyncMessage(maskActivityMessage(p.message), p.percent ?? null)
+      setSyncProgressMessage(maskActivityMessage(p.message), p.percent ?? null)
     })
+    if (results.some((r) => r.cancelled)) {
+      const added = results.reduce((sum, r) => sum + r.added, 0)
+      if (added > 0) await reloadTorrentCatalog()
+      setTorrentSyncMessage('Catalog sync cancelled', null)
+      appendActivity('sync', 'Catalog sync cancelled')
+      window.setTimeout(() => clearTorrentSyncStatus(), 2500)
+      if (list.some((source) => isEztvSource(source.url, source.label))) {
+        void window.signalDesktop?.closeCfBrowser?.({
+          soon: true,
+          reason: 'eztv-sync-all-cancelled',
+        })
+      }
+      return { added, sources: list.length }
+    }
     const added = results.reduce((sum, r) => sum + r.added, 0)
     if (added > 0) await reloadTorrentCatalog()
     const summary = `Synced ${added.toLocaleString()} titles to the catalog`
@@ -457,6 +501,25 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
     }
     const startup = window.setTimeout(refreshSubsPlease, 60_000)
     const timer = window.setInterval(refreshSubsPlease, 6 * 60 * 60 * 1000)
+    return () => {
+      window.clearTimeout(startup)
+      window.clearInterval(timer)
+    }
+  }, [ready, syncTorrentWebsite])
+
+  // YTS Popular grows via merge; refresh every 12h so newly popular titles are pulled in.
+  useEffect(() => {
+    if (!ready) return
+    const refreshYts = () => {
+      const source = loadTorrentSources().find((entry) => isYtsSource(entry.url, entry.label))
+      if (!source) return
+      const syncedAt = loadTorrentCatalogMeta().bySource[source.id]?.syncedAt ?? 0
+      if (Date.now() - syncedAt >= 12 * 60 * 60 * 1000) {
+        void syncTorrentWebsite(source.id)
+      }
+    }
+    const startup = window.setTimeout(refreshYts, 90_000)
+    const timer = window.setInterval(refreshYts, 12 * 60 * 60 * 1000)
     return () => {
       window.clearTimeout(startup)
       window.clearInterval(timer)

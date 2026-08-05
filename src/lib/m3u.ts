@@ -6,7 +6,12 @@ const CATEGORY_HINTS: Array<{ id: CategoryId; pattern: RegExp }> = [
     pattern:
       /sport|espn|nba|nfl|mlb|football|soccer|uefa|f1|tennis|ufc|boxing|golf|hockey|cricket|racing|olympics|ppv|fight/i,
   },
-  { id: 'anime', pattern: /anime|otaku|crunchy|manga|toonami|cartoon|动画|アニ/i },
+  {
+    id: 'kids',
+    pattern:
+      /\bkids?\b|children|childrens|junior|preschool|pbs\s*kids|nick(?:elodeon|jr)?|disney\s*junior|cartoon\s*network|boomerang|cbeebies|treehouse|baby\s*tv|family\s*jr|\bcartoon\b/i,
+  },
+  { id: 'anime', pattern: /anime|otaku|crunchy|manga|toonami|动画|アニ/i },
   {
     id: 'movies',
     pattern: /movie|cinema|film|vod|cinema|cine|\bvods?\b|hollywood|hollywood|box\s*office/i,
@@ -22,6 +27,7 @@ const CATEGORY_HINTS: Array<{ id: CategoryId; pattern: RegExp }> = [
 ]
 
 export function guessCategory(name: string, group: string, url = ''): CategoryId {
+  if (/\/kids?\//i.test(url) || /categories\/kids\.m3u/i.test(url)) return 'kids'
   if (/\/movie\//i.test(url)) return 'movies'
   if (/\/series\//i.test(url)) return 'series'
   const haystack = `${name} ${group}`
@@ -99,8 +105,12 @@ export function parseM3U(content: string, options: ParseM3UOptions = {}): Stream
     const group = pending?.group || extGroup || ''
     const logo = pending?.logo
     const language = pending?.language
-    const category = guessCategory(title, group, line) || fallbackCategory
+    const category =
+      options.fallbackCategory === 'kids'
+        ? 'kids'
+        : guessCategory(title, group, line) || fallbackCategory
     const tags = ['iptv', 'imported']
+    if (category === 'kids') tags.push('kids-live')
     if (group) tags.push(group)
     if (pending?.chno) tags.push(`#${pending.chno}`)
     if (language) tags.push(language)

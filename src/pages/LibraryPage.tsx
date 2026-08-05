@@ -20,10 +20,23 @@ import {
   type PerformanceMode,
 } from '../lib/deviceProfile'
 import {
+  getRealDebridToken,
+  REAL_DEBRID_TOKEN_URL,
+  setRealDebridToken,
+} from '../lib/debridSettings'
+import {
   getViewingQuality,
   setViewingQuality,
   type ViewingQuality,
 } from '../lib/viewingQuality'
+import {
+  hasKidsModePin,
+  isKidsModeEnabled,
+  setKidsModeEnabled,
+  setKidsModePin,
+  subscribeKidsMode,
+  verifyKidsModePin,
+} from '../lib/kidsMode'
 import type { CategoryId, StreamHealthState } from '../types'
 import { TorrentsPage } from './TorrentsPage'
 
@@ -33,6 +46,7 @@ const SECTIONS: { id: CategoryId; label: string }[] = [
   { id: 'anime', label: 'Anime' },
   { id: 'series', label: 'TV Series' },
   { id: 'news', label: 'News' },
+  { id: 'kids', label: 'Kids' },
 ]
 
 export function LibraryPage() {
@@ -62,8 +76,13 @@ export function LibraryPage() {
     data: epgData,
   } = useEpg()
   const [quality, setQuality] = useState<ViewingQuality>(getViewingQuality)
+  const [debridToken, setDebridToken] = useState(getRealDebridToken)
   const [perfMode, setPerfMode] = useState<PerformanceMode>(getPerformanceMode)
   const [perfSummary, setPerfSummary] = useState('')
+  const [kidsMode, setKidsMode] = useState(isKidsModeEnabled)
+  const [kidsPinDraft, setKidsPinDraft] = useState('')
+  const [kidsPinConfirm, setKidsPinConfirm] = useState('')
+  const [kidsUnlockPin, setKidsUnlockPin] = useState('')
   const [message, setMessage] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [paste, setPaste] = useState('')
@@ -93,6 +112,8 @@ export function LibraryPage() {
     void ensurePerformanceProfile().then(apply)
     return onPerformanceProfile(apply)
   }, [])
+
+  useEffect(() => subscribeKidsMode(() => setKidsMode(isKidsModeEnabled())), [])
 
   function reportOk(text: string) {
     setError(null)
@@ -301,17 +322,20 @@ export function LibraryPage() {
     <div className="page">
       <header className="page-header">
         <p className="eyebrow">Library</p>
-        <h1>Streams, IPTV &amp; websites</h1>
+        <h1>{kidsMode ? 'Kids mode lock' : 'Streams, IPTV & websites'}</h1>
         <p className="lede">
-          Add M3U / IPTV sources and catalog websites — each stays active together. No need to
-          replace the previous list.
+          {kidsMode
+            ? 'Enter the PIN below to unlock Sports, Movies, and the rest of the library.'
+            : 'Add M3U / IPTV sources and catalog websites — each stays active together. No need to replace the previous list.'}
         </p>
       </header>
 
       <div className="library-grid">
         <div className="library-side">
           <section className="panel">
-            <h2>Preferences &amp; EPG</h2>
+            <h2>{kidsMode ? 'Exit Kids mode' : 'Preferences & EPG'}</h2>
+            {!kidsMode && (
+              <>
             <label className="field-label" htmlFor="performance-mode">
               Performance
             </label>
@@ -357,6 +381,32 @@ export function LibraryPage() {
               <option value="1080">1080p</option>
               <option value="2160">4K</option>
             </select>
+            <label className="field-label" htmlFor="realdebrid-token">
+              Real-Debrid API key{' '}
+              <span className="optional-tag">optional · TV streams</span>
+            </label>
+            <input
+              id="realdebrid-token"
+              className="url-input"
+              type="password"
+              autoComplete="off"
+              spellCheck={false}
+              placeholder="Paste token from real-debrid.com/apitoken"
+              value={debridToken}
+              onChange={(event) => setDebridToken(event.target.value)}
+              onBlur={() => {
+                setRealDebridToken(debridToken)
+                if (debridToken.trim()) reportOk('Real-Debrid key saved for TV streams')
+                else reportOk('Real-Debrid key cleared — using peer torrents only')
+              }}
+              aria-label="Real-Debrid API key"
+            />
+            <p className="field-hint" style={{ marginTop: '0.35rem', opacity: 0.75 }}>
+              When set, TV episodes try cached Torrentio debrid links first, then magnets.{' '}
+              <a href={REAL_DEBRID_TOKEN_URL} target="_blank" rel="noreferrer">
+                Get API key
+              </a>
+            </p>
             <label className="check-toggle">
               <input
                 type="checkbox"
@@ -377,6 +427,85 @@ export function LibraryPage() {
             <p className="fine-print">
               Collapses same-title / same-URL entries across playlists (default on).
             </p>
+
+            <h3 className="field-label" style={{ marginTop: '1.25rem' }}>
+              Kids mode
+            </h3>
+            <p className="field-hint" style={{ marginTop: '0.25rem', opacity: 0.75 }}>
+              Locks Browse to the Kids section (under 13). Set a PIN before turning it on so you
+              can exit later.
+            </p>
+            <label className="field-label" htmlFor="kids-pin-set">
+              PIN {hasKidsModePin() ? '(change)' : '(set)'}
+            </label>
+            <input
+              id="kids-pin-set"
+              className="url-input"
+              type="password"
+              inputMode="numeric"
+              autoComplete="off"
+              placeholder="4–8 digits"
+              value={kidsPinDraft}
+              onChange={(e) => setKidsPinDraft(e.target.value.replace(/\D/g, '').slice(0, 8))}
+            />
+            <label className="field-label" htmlFor="kids-pin-confirm">
+              Confirm PIN
+            </label>
+            <input
+              id="kids-pin-confirm"
+              className="url-input"
+              type="password"
+              inputMode="numeric"
+              autoComplete="off"
+              placeholder="Repeat PIN"
+              value={kidsPinConfirm}
+              onChange={(e) => setKidsPinConfirm(e.target.value.replace(/\D/g, '').slice(0, 8))}
+            />
+            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginTop: '0.5rem' }}>
+              <button
+                type="button"
+                className="ghost-btn"
+                onClick={() => {
+                  if (kidsPinDraft.length < 4) {
+                    reportErr(new Error('PIN must be at least 4 digits'))
+                    return
+                  }
+                  if (kidsPinDraft !== kidsPinConfirm) {
+                    reportErr(new Error('PIN confirmation does not match'))
+                    return
+                  }
+                  setKidsModePin(kidsPinDraft)
+                  setKidsPinDraft('')
+                  setKidsPinConfirm('')
+                  reportOk('Kids mode PIN saved')
+                }}
+              >
+                Save PIN
+              </button>
+              <button
+                type="button"
+                className="ghost-btn"
+                onClick={() => {
+                  if (!hasKidsModePin() && kidsPinDraft.length < 4) {
+                    reportErr(new Error('Set a 4–8 digit PIN first'))
+                    return
+                  }
+                  if (kidsPinDraft.length >= 4) {
+                    if (kidsPinDraft !== kidsPinConfirm) {
+                      reportErr(new Error('PIN confirmation does not match'))
+                      return
+                    }
+                    setKidsModePin(kidsPinDraft)
+                    setKidsPinDraft('')
+                    setKidsPinConfirm('')
+                  }
+                  setKidsModeEnabled(true)
+                  reportOk('Kids mode on — Browse locked to Kids')
+                }}
+              >
+                Turn Kids mode on
+              </button>
+            </div>
             <label className="field-label" htmlFor="epg-url">
               EPG / XMLTV URL(s)
             </label>
@@ -415,8 +544,48 @@ export function LibraryPage() {
               . One URL per line, or comma-separated.
             </p>
             {epgError && <p className="toast toast-error">{epgError}</p>}
+              </>
+            )}
+            {kidsMode && (
+              <>
+                <p className="fine-print" style={{ marginTop: '0.5rem' }}>
+                  Kids mode is on. Enter the PIN to unlock the full app.
+                </p>
+                <label className="field-label" htmlFor="kids-unlock-pin">
+                  PIN to exit
+                </label>
+                <input
+                  id="kids-unlock-pin"
+                  className="url-input"
+                  type="password"
+                  inputMode="numeric"
+                  autoComplete="off"
+                  placeholder="4–8 digits"
+                  value={kidsUnlockPin}
+                  onChange={(e) => setKidsUnlockPin(e.target.value.replace(/\D/g, '').slice(0, 8))}
+                />
+                <button
+                  type="button"
+                  className="ghost-btn"
+                  style={{ marginTop: '0.5rem' }}
+                  onClick={() => {
+                    if (!verifyKidsModePin(kidsUnlockPin)) {
+                      reportErr(new Error('Wrong PIN'))
+                      return
+                    }
+                    setKidsModeEnabled(false)
+                    setKidsUnlockPin('')
+                    reportOk('Kids mode off — full library unlocked')
+                  }}
+                >
+                  Exit Kids mode
+                </button>
+              </>
+            )}
           </section>
 
+          {!kidsMode && (
+          <>
           <section className="panel library-activity-panel">
             <details
               className="library-activity"
@@ -566,8 +735,17 @@ export function LibraryPage() {
               watch.
             </p>
           </section>
+          </>
+          )}
+          {kidsMode && (message || error) && (
+            <section className="panel">
+              {message && <p className="toast">{message}</p>}
+              {error && <p className="toast toast-error">{error}</p>}
+            </section>
+          )}
         </div>
 
+        {!kidsMode && (
         <section className="panel library-import">
           <h2>IPTV providers</h2>
           <p>
@@ -705,11 +883,14 @@ export function LibraryPage() {
           {message && <p className="toast">{message}</p>}
           {error && <p className="toast toast-error">{error}</p>}
         </section>
+        )}
       </div>
 
-      <section className="panel library-websites-panel">
-        <TorrentsPage embedded />
-      </section>
+      {!kidsMode && (
+        <section className="panel library-websites-panel">
+          <TorrentsPage embedded />
+        </section>
+      )}
     </div>
   )
 }

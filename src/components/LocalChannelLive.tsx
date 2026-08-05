@@ -148,7 +148,12 @@ export function LocalChannelLive({ item }: LocalChannelLiveProps) {
 
   return (
     <div className="local-channel-live">
-      <Link to={`/watch/${item.id}`} className="local-channel-live-stage" title={`Watch ${item.title}`}>
+      <Link
+        to={`/watch/${item.id}`}
+        state={{ from: '/' }}
+        className="local-channel-live-stage"
+        title={`Watch ${item.title}`}
+      >
         {item.poster && (
           <img
             className={`local-channel-live-poster ${playing && !youtube ? 'is-hidden' : ''}`}
@@ -177,7 +182,7 @@ export function LocalChannelLive({ item }: LocalChannelLiveProps) {
           <h3>{item.title}</h3>
           <p>{detail}</p>
         </div>
-        <Link className="primary-btn" to={`/watch/${item.id}`}>
+        <Link className="primary-btn" to={`/watch/${item.id}`} state={{ from: '/' }}>
           Watch
         </Link>
       </div>

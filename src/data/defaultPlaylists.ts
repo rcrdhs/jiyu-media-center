@@ -16,4 +16,9 @@ export const DEFAULT_PLAYLISTS = [
     label: 'Free TV (with guide)',
     url: 'https://i.mjh.nz/all/raw-tv.m3u8',
   },
+  {
+    id: 'builtin-iptv-org-kids',
+    label: 'IPTV-Org Kids',
+    url: 'https://iptv-org.github.io/iptv/categories/kids.m3u',
+  },
 ] as const

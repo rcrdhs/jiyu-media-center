@@ -4,7 +4,7 @@ const CACHE_KEY = 'jiyu.poster-fallback.v3'
 const pending = new Map<string, Promise<string>>()
 let queue = Promise.resolve()
 
-type PosterCategory = Extract<CategoryId, 'movies' | 'series' | 'anime'>
+type PosterCategory = Extract<CategoryId, 'movies' | 'series' | 'anime' | 'kids'>
 
 function loadCache(): Record<string, string> {
   try {
@@ -205,6 +205,15 @@ async function searchPoster(title: string, category: PosterCategory): Promise<st
       (await searchWikipediaPoster(query))
     )
   }
+  if (category === 'kids') {
+    return (
+      (await searchItunesPoster(query, 'movie')) ||
+      (await searchSeriesPoster(query)) ||
+      (await searchItunesPoster(query, 'tvShow')) ||
+      (await searchWikipediaFilmPoster(query)) ||
+      (await searchWikipediaPoster(query))
+    )
+  }
   // movies — iTunes is much more reliable than bare Wikipedia for VOD titles
   return (
     (await searchItunesPoster(query, 'movie')) ||
@@ -219,7 +228,12 @@ async function searchPoster(title: string, category: PosterCategory): Promise<st
  * Empty misses are not cached so later visits can retry.
  */
 export function resolveCatalogPoster(title: string, category: CategoryId): Promise<string> {
-  if (category !== 'movies' && category !== 'series' && category !== 'anime') {
+  if (
+    category !== 'movies' &&
+    category !== 'series' &&
+    category !== 'anime' &&
+    category !== 'kids'
+  ) {
     return Promise.resolve('')
   }
   if (!title.trim()) return Promise.resolve('')
