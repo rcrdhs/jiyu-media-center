@@ -15,7 +15,6 @@ import {
   formatSize,
   getConnectionDownlinkMbps,
   isTorrentInput,
-  isSubsPleaseUrl,
   labelQuality,
   loadTorrentSources,
   loadTorrentSourcesAsync,
@@ -31,7 +30,7 @@ import {
   type TorrentSource,
 } from '../lib/torrents'
 import { guessVodCategory } from '../lib/continueWatching'
-import { getViewingQuality } from '../lib/viewingQuality'
+import { getViewingQuality, resolveRequestedQuality } from '../lib/viewingQuality'
 import type { StreamItem, StreamPlaylistItem, TorrentInfo } from '../types'
 
 type TorrentsPageProps = {
@@ -87,6 +86,16 @@ export function TorrentsPage({ embedded = false }: TorrentsPageProps) {
   function persistSources(next: TorrentSource[]) {
     setSources(next)
     saveTorrentSources(next)
+  }
+
+  function toggleSourceShelfVisibility(sourceId: string) {
+    persistSources(
+      sources.map((source) =>
+        source.id === sourceId
+          ? { ...source, hiddenFromShelves: !source.hiddenFromShelves }
+          : source,
+      ),
+    )
   }
 
   function addSource(e: FormEvent) {
@@ -194,8 +203,8 @@ export function TorrentsPage({ embedded = false }: TorrentsPageProps) {
     const outcome = await browsePage(link.url, source)
     if (!outcome || !window.signalDesktop?.torrentStream) return
     const preference = getViewingQuality()
-    const requestedQuality = preference === 'auto' ? 720 : preference
     const downlink = getConnectionDownlinkMbps()
+    const requestedQuality = resolveRequestedQuality(preference, downlink)
     const episodes = buildEpisodeChoices(outcome.results, downlink, requestedQuality)
     if (episodes.length > 1) {
       const startIndex = 0
@@ -418,9 +427,20 @@ export function TorrentsPage({ embedded = false }: TorrentsPageProps) {
           </div>
           <ul className="torrent-source-list">
             {sources.map((s) => (
-              <li key={s.id} className={s.id === activeSourceId ? 'is-active' : ''}>
+              <li
+                key={s.id}
+                className={[
+                  s.id === activeSourceId ? 'is-active' : '',
+                  s.hiddenFromShelves ? 'is-shelf-hidden' : '',
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
+              >
                 <div>
                   <strong>{s.label}</strong>
+                  {s.hiddenFromShelves && (
+                    <span className="torrent-source-badge">Hidden from shelves</span>
+                  )}
                   <span>{s.url}</span>
                 </div>
                 <div className="torrent-source-actions">
@@ -442,6 +462,13 @@ export function TorrentsPage({ embedded = false }: TorrentsPageProps) {
                     }}
                   >
                     {syncingId === s.id ? 'Syncing…' : 'Sync to shelves'}
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost-btn control-btn"
+                    onClick={() => toggleSourceShelfVisibility(s.id)}
+                  >
+                    {s.hiddenFromShelves ? 'Show on shelves' : 'Hide from shelves'}
                   </button>
                   <button
                     type="button"
@@ -546,14 +573,15 @@ export function TorrentsPage({ embedded = false }: TorrentsPageProps) {
                   onClick={() => {
                     setAutoInfo(null)
                     const preference = getViewingQuality()
-                    const requestedQuality = preference === 'auto' ? 720 : preference
+                    const downlink = getConnectionDownlinkMbps()
+                    const requestedQuality = resolveRequestedQuality(preference, downlink)
                     const showKey = normalizeShowKey(r.title)
                     const sameShow = results.filter(
                       (row) => normalizeShowKey(row.title) === showKey,
                     )
                     const episodes = buildEpisodeChoices(
                       sameShow,
-                      getConnectionDownlinkMbps(),
+                      downlink,
                       requestedQuality,
                     )
                     if (episodes.length > 1) {

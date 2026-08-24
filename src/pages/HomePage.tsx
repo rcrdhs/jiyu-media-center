@@ -5,9 +5,11 @@ import { useCatalog } from '../context/CatalogContext'
 import { usePlayback } from '../context/PlaybackContext'
 import { CatalogGrid } from '../components/CatalogGrid'
 import { ContinueWatching } from '../components/ContinueWatching'
+import { WatchNextStrip } from '../components/WatchNextStrip'
 import { WatchHistory } from '../components/WatchHistory'
 import { LocalChannelLive } from '../components/LocalChannelLive'
 import { LocalYoutubeLiveNow } from '../components/LocalYoutubeLiveNow'
+import { filterShelfVisibleItems, isSeriesWebCatalogItem } from '../lib/torrents'
 import { isLikelyEnglish, shouldApplyEnglishFilter } from '../lib/language'
 import { VOD_CATEGORIES } from '../lib/continueWatching'
 import { isKidsModeEnabled, subscribeKidsMode } from '../lib/kidsMode'
@@ -56,8 +58,9 @@ export function HomePage() {
   const searchHits = useMemo(() => {
     const q = homeQuery.trim().toLowerCase()
     if (!q) return []
-    return items
+    return filterShelfVisibleItems(items)
       .filter((item) => {
+        if (item.category === 'series' && !isSeriesWebCatalogItem(item)) return false
         if (englishOnly && shouldApplyEnglishFilter(item.category) && !isLikelyEnglish(item)) {
           return false
         }
@@ -114,6 +117,8 @@ export function HomePage() {
         homeVodCategories.map((category) => (
           <ContinueWatching key={category} category={category} />
         ))}
+
+      {!homeQuery.trim() && <WatchNextStrip />}
 
       {!homeQuery.trim() && !kidsMode && <WatchHistory />}
 

@@ -18,6 +18,8 @@ import {
   isTorrentInput,
   buildEpisodeChoices,
   isShowBrowseItem,
+  isM2BoxCatalogItem,
+  isNetMirrorCatalogItem,
   parseEpisodeKey,
   pickBestEpisodeIndex,
   pickBestStream,
@@ -26,9 +28,10 @@ import {
   torrentUrisForEpisodeWithTorrentio,
   type EpisodeChoice,
 } from '../lib/torrents'
+import { resolveM2BoxPlay } from '../lib/m2box'
 import { TORRENTIO_TV_TRIAL } from '../lib/torrentio'
-import { getViewingQuality } from '../lib/viewingQuality'
-import { isYouTubeUrl } from '../lib/webBrowser'
+import { getViewingQuality, resolveRequestedQuality } from '../lib/viewingQuality'
+import { isWebBrowserOnlyUrl } from '../lib/webBrowser'
 import { isVimeoLiveEventUrl, resolveVimeoLiveHls } from '../lib/vimeoLive'
 import type { StreamItem, StreamPlaylistItem, TorrentStreamResult } from '../types'
 
@@ -61,6 +64,22 @@ function resolveContinueEpisodeIndex(
   }
 
   return Math.min(Math.max(0, saved.playlistIndex), max)
+}
+
+/** SxxExx (or Exx) from a title / continue entry → M2Box play API season + episode. */
+function m2boxSeasonEpisode(title: string | undefined | null): { season: number; episode: number } {
+  const key = title ? parseEpisodeKey(title) : null
+  if (key) {
+    const sxxexx = /^S(\d{1,2})E(\d{1,3})$/i.exec(key)
+    if (sxxexx) {
+      return { season: Math.max(1, Number(sxxexx[1])), episode: Math.max(1, Number(sxxexx[2])) }
+    }
+    const exx = /^E(\d+(?:\.\d+)?)$/i.exec(key)
+    if (exx) {
+      return { season: 1, episode: Math.max(1, Math.floor(Number(exx[1]))) }
+    }
+  }
+  return { season: 1, episode: 1 }
 }
 
 export function WatchPage() {
@@ -97,10 +116,6 @@ export function WatchPage() {
 
   useEffect(() => {
     if (!item) return
-    if (isYouTubeUrl(item.url)) {
-      navigate(`/web?url=${encodeURIComponent(item.url)}`, { replace: true })
-      return
-    }
 
     let cancelled = false
 
@@ -108,8 +123,66 @@ export function WatchPage() {
       setError(null)
 
       // Already owning this title (full / PiP / multi) — do not call play() again.
-      // Re-entry with forceFull was clearing Multi-view arm and snapping PiP back to full.
       if (playingIdRef.current === item!.id) return
+
+      // M2Box: episode list first; resume continues native play. Browser only if resolve fails.
+      if (isM2BoxCatalogItem(item!)) {
+        const saved = getContinueEntry(item!.id)
+        const resuming = Boolean(saved && saved.currentTime >= 5)
+        if (!resuming) {
+          navigate(`/show/${item!.id}`, { replace: true, state: { from: returnTo } })
+          return
+        }
+        if (!window.signalDesktop?.fetchJsonGet && !window.signalDesktop?.fetchHtml) {
+          navigate(`/web?url=${encodeURIComponent(item!.detailUrl || item!.url)}`, { replace: true })
+          return
+        }
+        const resumeTitle = saved?.episodeTitle || saved?.title || item!.title
+        const { season, episode } = m2boxSeasonEpisode(resumeTitle)
+        const resolved = await resolveM2BoxPlay(item!.detailUrl || item!.url, {
+          subjectId: item!.m2boxSubjectId,
+          season,
+          episode,
+        })
+        if (cancelled) return
+        if (!resolved.ok) {
+          navigate(`/show/${item!.id}`, { replace: true, state: { from: returnTo } })
+          return
+        }
+        if (window.signalDesktop?.setPlaybackHeaders) {
+          void window.signalDesktop.setPlaybackHeaders({
+            url: resolved.url,
+            referrer: resolved.referer,
+          })
+        }
+        const showName = cleanShowDisplayTitle(item!.title) || item!.title
+        const epLabel = `S${String(resolved.season).padStart(2, '0')}E${String(resolved.episode).padStart(2, '0')}`
+        play(
+          {
+            ...item!,
+            title: `${showName} · ${epLabel}`,
+            url: resolved.url,
+            httpReferrer: resolved.referer,
+            transport: 'direct',
+            tags: [...new Set([...(item!.tags ?? []), 'm2box', resolved.format])],
+            runtimeSeconds: resolved.durationSeconds ?? item!.runtimeSeconds,
+            m2boxSubjectId: resolved.subjectId || item!.m2boxSubjectId,
+          },
+          { forceFull: true, returnTo },
+        )
+        return
+      }
+
+      // NetMirror: episode list first; play opens Web Browser per episode.
+      if (isNetMirrorCatalogItem(item!)) {
+        navigate(`/show/${item!.id}`, { replace: true, state: { from: returnTo } })
+        return
+      }
+
+      if (isWebBrowserOnlyUrl(item!.url)) {
+        navigate(`/web?url=${encodeURIComponent(item!.url)}`, { replace: true })
+        return
+      }
 
       // CVM (and similar): Vimeo live event → fresh tokenized HLS
       if (isVimeoLiveEventUrl(item!.url)) {
@@ -204,7 +277,7 @@ export function WatchPage() {
               setError(outcome.error || 'No magnet or torrent link found on that page.')
               return
             }
-            const requestedQuality = preference === 'auto' ? 720 : preference
+            const requestedQuality = resolveRequestedQuality(preference, downlink)
             const episodes = buildEpisodeChoices(outcome.results, downlink, requestedQuality)
 
             if (episodes.length > 1) {

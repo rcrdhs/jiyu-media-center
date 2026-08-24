@@ -27,6 +27,12 @@ export const LOCAL_YOUTUBE_LIVE_TARGETS: LocalYoutubeLiveTarget[] = [
     detail: 'Nationwide News Network is live on YouTube',
     url: 'https://www.youtube.com/@nationwidenewsnetwork/live',
   },
+  {
+    id: 'tnt-sports-uk-live',
+    label: 'TNT Sports UK',
+    detail: 'Official football coverage — free Early Kick-Off on YouTube when live',
+    url: 'https://www.youtube.com/@TNTSports/live',
+  },
 ]
 
 function looksLive(html: string): boolean {

@@ -5,7 +5,9 @@ export interface SubtitleCue {
 }
 
 function parseTimestamp(value: string): number {
-  const parts = value.trim().split(':')
+  // SRT uses commas for millis; WebVTT uses dots.
+  const normalized = value.trim().replace(',', '.')
+  const parts = normalized.split(':')
   if (parts.length === 3) {
     return Number(parts[0]) * 3600 + Number(parts[1]) * 60 + Number.parseFloat(parts[2])
   }
@@ -31,7 +33,7 @@ export function parseSubtitleCues(raw: string): SubtitleCue[] {
 
     let timeIndex = lines.findIndex((line) => line.includes('-->'))
     if (timeIndex < 0) continue
-    const match = lines[timeIndex].match(/([\d:.]+)\s*-->\s*([\d:.]+)/)
+    const match = lines[timeIndex].match(/([\d:.,]+)\s*-->\s*([\d:.,]+)/)
     if (!match) continue
 
     const cueText = lines

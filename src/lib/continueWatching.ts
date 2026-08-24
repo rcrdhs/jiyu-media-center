@@ -94,6 +94,7 @@ function trimPerCategory(entries: ContinueWatchingEntry[]): ContinueWatchingEntr
     movies: [],
     series: [],
     anime: [],
+    kids: [],
   }
   for (const entry of entries) {
     if (!isVodCategory(entry.category)) continue
@@ -102,7 +103,8 @@ function trimPerCategory(entries: ContinueWatchingEntry[]): ContinueWatchingEntr
   const merged: ContinueWatchingEntry[] = []
   for (const category of VOD_CATEGORIES) {
     const unique = new Map<string, ContinueWatchingEntry>()
-    for (const entry of buckets[category].sort((a, b) => b.updatedAt - a.updatedAt)) {
+    const list = buckets[category] ?? []
+    for (const entry of list.sort((a, b) => b.updatedAt - a.updatedAt)) {
       if (!unique.has(entry.id)) unique.set(entry.id, entry)
     }
     merged.push(...[...unique.values()].slice(0, MAX_PER_CATEGORY))
@@ -111,24 +113,29 @@ function trimPerCategory(entries: ContinueWatchingEntry[]): ContinueWatchingEntr
 }
 
 function writeAll(entries: ContinueWatchingEntry[]) {
-  const sliced = trimPerCategory(entries)
-  const next = JSON.stringify(sliced)
-  let membershipChanged = true
   try {
-    const prevRaw = localStorage.getItem(KEY)
-    if (prevRaw) {
-      const prev = JSON.parse(prevRaw) as ContinueWatchingEntry[]
-      const prevIds = prev.map((entry) => `${entry.category}:${entry.id}`).join('\0')
-      const nextIds = sliced.map((entry) => `${entry.category}:${entry.id}`).join('\0')
-      membershipChanged = prevIds !== nextIds
+    const sliced = trimPerCategory(entries)
+    const next = JSON.stringify(sliced)
+    let membershipChanged = true
+    try {
+      const prevRaw = localStorage.getItem(KEY)
+      if (prevRaw) {
+        const prev = JSON.parse(prevRaw) as ContinueWatchingEntry[]
+        const prevIds = prev.map((entry) => `${entry.category}:${entry.id}`).join('\0')
+        const nextIds = sliced.map((entry) => `${entry.category}:${entry.id}`).join('\0')
+        membershipChanged = prevIds !== nextIds
+      }
+    } catch {
+      membershipChanged = true
     }
-  } catch {
-    membershipChanged = true
-  }
-  localStorage.setItem(KEY, next)
-  // Avoid re-rendering Continue watching on every progress tick (causes poster flicker).
-  if (membershipChanged) {
-    window.dispatchEvent(new CustomEvent(CONTINUE_WATCHING_EVENT))
+    localStorage.setItem(KEY, next)
+    // Avoid re-rendering Continue watching on every progress tick (causes poster flicker).
+    if (membershipChanged) {
+      window.dispatchEvent(new CustomEvent(CONTINUE_WATCHING_EVENT))
+    }
+  } catch (err) {
+    // Never let resume persistence take down playback / the desktop shell.
+    console.warn('Continue watching save failed:', err)
   }
 }
 

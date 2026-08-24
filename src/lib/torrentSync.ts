@@ -29,6 +29,7 @@ import {
   linkToCatalogItem,
   scrapeEztvTmdbFeed,
   scrapePage,
+  YTS_API_REQUEST_GAP_MS,
   YTS_POPULAR_MIN_TITLES,
   type TorrentSource,
 } from './torrents'
@@ -44,7 +45,7 @@ import type { StreamItem } from '../types'
  * Bump whenever a site adapter changes how titles/posters are extracted, so
  * already-synced shelves are rebuilt automatically on the next launch.
  */
-export const TORRENT_SCRAPER_VERSION = 31
+export const TORRENT_SCRAPER_VERSION = 38
 
 export interface TorrentSyncProgress {
   sourceId: string
@@ -222,13 +223,50 @@ export async function syncTorrentSource(
       })
       lastProgressAt = Date.now()
 
+      const ytsSource = isYtsSource(source.url, source.label)
       while (url && page < feed.maxPages) {
         await torrentSyncCheckpoint(session)
         page += 1
         pages += 1
-        const outcome = await scrapePage(url, source.label)
+        let outcome = await scrapePage(url, source.label)
+        // YTS: soft-retry a challenged/empty page instead of aborting the whole feed.
+        if (
+          ytsSource &&
+          outcome.error &&
+          outcome.links.length === 0 &&
+          /rate-limit|cloudflare|challeng|blocked|quiet mode/i.test(outcome.error)
+        ) {
+          onProgress?.({
+            sourceId: source.id,
+            label: source.label,
+            page: pages,
+            added: byId.size,
+            percent: Math.min(97, Math.round(feedBase + (page / Math.max(1, feed.maxPages)) * feedSpan * 0.97)),
+            message: `YTS cooling down… retrying page ${page}`,
+          })
+          await yieldToUi(Math.max(YTS_API_REQUEST_GAP_MS * 2, 8_000))
+          outcome = await scrapePage(url, source.label)
+        }
         if (outcome.error && outcome.links.length === 0) {
           lastError = outcome.error
+          // Keep progress for YTS — skip the bad page and keep crawling when we can.
+          if (ytsSource && page < feed.maxPages) {
+            let nextUrl = outcome.nextPage
+            if (!nextUrl) {
+              try {
+                const u = new URL(url)
+                u.searchParams.set('page', String(page + 1))
+                nextUrl = u.toString()
+              } catch {
+                nextUrl = null
+              }
+            }
+            if (nextUrl) {
+              url = nextUrl
+              await yieldToUi(YTS_API_REQUEST_GAP_MS)
+              continue
+            }
+          }
           break
         }
         // Trending/showlist cards are /shows/… or imdb API URLs after canonicalize.
@@ -302,8 +340,14 @@ export async function syncTorrentSource(
         url = outcome.nextPage
         // EZTV: longer yield so Chrome fetch + UI stay responsive.
         // Device profile stretches yields on lite machines.
+        // YTS: ≥3s gap (Jackett used 2.5s) — quieter sync, fewer challenges.
         const knobs = getPerformanceKnobs()
-        await yieldToUi(isShowlist ? knobs.syncShowlistYieldMs : knobs.syncYieldMs)
+        const gapMs = ytsSource
+          ? Math.max(knobs.syncYieldMs, YTS_API_REQUEST_GAP_MS)
+          : isShowlist
+            ? knobs.syncShowlistYieldMs
+            : knobs.syncYieldMs
+        await yieldToUi(gapMs)
       }
     }
 

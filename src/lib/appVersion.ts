@@ -12,6 +12,11 @@ export const APP_VERSION_LABEL = `v${APP_VERSION}`
 /** Short milestone log — newest first — so progress is visible in-app. */
 export const APP_RELEASES: ReadonlyArray<{ version: string; summary: string }> = [
   {
+    version: '0.3.4',
+    summary:
+      'M2Box native play + NetMirror TV Series (full 146-page catalog, ShowPage episodes, Web Browser play), Watch Next, series shelf cleanup',
+  },
+  {
     version: '0.3.3',
     summary:
       'Curated Kids shelves (movies/shows/live) with PIN Kids mode, Real-Debrid/Torrentio TV paths, deeper YTS Popular sync',

@@ -2,9 +2,16 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { useStreamHealth } from '../context/StreamHealthContext'
 import { getMainStage, setMainScroll } from '../lib/viewState'
-import { isShowBrowseItem } from '../lib/torrents'
-import { isYouTubeUrl } from '../lib/webBrowser'
+import { isShowBrowseItem, isSeriesWebCatalogItem } from '../lib/torrents'
+import { isWebBrowserOnlyUrl, isYouTubeUrl } from '../lib/webBrowser'
 import { isWeakPosterUrl, resolveCatalogPoster } from '../lib/posterFallback'
+import {
+  canQueueWatchNext,
+  clearWatchNext,
+  isWatchNext,
+  setWatchNext,
+  subscribeWatchNext,
+} from '../lib/watchNext'
 import { CardPreview } from './CardPreview'
 import type { StreamHealthState, StreamItem } from '../types'
 
@@ -26,15 +33,22 @@ export function MediaCard({ item }: MediaCardProps) {
   const location = useLocation()
   const { getStatus, getEntry, checkOne } = useStreamHealth()
   const isTorrent = item.transport === 'torrent' || item.sourceKind === 'torrent'
-  const status = isTorrent ? 'online' : getStatus(item.id)
-  const entry = isTorrent ? undefined : getEntry(item.id)
+  // Web-browser titles (M2Box, NetMirror, YouTube, …) aren't probeable HLS — hide health chrome.
+  const skipHealth =
+    isTorrent || isSeriesWebCatalogItem(item) || isWebBrowserOnlyUrl(item.url)
+  const status = skipHealth ? 'online' : getStatus(item.id)
+  const entry = skipHealth ? undefined : getEntry(item.id)
 
   const [previewing, setPreviewing] = useState(false)
   const [previewDone, setPreviewDone] = useState(false)
   const [fallbackPoster, setFallbackPoster] = useState('')
+  const [queued, setQueued] = useState(() => isWatchNext(item.id))
   const hoverTimer = useRef<number | null>(null)
   const catalogPoster = isWeakPosterUrl(item.poster) ? '' : item.poster || ''
   const poster = catalogPoster || fallbackPoster || item.poster || ''
+  const queueable = canQueueWatchNext(item)
+
+  useEffect(() => subscribeWatchNext((entry) => setQueued(entry?.id === item.id)), [item.id])
 
   useEffect(() => {
     let cancelled = false
@@ -52,7 +66,7 @@ export function MediaCard({ item }: MediaCardProps) {
   }, [item.id, item.title, item.poster, item.category, catalogPoster])
 
   const canPreview =
-    !isTorrent &&
+    !skipHealth &&
     !isYouTubeUrl(item.url) &&
     status !== 'offline' &&
     status !== 'timeout'
@@ -110,7 +124,7 @@ export function MediaCard({ item }: MediaCardProps) {
             <span className="media-card-fallback">{item.title.slice(0, 1)}</span>
           )}
           {previewing && <CardPreview url={item.url} onEnd={endPreview} />}
-          {!isTorrent && (
+          {!skipHealth && (
             <span className={`status-badge status-${status}`}>{STATUS_LABEL[status]}</span>
           )}
         </div>
@@ -170,19 +184,42 @@ export function MediaCard({ item }: MediaCardProps) {
           })()}
         </div>
       </Link>
-      {!isTorrent && (
-        <button
-          type="button"
-          className="card-check-btn"
-          disabled={status === 'checking'}
-          onClick={(e) => {
-            e.preventDefault()
-            e.stopPropagation()
-            void checkOne(item)
-          }}
-        >
-          {status === 'checking' ? 'Checking…' : 'Check'}
-        </button>
+      {(queueable || !skipHealth) && (
+        <div className="media-card-actions">
+          {queueable && (
+            <button
+              type="button"
+              className={`card-check-btn${queued ? ' is-queued' : ''}`}
+              onClick={(e) => {
+                e.preventDefault()
+                e.stopPropagation()
+                if (queued) clearWatchNext()
+                else setWatchNext(item)
+              }}
+              title={
+                queued
+                  ? 'Clear up next'
+                  : 'Play after the current title finishes (replaces any queued title)'
+              }
+            >
+              {queued ? 'Queued' : 'Play next'}
+            </button>
+          )}
+          {!skipHealth && (
+            <button
+              type="button"
+              className="card-check-btn"
+              disabled={status === 'checking'}
+              onClick={(e) => {
+                e.preventDefault()
+                e.stopPropagation()
+                void checkOne(item)
+              }}
+            >
+              {status === 'checking' ? 'Checking…' : 'Check'}
+            </button>
+          )}
+        </div>
       )}
     </div>
   )

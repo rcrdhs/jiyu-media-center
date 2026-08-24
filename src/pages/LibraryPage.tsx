@@ -370,17 +370,29 @@ export function LibraryPage() {
               onChange={(event) => {
                 const raw = event.target.value
                 const next: ViewingQuality =
-                  raw === '720' ? 720 : raw === '1080' ? 1080 : raw === '2160' ? 2160 : 'auto'
+                  raw === '480'
+                    ? 480
+                    : raw === '720'
+                      ? 720
+                      : raw === '1080'
+                        ? 1080
+                        : raw === '2160'
+                          ? 2160
+                          : 'auto'
                 setQuality(next)
                 setViewingQuality(next)
               }}
               aria-label="Preferred viewing quality"
             >
               <option value="auto">Auto (internet + device)</option>
+              <option value="480">480p</option>
               <option value="720">720p</option>
               <option value="1080">1080p</option>
               <option value="2160">4K</option>
             </select>
+            <p className="field-hint" style={{ marginTop: '0.35rem', opacity: 0.75 }}>
+              Auto picks lower quality on slow connections (480p when available).
+            </p>
             <label className="field-label" htmlFor="realdebrid-token">
               Real-Debrid API key{' '}
               <span className="optional-tag">optional · TV streams</span>

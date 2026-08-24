@@ -4,7 +4,6 @@
  * of added websites persists in localStorage.
  */
 
-import { clampQualityToDevice } from './deviceProfile'
 import { stableTorrentItemId } from './torrentCatalogStore'
 import { TorrentSyncCancelledError } from './torrentSyncControl'
 import { hasRealDebridToken } from './debridSettings'
@@ -13,7 +12,12 @@ import {
   isDebridHttpPlayUrl,
   TORRENTIO_TV_TRIAL,
 } from './torrentio'
-import { getViewingQuality } from './viewingQuality'
+import {
+  getConnectionDownlinkMbps,
+  getViewingQuality,
+  resolveRequestedQuality,
+  targetQualityForSpeed,
+} from './viewingQuality'
 import {
   isKidsSafeYtsMovie,
   isKidsShowsFeedUrl,
@@ -23,12 +27,52 @@ import {
   KIDS_SHOW_ALLOWLIST,
 } from './kidsCatalog'
 import type { StreamItem } from '../types'
+import {
+  isM2BoxSeriesFeedUrl,
+  isM2BoxUrl,
+  isM2BoxCatalogItem,
+  m2boxDefaultListPath,
+  m2boxFeedListPath,
+  m2boxFeedOrigin,
+  fetchM2BoxCatalogLinks,
+  fetchM2BoxEpisodeList,
+  m2boxListPageUrl,
+  m2boxSeriesFeedUrl,
+  normalizeM2BoxOrigin,
+  parseM2BoxListHtml,
+} from './m2box'
+import {
+  fetchNetMirrorCatalogLinks,
+  fetchNetMirrorEpisodeList,
+  isNetMirrorCatalogItem,
+  isNetMirrorSeriesFeedUrl,
+  isNetMirrorUrl,
+  netmirrorFeedOrigin,
+  netmirrorSeriesFeedUrl,
+  netmirrorTvListPageUrl,
+  parseNetMirrorListHtml,
+  NETMIRROR_CATALOG_ORIGIN,
+} from './netmirror'
+
+export { getConnectionDownlinkMbps, targetQualityForSpeed }
+export { isM2BoxUrl, isM2BoxCatalogItem } from './m2box'
+export { isNetMirrorUrl, isNetMirrorCatalogItem } from './netmirror'
+
+/** Series shelf web catalogs (M2Box + NetMirror) — not torrents / IPTV. */
+export function isSeriesWebCatalogItem(item: {
+  url?: string
+  detailUrl?: string
+}): boolean {
+  return isM2BoxCatalogItem(item) || isNetMirrorCatalogItem(item)
+}
 
 export interface TorrentSource {
   id: string
   label: string
   /** Web page URL that contains magnet or .torrent links */
   url: string
+  /** Synced titles stay in the catalog but are omitted from Movies/Series/Anime shelves */
+  hiddenFromShelves?: boolean
 }
 
 export interface TorrentResult {
@@ -52,9 +96,15 @@ export interface TorrentPageLink {
   torrentUri?: string
   /** Authoritative runtime in seconds when the listing API provides it (e.g. YTS). */
   runtimeSeconds?: number
+  /** M2Box AoneRoom subject id — avoids an extra detail fetch at play time. */
+  m2boxSubjectId?: string
+  /** NetMirror freemovies post / TMDB ids when known. */
+  netmirrorPostId?: string
+  netmirrorTmdbId?: string
 }
 
 const SOURCES_KEY = 'jiyu.torrent.sources'
+export const TORRENT_SOURCES_CHANGED = 'jiyu-torrent-sources-changed'
 const SUBSPLEASE_SOURCE: TorrentSource = {
   id: 'builtin-subsplease',
   label: 'subsplease.org',
@@ -64,6 +114,11 @@ const TORRENTFUNK_SOURCE: TorrentSource = {
   id: 'builtin-torrentfunk',
   label: 'torrentfunk.com',
   url: 'https://www.torrentfunk.com/television.html',
+}
+const NETMIRROR_SOURCE: TorrentSource = {
+  id: 'builtin-netmirror',
+  label: 'NetMirror · TV Series',
+  url: 'https://ww1.surf/netmirror/',
 }
 
 function labelSubsPleaseSource(source: TorrentSource): TorrentSource {
@@ -90,6 +145,15 @@ function labelTorrentFunkSource(source: TorrentSource): TorrentSource {
   }
 }
 
+function labelNetMirrorSource(source: TorrentSource): TorrentSource {
+  try {
+    if (!isNetMirrorUrl(source.url)) return source
+    return { ...source, label: source.label?.trim() || 'NetMirror · TV Series' }
+  } catch {
+    return source
+  }
+}
+
 function normalizeTorrentSourceList(parsed: unknown): TorrentSource[] {
   const sources: TorrentSource[] = Array.isArray(parsed)
     ? parsed.filter(
@@ -103,7 +167,12 @@ function normalizeTorrentSourceList(parsed: unknown): TorrentSource[] {
   if (!sources.some((source) => isTorrentFunkUrl(source.url))) {
     sources.push(TORRENTFUNK_SOURCE)
   }
-  return sources.map((source) => labelTorrentFunkSource(labelSubsPleaseSource(source)))
+  if (!sources.some((source) => isNetMirrorUrl(source.url))) {
+    sources.push(NETMIRROR_SOURCE)
+  }
+  return sources.map((source) =>
+    labelNetMirrorSource(labelTorrentFunkSource(labelSubsPleaseSource(source))),
+  )
 }
 
 function readTorrentSourcesLocal(): TorrentSource[] {
@@ -157,6 +226,23 @@ export function saveTorrentSources(sources: TorrentSource[]) {
     /* Chromium storage can be unavailable after profile corruption */
   }
   void window.signalDesktop?.torrentSourcesSave?.(next)
+  window.dispatchEvent(new CustomEvent(TORRENT_SOURCES_CHANGED))
+}
+
+/** Website sources whose synced titles are hidden from section shelves. */
+export function getHiddenTorrentSourceIds(): ReadonlySet<string> {
+  return new Set(loadTorrentSources().filter((s) => s.hiddenFromShelves).map((s) => s.id))
+}
+
+export function isHiddenFromShelves(item: Pick<StreamItem, 'torrentSourceId'>): boolean {
+  if (!item.torrentSourceId) return false
+  return getHiddenTorrentSourceIds().has(item.torrentSourceId)
+}
+
+export function filterShelfVisibleItems(items: StreamItem[]): StreamItem[] {
+  const hidden = getHiddenTorrentSourceIds()
+  if (hidden.size === 0) return items
+  return items.filter((item) => !item.torrentSourceId || !hidden.has(item.torrentSourceId))
 }
 
 export function isMagnetLink(text: string): boolean {
@@ -454,6 +540,11 @@ export const YTS_POPULAR_MIN_TITLES = 3000
 export const YTS_NEW_MAX_PAGES = 40
 /** Kids Movies — Family / Animation genre crawls (filtered under-13). */
 export const YTS_KIDS_MAX_PAGES = 30
+/**
+ * Pause between YTS API list pages during catalog sync.
+ * YTS does not publish a limit; Jackett uses 2.5s (2s caused problems).
+ */
+export const YTS_API_REQUEST_GAP_MS = 3000
 
 export type YtsSortBy = 'download_count' | 'date_added' | 'like_count' | 'rating' | 'seeds'
 
@@ -1380,6 +1471,130 @@ async function scrapeTorrentFunkCatalogFeed(
   }
 }
 
+async function scrapeM2BoxCatalogFeed(
+  pageUrl: string,
+  sourceLabel: string,
+): Promise<TorrentScrapeOutcome> {
+  const origin = m2boxFeedOrigin(pageUrl)
+  const listPath = m2boxFeedListPath(pageUrl)
+  const api = await fetchM2BoxCatalogLinks(origin, listPath)
+  let allLinks = api.links
+
+  // Fallback: first SSR page when the filter API is blocked (browser-only dev).
+  if (allLinks.length === 0) {
+    const listUrl = m2boxListPageUrl(origin, listPath, 1)
+    const { ok, content, error: fetchError } = await fetchText(listUrl)
+    if (ok) {
+      allLinks = parseM2BoxListHtml(content, origin).links
+    } else if (!api.error) {
+      return emptyOutcome(
+        pageUrl,
+        sourceLabel,
+        fetchError || api.error || 'could not load M2Box TV Series',
+      )
+    }
+  }
+
+  return {
+    results: [],
+    links: allLinks,
+    pageTitle: `${sourceLabel} · TV Series (${allLinks.length.toLocaleString()})`,
+    pageUrl,
+    nextPage: null,
+    prevPage: null,
+    searchTemplate: null,
+    error:
+      allLinks.length === 0
+        ? api.error ||
+          `${sourceLabel}: no TV series found on M2Box (page may require JavaScript)`
+        : null,
+  }
+}
+
+async function scrapeM2BoxPage(
+  pageUrl: string,
+  sourceLabel: string,
+): Promise<TorrentScrapeOutcome> {
+  if (isM2BoxSeriesFeedUrl(pageUrl)) {
+    return scrapeM2BoxCatalogFeed(pageUrl, sourceLabel)
+  }
+  let origin = 'https://m2box.org'
+  let listPath = '/web/tv-series'
+  try {
+    const u = new URL(pageUrl)
+    origin = u.origin
+    listPath = m2boxDefaultListPath(pageUrl)
+  } catch {
+    /* defaults */
+  }
+  const listUrl = m2boxListPageUrl(origin, listPath, 1)
+  const { ok, content, error: fetchError } = await fetchText(listUrl)
+  if (!ok) {
+    return emptyOutcome(pageUrl, sourceLabel, fetchError || 'could not load M2Box page')
+  }
+  const parsed = parseM2BoxListHtml(content, origin)
+  return {
+    results: [],
+    links: parsed.links,
+    pageTitle: parsed.pageTitle || sourceLabel,
+    pageUrl: listUrl,
+    nextPage: null,
+    prevPage: null,
+    searchTemplate: null,
+    error:
+      parsed.links.length === 0
+        ? `${sourceLabel}: no TV series found on M2Box`
+        : null,
+  }
+}
+
+async function scrapeNetMirrorCatalogFeed(
+  pageUrl: string,
+  sourceLabel: string,
+): Promise<TorrentScrapeOutcome> {
+  const origin = netmirrorFeedOrigin(pageUrl)
+  const api = await fetchNetMirrorCatalogLinks(origin)
+  let allLinks = api.links
+  if (allLinks.length === 0) {
+    const listUrl = netmirrorTvListPageUrl(origin, 1)
+    const { ok, content, error: fetchError } = await fetchText(listUrl)
+    if (ok && content) {
+      allLinks = parseNetMirrorListHtml(content)
+    } else if (!api.error) {
+      return emptyOutcome(
+        pageUrl,
+        sourceLabel,
+        fetchError || api.error || 'could not load NetMirror TV Series',
+      )
+    }
+  }
+
+  return {
+    results: [],
+    links: allLinks,
+    pageTitle: `${sourceLabel} · TV Series (${allLinks.length.toLocaleString()})`,
+    pageUrl,
+    nextPage: null,
+    prevPage: null,
+    searchTemplate: null,
+    error:
+      allLinks.length === 0
+        ? api.error || `${sourceLabel}: no TV series found on NetMirror`
+        : null,
+  }
+}
+
+async function scrapeNetMirrorPage(
+  pageUrl: string,
+  sourceLabel: string,
+): Promise<TorrentScrapeOutcome> {
+  if (isNetMirrorSeriesFeedUrl(pageUrl)) {
+    return scrapeNetMirrorCatalogFeed(pageUrl, sourceLabel)
+  }
+  // Wrapper / root URLs → TV Series category on freemovies.lol.
+  return scrapeNetMirrorCatalogFeed(netmirrorSeriesFeedUrl(NETMIRROR_CATALOG_ORIGIN), sourceLabel)
+}
+
 async function scrapeTorrentFunkPage(
   pageUrl: string,
   sourceLabel: string,
@@ -1663,6 +1878,7 @@ export function labelQuality(quality: number): string {
   if (quality >= 1440) return '1440p'
   if (quality >= 1080) return '1080p'
   if (quality >= 720) return '720p'
+  if (quality >= 480) return '480p'
   if (quality > 0) return `${quality}p`
   return 'best available'
 }
@@ -1700,22 +1916,6 @@ export function formatEpisodeListLabel(ep: {
     .replace(/\s+/g, ' ')
     .trim()
   return short.length > 48 ? `${short.slice(0, 45)}…` : short || ep.title
-}
-
-/** Effective downlink (Mbps) estimate from the browser, 0 if unknown. */
-export function getConnectionDownlinkMbps(): number {
-  const conn = (navigator as unknown as { connection?: { downlink?: number } }).connection
-  return typeof conn?.downlink === 'number' && conn.downlink > 0 ? conn.downlink : 0
-}
-
-/** Highest quality a connection can comfortably sustain. Prefer 720p first. */
-export function targetQualityForSpeed(downlinkMbps: number): number {
-  let network = 720
-  if (downlinkMbps <= 0) network = 720 // unknown → start at 720p
-  else if (downlinkMbps >= 25) network = 2160
-  else if (downlinkMbps >= 12) network = 1080
-  // Device profile caps Auto so weak machines don't attempt 4K remux.
-  return clampQualityToDevice(network)
 }
 
 export interface BestStreamPick {
@@ -2000,10 +2200,12 @@ export function buildEpisodeChoices(
   return episodes
 }
 
-/** Series / anime / Kids Shows torrent cards open an episode list before playback. */
+/** Series / anime / Kids Shows / M2Box / NetMirror cards open an episode list before playback. */
 export function isShowBrowseItem(
-  item: Pick<StreamItem, 'category' | 'transport' | 'sourceKind' | 'tags'>,
+  item: Pick<StreamItem, 'category' | 'transport' | 'sourceKind' | 'tags' | 'url' | 'detailUrl'>,
 ): boolean {
+  if (isM2BoxCatalogItem(item)) return true
+  if (isNetMirrorCatalogItem(item)) return true
   if (!(item.transport === 'torrent' || item.sourceKind === 'torrent')) return false
   if (item.category === 'series' || item.category === 'anime') return true
   if (item.category === 'kids') {
@@ -2092,11 +2294,60 @@ function eztvOriginForItem(item: StreamItem): string | null {
 export async function resolveShowEpisodes(
   item: StreamItem,
   catalog: StreamItem[],
-): Promise<{ episodes: EpisodeChoice[]; error?: string }> {
+): Promise<{
+  episodes: EpisodeChoice[]
+  error?: string
+  description?: string
+  netmirrorPostId?: string
+  netmirrorTmdbId?: string
+  m2boxSubjectId?: string
+}> {
+  if (isM2BoxCatalogItem(item)) {
+    const detail = item.detailUrl || item.url
+    const result = await fetchM2BoxEpisodeList(detail, item.m2boxSubjectId)
+    if (result.episodes.length === 0) {
+      return { episodes: [], error: result.error || 'No episodes found on M2Box.' }
+    }
+    return {
+      episodes: result.episodes.map((ep) => ({
+        key: ep.key,
+        title: ep.title,
+        torrentUri: '',
+        quality: 0,
+      })),
+      error: result.error,
+      description: result.description,
+      m2boxSubjectId: result.subjectId || undefined,
+    }
+  }
+
+  if (isNetMirrorCatalogItem(item)) {
+    const detail = item.detailUrl || item.url
+    const result = await fetchNetMirrorEpisodeList(detail, {
+      postId: item.netmirrorPostId,
+      tmdbId: item.netmirrorTmdbId,
+    })
+    if (result.episodes.length === 0) {
+      return { episodes: [], error: result.error || 'No episodes found on NetMirror.' }
+    }
+    return {
+      episodes: result.episodes.map((ep) => ({
+        key: ep.key,
+        title: ep.title,
+        torrentUri: '',
+        quality: 0,
+      })),
+      error: result.error,
+      description: result.description,
+      netmirrorPostId: result.postId || undefined,
+      netmirrorTmdbId: result.tmdbId || undefined,
+    }
+  }
+
   const preference = getViewingQuality()
   const downlink = getConnectionDownlinkMbps()
-  // Auto still prefers 720p first (anime + series); explicit prefs win.
-  const requestedQuality = preference === 'auto' ? 720 : preference
+  // Auto follows internet speed (480p when slow); explicit prefs win.
+  const requestedQuality = resolveRequestedQuality(preference, downlink)
   const sourceLabel = item.source || 'torrent'
 
   const detail = item.detailUrl || item.url
@@ -2486,6 +2737,8 @@ export function isSeriesAiringItem(item: StreamItem): boolean {
 
 export function isSeriesFullShowItem(item: StreamItem): boolean {
   if (item.category !== 'series') return false
+  // Web catalog series (M2Box / NetMirror) belong on the Full Shows shelf.
+  if (isSeriesWebCatalogItem(item)) return true
   if (itemHasShelfTag(item, ANIME_SHELF_FULL_SHOWS)) return true
   // Trending-only rows stay on the Trending tab until the ALL catalogue tags them.
   if (itemHasShelfTag(item, SERIES_SHELF_TRENDING)) return false
@@ -2522,17 +2775,23 @@ function subsPleaseShowSlug(show: string): string {
 
 function pickSubsPleaseDownload(
   downloads: SubsPleaseDownload[] | undefined,
+  preferredQuality?: number,
 ): SubsPleaseDownload | null {
   const list = (downloads ?? []).filter((d) => /^magnet:\?/i.test(d.magnet))
   if (list.length === 0) return null
-  const rank = (res: string) => {
-    const n = Number(res) || 0
-    if (n === 720) return 3
-    if (n === 1080) return 2
-    if (n === 480) return 1
-    return 0
-  }
-  return [...list].sort((a, b) => rank(b.res) - rank(a.res))[0] ?? null
+  const target =
+    preferredQuality && preferredQuality > 0
+      ? preferredQuality
+      : resolveRequestedQuality()
+  const scored = list.map((d) => {
+    const quality = Number(d.res) || 0
+    const over = quality > target ? quality - target : 0
+    const under = quality > 0 && quality <= target ? target - quality : 9999
+    // Prefer at-or-below target, closest first; then smallest overshoot.
+    return { d, over, under, quality }
+  })
+  scored.sort((a, b) => a.over - b.over || a.under - b.under || b.quality - a.quality)
+  return scored[0]?.d ?? null
 }
 
 interface SubsPleaseDownload {
@@ -2607,7 +2866,7 @@ async function scrapeSubsPleaseLatest(
     const episode = String(release.episode || '').trim()
     const dedupe = `${release.show.toLowerCase()}\0${episode.toLowerCase()}`
     if (seen.has(dedupe)) return
-    const download = pickSubsPleaseDownload(release.downloads)
+    const download = pickSubsPleaseDownload(release.downloads, resolveRequestedQuality())
     if (!download) return
     seen.add(dedupe)
     const slug =
@@ -4184,6 +4443,14 @@ export async function scrapePage(
   if (isTorrentFunkUrl(pageUrl)) {
     return scrapeTorrentFunkPage(pageUrl, sourceLabel)
   }
+  // M2Box: Nuxt SSR TV catalog — Web Browser / native play path.
+  if (isM2BoxUrl(pageUrl)) {
+    return scrapeM2BoxPage(pageUrl, sourceLabel)
+  }
+  // NetMirror / freemovies.lol TV Series — ShowPage + Web Browser player.
+  if (isNetMirrorUrl(pageUrl)) {
+    return scrapeNetMirrorPage(pageUrl, sourceLabel)
+  }
   const { ok, content, error: fetchError } = await fetchText(pageUrl)
   if (!ok) {
     return {
@@ -4230,6 +4497,14 @@ export function scrapeWebsite(source: TorrentSource): Promise<TorrentScrapeOutco
   if (isTorrentFunkUrl(source.url)) {
     const origin = normalizeTorrentFunkOrigin(source.url)
     return scrapePage(torrentFunkListingPageUrl(origin, 'series', 1), source.label)
+  }
+  if (isM2BoxUrl(source.url)) {
+    const origin = normalizeM2BoxOrigin(source.url)
+    const listPath = m2boxDefaultListPath(source.url)
+    return scrapePage(m2boxSeriesFeedUrl(origin, listPath), source.label)
+  }
+  if (isNetMirrorUrl(source.url)) {
+    return scrapePage(netmirrorSeriesFeedUrl(NETMIRROR_CATALOG_ORIGIN), source.label)
   }
   return scrapePage(source.url, source.label)
 }
@@ -4360,6 +4635,28 @@ export function catalogFeedsForSource(source: TorrentSource): CatalogFeed[] {
         },
       ]
     }
+    if (isM2BoxUrl(source.url)) {
+      const m2Origin = normalizeM2BoxOrigin(source.url)
+      const listPath = m2boxDefaultListPath(source.url)
+      return [
+        {
+          url: m2boxSeriesFeedUrl(m2Origin, listPath),
+          category: 'series',
+          maxPages: 1,
+          shelfTag: ANIME_SHELF_FULL_SHOWS,
+        },
+      ]
+    }
+    if (isNetMirrorUrl(source.url)) {
+      return [
+        {
+          url: netmirrorSeriesFeedUrl(NETMIRROR_CATALOG_ORIGIN),
+          category: 'series',
+          maxPages: 1,
+          shelfTag: ANIME_SHELF_FULL_SHOWS,
+        },
+      ]
+    }
   } catch {
     /* fall through */
   }
@@ -4381,22 +4678,28 @@ export function linkToCatalogItem(
     shelfTag === KIDS_SHELF_SHOWS ||
     link.category === 'kids'
 
+  const m2boxItem = isM2BoxUrl(source.url) || isM2BoxUrl(link.url)
+  const netmirrorItem = isNetMirrorUrl(source.url) || isNetMirrorUrl(link.url)
+  const webCatalogItem = m2boxItem || netmirrorItem
+
   // EZTV is exclusively episodic television. Force its entries into TV
   // Series even if generic URL/title inference would choose another shelf.
   // YTS / YIFY is movies-only — every title belongs on the Movies shelf.
   const category = kidsFeed
     ? 'kids'
-    : isEztvSource(source.url, source.label)
-      ? 'series'
-      : isSubsPleaseUrl(source.url)
-        ? 'anime'
-        : isYtsSource(source.url, source.label)
-          ? 'movies'
-          : isTorrentFunkUrl(source.url)
-            ? (link.category ?? fallbackCategory ?? 'series')
-            : link.category ??
-              fallbackCategory ??
-              inferTorrentCategory(link.url, link.title, link.summary)
+    : webCatalogItem
+      ? (link.category ?? fallbackCategory ?? 'series')
+      : isEztvSource(source.url, source.label)
+        ? 'series'
+        : isSubsPleaseUrl(source.url)
+          ? 'anime'
+          : isYtsSource(source.url, source.label)
+            ? 'movies'
+            : isTorrentFunkUrl(source.url)
+              ? (link.category ?? fallbackCategory ?? 'series')
+              : link.category ??
+                fallbackCategory ??
+                inferTorrentCategory(link.url, link.title, link.summary)
   const tags = [category]
   if (shelfTag && !tags.includes(shelfTag)) tags.push(shelfTag)
   // New-release magnets still keep the show page for full episode lists.
@@ -4415,12 +4718,15 @@ export function linkToCatalogItem(
     // Category (+ optional shelf) — never put origin hostnames in shelf-facing fields.
     tags,
     source: 'Web catalog',
-    sourceKind: 'torrent',
-    transport: 'torrent',
-    torrentUri: link.torrentUri,
-    detailUrl: link.torrentUri ? showPage : link.url,
+    sourceKind: webCatalogItem ? undefined : 'torrent',
+    transport: webCatalogItem ? 'direct' : 'torrent',
+    torrentUri: webCatalogItem ? undefined : link.torrentUri,
+    detailUrl: webCatalogItem ? link.url : link.torrentUri ? showPage : link.url,
     releasedAt: link.releasedAt,
     runtimeSeconds: link.runtimeSeconds,
     torrentSourceId: source.id,
+    m2boxSubjectId: link.m2boxSubjectId,
+    netmirrorPostId: link.netmirrorPostId,
+    netmirrorTmdbId: link.netmirrorTmdbId,
   }
 }

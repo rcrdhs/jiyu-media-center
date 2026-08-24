@@ -27,7 +27,7 @@ export function LocalYoutubeLiveNow() {
   }, [])
 
   if (checking) {
-    return <p className="fine-print local-youtube-status">Checking CVM &amp; Nationwide live status…</p>
+    return <p className="fine-print local-youtube-status">Checking YouTube live (TNT Sports, CVM, Nationwide)…</p>
   }
 
   if (live.length === 0) return null

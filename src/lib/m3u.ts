@@ -68,8 +68,12 @@ export function parseM3U(content: string, options: ParseM3UOptions = {}): Stream
     chno?: string
     language?: string
     tvgId?: string
+    httpUserAgent?: string
+    httpReferrer?: string
   } | null = null
   let extGroup = ''
+  let pendingVlcUserAgent = ''
+  let pendingVlcReferrer = ''
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim()
@@ -79,6 +83,24 @@ export function parseM3U(content: string, options: ParseM3UOptions = {}): Stream
     if (line.startsWith('#EXTGRP:')) {
       extGroup = line.slice('#EXTGRP:'.length).trim()
       if (pending && !pending.group) pending.group = extGroup
+      continue
+    }
+
+    if (line.startsWith('#EXTVLCOPT:')) {
+      const opt = line.slice('#EXTVLCOPT:'.length).trim()
+      const eq = opt.indexOf('=')
+      if (eq > 0) {
+        const key = opt.slice(0, eq).trim().toLowerCase()
+        const value = opt.slice(eq + 1).trim()
+        if (key === 'http-user-agent' && value) {
+          if (pending) pending.httpUserAgent = value
+          else pendingVlcUserAgent = value
+        }
+        if ((key === 'http-referrer' || key === 'http-referer') && value) {
+          if (pending) pending.httpReferrer = value
+          else pendingVlcReferrer = value
+        }
+      }
       continue
     }
 
@@ -95,7 +117,15 @@ export function parseM3U(content: string, options: ParseM3UOptions = {}): Stream
         chno: attr(meta, 'tvg-chno') ?? attr(meta, 'channel-number'),
         language: attr(meta, 'tvg-language') ?? attr(meta, 'language'),
         tvgId: attr(meta, 'tvg-id'),
+        httpUserAgent: attr(meta, 'http-user-agent') || pendingVlcUserAgent || undefined,
+        httpReferrer:
+          attr(meta, 'http-referrer') ||
+          attr(meta, 'http-referer') ||
+          pendingVlcReferrer ||
+          undefined,
       }
+      pendingVlcUserAgent = ''
+      pendingVlcReferrer = ''
       continue
     }
 
@@ -129,6 +159,8 @@ export function parseM3U(content: string, options: ParseM3UOptions = {}): Stream
       transport: 'direct',
       language: language || undefined,
       tvgId: pending?.tvgId || undefined,
+      httpUserAgent: pending?.httpUserAgent,
+      httpReferrer: pending?.httpReferrer,
     })
     pending = null
   }

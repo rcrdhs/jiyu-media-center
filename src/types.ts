@@ -47,10 +47,20 @@ export interface StreamItem {
   releasedAt?: number
   /** Originating torrent-website source id */
   torrentSourceId?: string
+  /** M2Box AoneRoom subject id for native play resolution */
+  m2boxSubjectId?: string
+  /** NetMirror / freemovies.lol WordPress post id for player_tv URLs */
+  netmirrorPostId?: string
+  /** NetMirror TMDB TV id (embed + episode list) */
+  netmirrorTmdbId?: string
   /** From tvg-language / similar IPTV attrs when present */
   language?: string
   /** From tvg-id — used to match XMLTV EPG channels */
   tvgId?: string
+  /** M3U http-user-agent / #EXTVLCOPT — applied in Electron for HLS */
+  httpUserAgent?: string
+  /** M3U http-referrer / #EXTVLCOPT — applied in Electron for HLS */
+  httpReferrer?: string
   /** Ordered files from a multi-video torrent (series or movie collection). */
   playlist?: StreamPlaylistItem[]
   /** WebVTT (or convertible) subtitle track for the active torrent video */
@@ -148,6 +158,11 @@ declare global {
         entries: Array<{ id: string; url: string }>,
         timeoutMs?: number,
       ) => Promise<Array<{ id: string } & StreamProbeResult>>
+      setPlaybackHeaders?: (options: {
+        url: string
+        userAgent?: string
+        referrer?: string
+      }) => Promise<{ ok: boolean; cleared?: boolean }>
       resolveVimeoLiveHls?: (
         input: string,
       ) => Promise<{ ok: boolean; url?: string; title?: string; error?: string }>
@@ -242,6 +257,12 @@ declare global {
         deviceClass?: string
       }) => Promise<{ ok: boolean }>
       fetchHtml?: (url: string) => Promise<PlaylistFetchResult>
+      fetchJsonPost?: (
+        url: string,
+        body: Record<string, unknown>,
+        referer?: string,
+      ) => Promise<PlaylistFetchResult>
+      fetchJsonGet?: (url: string, referer?: string) => Promise<PlaylistFetchResult>
       /** Close the Cloudflare Chrome helper (after Show List sync). */
       closeCfBrowser?: (options?: { soon?: boolean; reason?: string }) => Promise<{ ok: boolean }>
       torrentStream?: (

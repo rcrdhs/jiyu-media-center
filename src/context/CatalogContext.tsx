@@ -33,7 +33,17 @@ import {
 import { appendActivity } from '../lib/activityLog'
 import { maskActivityMessage } from '../lib/sourceMask'
 import { listTorrentCatalog, loadTorrentCatalogMeta } from '../lib/torrentCatalogStore'
-import { isEztvSource, isSubsPleaseUrl, isYtsSource, loadTorrentSources } from '../lib/torrents'
+import {
+  filterShelfVisibleItems,
+  isEztvSource,
+  isM2BoxUrl,
+  isNetMirrorUrl,
+  isSeriesWebCatalogItem,
+  isSubsPleaseUrl,
+  isYtsSource,
+  loadTorrentSources,
+  TORRENT_SOURCES_CHANGED,
+} from '../lib/torrents'
 import {
   TORRENT_SCRAPER_VERSION,
   syncAllTorrentSources,
@@ -110,6 +120,13 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
   const [englishOnly, setEnglishOnlyState] = useState(() => getEnglishOnlyPref())
   const [hideDuplicates, setHideDuplicatesState] = useState(() => getHideDuplicatesPref())
   const [kidsMode, setKidsMode] = useState(isKidsModeEnabled)
+  const [torrentSourceRevision, setTorrentSourceRevision] = useState(0)
+
+  useEffect(() => {
+    const bump = () => setTorrentSourceRevision((n) => n + 1)
+    window.addEventListener(TORRENT_SOURCES_CHANGED, bump)
+    return () => window.removeEventListener(TORRENT_SOURCES_CHANGED, bump)
+  }, [])
 
   const setEnglishOnly = useCallback((value: boolean) => {
     setEnglishOnlyPref(value)
@@ -249,11 +266,15 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
 
   const byCategory = useCallback(
     (id: CategoryId) => {
-      const base = items.filter((item) => item.category === id)
+      void torrentSourceRevision
+      let base = items.filter((item) => item.category === id)
+      base = filterShelfVisibleItems(base)
+      // TV Series shelf: M2Box + NetMirror web catalogs (no IPTV / EZTV / torrents).
+      if (id === 'series') base = base.filter(isSeriesWebCatalogItem)
       if (!englishOnly || !shouldApplyEnglishFilter(id)) return base
       return base.filter(isLikelyEnglish)
     },
-    [items, englishOnly],
+    [items, englishOnly, torrentSourceRevision],
   )
 
   const getById = useCallback(
@@ -472,7 +493,23 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
     if (websites.length === 0) return
     const meta = loadTorrentCatalogMeta()
     const versionStale = meta.scraperVersion !== TORRENT_SCRAPER_VERSION
-    if (torrentItems.length === 0 || versionStale) {
+    if (torrentItems.length === 0) {
+      void syncAllTorrentWebsites()
+      return
+    }
+    if (versionStale) {
+      // Scraper v38 — NetMirror full TV Series (146 pages); skip EZTV/YTS/etc.
+      const seriesWeb = websites.filter(
+        (source) => isM2BoxUrl(source.url) || isNetMirrorUrl(source.url),
+      )
+      if (seriesWeb.length > 0) {
+        void (async () => {
+          for (const source of seriesWeb) {
+            await syncTorrentWebsite(source.id)
+          }
+        })()
+        return
+      }
       void syncAllTorrentWebsites()
       return
     }

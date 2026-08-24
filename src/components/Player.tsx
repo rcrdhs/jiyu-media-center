@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import Hls from 'hls.js'
 import mpegts from 'mpegts.js'
 import { useEpg } from '../context/EpgContext'
@@ -33,12 +34,25 @@ import {
   cleanShowDisplayTitle,
   fetchYtsRuntimeSeconds,
   isDebridHttpPlayUrl,
+  isM2BoxCatalogItem,
   parseEpisodeKey,
   torrentUrisForEpisodeWithTorrentio,
   type EpisodeChoice,
 } from '../lib/torrents'
+import { resolveM2BoxPlay } from '../lib/m2box'
 import { TORRENTIO_TV_TRIAL } from '../lib/torrentio'
-import { getViewingQuality, viewingQualityLabel } from '../lib/viewingQuality'
+import {
+  getViewingQuality,
+  resolveRequestedQuality,
+  viewingQualityLabel,
+} from '../lib/viewingQuality'
+import {
+  clearWatchNext,
+  getWatchNext,
+  subscribeWatchNext,
+  takeWatchNext,
+  type WatchNextEntry,
+} from '../lib/watchNext'
 import type { StreamItem, StreamPlaylistItem, TorrentStreamResult } from '../types'
 
 /** Remux pipe (`/stream.mp4`) is not byte-seekable — resume via ffmpeg `-ss` query. */
@@ -148,6 +162,9 @@ type Engine = 'hls' | 'ts' | 'native'
 
 const VOLUME_KEY = 'jiyu.player.volume'
 const MUTE_KEY = 'jiyu.player.muted'
+/** In-app volume ceiling (native <video> max). OS mixer still applies on top. */
+const VOLUME_MAX = 1
+const VOLUME_STEP = 0.05
 const CHROME_IDLE_MS = 2800
 /** Failed torrent loads on one episode before auto-skipping to the next. */
 const EPISODE_FAILS_BEFORE_SKIP = 3
@@ -186,6 +203,10 @@ function pickEngines(url: string): Engine[] {
   if (isDebridHttpPlayUrl(url) && !hls && !ts) {
     return ['native']
   }
+  // Signed progressive MP4 (e.g. M2Box CDN) — skip HLS/TS probes.
+  if (/\.mp4(\?|#|$)/i.test(url) && !hls && !ts) {
+    return ['native']
+  }
 
   if (hls) engines.push('hls')
   if (ts) engines.push('ts')
@@ -211,10 +232,16 @@ function loadSavedVolume(): number {
     const raw = localStorage.getItem(VOLUME_KEY)
     if (raw == null) return 1
     const n = Number(raw)
-    return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 1
+    // Older builds could store >1 for soft-boost — clamp to native max.
+    return Number.isFinite(n) ? Math.min(VOLUME_MAX, Math.max(0, n)) : 1
   } catch {
     return 1
   }
+}
+
+function formatVolumeLabel(level: number, isMuted: boolean): string {
+  if (isMuted) return 'Muted'
+  return `Volume ${Math.round(level * 100)}%`
 }
 
 function loadSavedMuted(): boolean {
@@ -225,6 +252,12 @@ function loadSavedMuted(): boolean {
   }
 }
 
+/**
+ * Bump when audio-path logic changes so Fast Refresh remounts <video>
+ * even if React state is preserved (unsticks stolen-element silence).
+ */
+const AUDIO_PIPELINE_REV = 10
+
 export function Player({
   item,
   onClose,
@@ -233,8 +266,21 @@ export function Player({
   layout = 'full',
   isPrimary = true,
 }: PlayerProps) {
+  const navigate = useNavigate()
   const videoRef = useRef<HTMLVideoElement>(null)
   const shellRef = useRef<HTMLDivElement>(null)
+  const [watchNext, setWatchNextState] = useState<WatchNextEntry | null>(() => getWatchNext())
+  const watchNextRef = useRef<WatchNextEntry | null>(watchNext)
+  watchNextRef.current = watchNext
+
+  useEffect(() => subscribeWatchNext(setWatchNextState), [])
+
+  // Playing the queued title now — drop it from Up next.
+  useEffect(() => {
+    const queued = getWatchNext()
+    if (queued && queued.id === item.id) clearWatchNext()
+  }, [item.id])
+
   const [error, setError] = useState<string | null>(null)
   const [status, setStatus] = useState('Connecting…')
   const [engineLabel, setEngineLabel] = useState('')
@@ -258,6 +304,10 @@ export function Player({
   const [subtitleCues, setSubtitleCues] = useState<SubtitleCue[]>([])
   const [subtitleLine, setSubtitleLine] = useState('')
   const [subsStatus, setSubsStatus] = useState<'idle' | 'loading' | 'ready' | 'missing'>('idle')
+  /** Bump to re-fetch / force sidecar .srt extract (Subs button). */
+  const [subsFetchTick, setSubsFetchTick] = useState(0)
+  const subsEnabledRef = useRef(true)
+  subsEnabledRef.current = subsEnabled
   /** Positive = delay subs (later); negative = show earlier. Fixes out-of-sync softsubs. */
   const [subtitleDelaySec, setSubtitleDelaySec] = useState(0)
   const subtitleDelayRef = useRef(0)
@@ -351,7 +401,8 @@ export function Player({
     : (activePlaylistItem.subtitleKind ?? item.subtitleKind)
   // Companion files and embedded softsubs both get a Subs control once we have a URL.
   const showSubsLoading = subsStatus === 'loading' && Boolean(subtitleUrl)
-  const showSubsControls = Boolean(subtitleUrl) && subsStatus !== 'missing'
+  const showSubsControls = Boolean(subtitleUrl)
+  const videoMountKey = `v${AUDIO_PIPELINE_REV}-${item.id}-${activePlaylistItem.url ?? ''}`
 
   // Only re-bootstrap the episode list when a new play session starts.
   // Do not depend on runtimeSeconds — that used to snap Next back to episode 1.
@@ -633,6 +684,7 @@ export function Player({
     if (isTile) return
     const video = videoRef.current
     if (!video) return
+    try {
     tickWatchClock(video)
     const reportedDuration =
       Number.isFinite(video.duration) && video.duration !== Infinity && video.duration > 0
@@ -740,6 +792,9 @@ export function Player({
       },
       { allowUnknownDuration: true, playbackUrl },
     )
+    } catch (err) {
+      console.warn('Continue watching progress save failed:', err)
+    }
   }
 
   function restartEpisode() {
@@ -859,27 +914,30 @@ export function Player({
 
   useEffect(() => {
     let cancelled = false
-    setSubtitleCues([])
-    setSubtitleLine('')
+    // Keep existing cues visible during a manual re-fetch so toggle doesn't blank the screen.
+    if (subsFetchTick === 0 || subtitleCues.length === 0) {
+      setSubtitleCues([])
+      setSubtitleLine('')
+    }
 
     if (!subtitleUrl) {
       setSubsStatus('idle')
       return
     }
 
-    setSubsStatus('loading')
+    setSubsStatus((prev) => (prev === 'ready' && subtitleCues.length > 0 ? prev : 'loading'))
     const startedAt = Date.now()
     // Keep refreshing for a long time — progressive extract fills cues as the
     // torrent downloads; stopping early makes subs vanish mid-episode.
     const maxWaitMs = 3 * 60 * 60 * 1000
     let latestCount = 0
     let lastCueEnd = 0
+    const sidecar = subtitleKind === 'file'
 
     async function loadSubtitles() {
-      // Wait for remux to claim the swarm first — early sub polls used to restart
-      // ffmpeg extract on every 404 and starve slow SubsPlease peers.
+      // Companion .srt: poll immediately. Embedded: wait for remux to claim the swarm.
       const remux = isRemuxPlaybackUrl(activePlaylistItem.url || item.url || '')
-      const gateMs = remux ? 20_000 : 800
+      const gateMs = sidecar ? 200 : remux ? 20_000 : 800
       const gateDeadline = Date.now() + gateMs
       while (!cancelled && Date.now() < gateDeadline) {
         const video = videoRef.current
@@ -890,15 +948,17 @@ export function Player({
         ) {
           break
         }
-        await new Promise((resolve) => window.setTimeout(resolve, 400))
+        await new Promise((resolve) => window.setTimeout(resolve, 200))
       }
       if (cancelled) return
 
+      let forceOnce = subsFetchTick > 0
       while (!cancelled && Date.now() - startedAt < maxWaitMs) {
         try {
-          const response = await fetch(
-            `${subtitleUrl}${subtitleUrl!.includes('?') ? '&' : '?'}t=${Date.now()}`,
-          )
+          const sep = subtitleUrl!.includes('?') ? '&' : '?'
+          const force = forceOnce ? '&force=1' : ''
+          forceOnce = false
+          const response = await fetch(`${subtitleUrl}${sep}t=${Date.now()}${force}`)
           if (response.ok) {
             const text = await response.text()
             const cues = parseSubtitleCues(text)
@@ -912,6 +972,7 @@ export function Player({
                 }
               } else if (cues.length > 0 && latestCount === 0) {
                 latestCount = cues.length
+                lastCueEnd = cues.reduce((max, cue) => Math.max(max, cue.end), 0)
                 if (!cancelled) {
                   setSubtitleCues(cues)
                   setSubsStatus('ready')
@@ -923,7 +984,15 @@ export function Player({
             const mediaDuration = Number(videoRef.current?.duration) || 0
             // Cues ending well before the title runtime means extract stalled mid-file.
             const cuesLookShort =
-              mediaDuration > 120 && lastCueEnd > 0 && lastCueEnd < mediaDuration * 0.85
+              !sidecar &&
+              mediaDuration > 120 &&
+              lastCueEnd > 0 &&
+              lastCueEnd < mediaDuration * 0.85
+
+            // Sidecar files are complete once we have cues + done (or any cues).
+            if (sidecar && latestCount > 0 && (extractDone || latestCount > 20)) {
+              break
+            }
 
             // Only stop polling once extract is finished AND we're not about to run past
             // the last cue (progressive jobs sometimes flip "done" too early).
@@ -953,8 +1022,8 @@ export function Player({
               break
             }
             if (/not ready|timed out|read failed|could not read/i.test(message)) {
-              // Slow poll while remux owns the swarm.
-              await new Promise((resolve) => window.setTimeout(resolve, 5000))
+              // Sidecar: retry quickly so the Subs button can surface the .srt.
+              await new Promise((resolve) => window.setTimeout(resolve, sidecar ? 800 : 5000))
               continue
             }
           }
@@ -963,7 +1032,7 @@ export function Player({
         }
         // Keep polling even after "done" if cues look short for a long title —
         // progressive extract often resumes after an early EOF.
-        await new Promise((resolve) => window.setTimeout(resolve, 2000))
+        await new Promise((resolve) => window.setTimeout(resolve, sidecar ? 700 : 2000))
       }
       if (!cancelled && latestCount === 0) setSubsStatus('missing')
     }
@@ -972,7 +1041,8 @@ export function Player({
     return () => {
       cancelled = true
     }
-  }, [subtitleUrl, playlistIndex])
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- subtitleCues only used to avoid blanking on manual refetch
+  }, [subtitleUrl, subtitleKind, playlistIndex, subsFetchTick])
 
   useEffect(() => {
     // Each episode/release can have its own sync; don't carry delay across titles.
@@ -985,12 +1055,13 @@ export function Player({
     if (!video) return
 
     const syncCue = () => {
-      if (!subsEnabled || subtitleCues.length === 0) {
+      if (!subsEnabledRef.current || subtitleCues.length === 0) {
         setSubtitleLine('')
         return
       }
       // Remux resume uses ffmpeg -ss, so video.currentTime is relative — add offset.
       // Subtract delay so positive delay pushes cues later (VLC-style).
+      // absolutePlayhead tracks the title clock so cues stay locked to audio.
       setSubtitleLine(
         activeSubtitleText(
           subtitleCues,
@@ -999,12 +1070,37 @@ export function Player({
       )
     }
 
+    let raf = 0
+    const tick = () => {
+      syncCue()
+      if (!video.paused && !video.ended) {
+        raf = window.requestAnimationFrame(tick)
+      }
+    }
+
+    const onPlay = () => {
+      window.cancelAnimationFrame(raf)
+      raf = window.requestAnimationFrame(tick)
+    }
+    const onPause = () => {
+      window.cancelAnimationFrame(raf)
+      syncCue()
+    }
+
     syncCue()
-    video.addEventListener('timeupdate', syncCue)
+    if (!video.paused) raf = window.requestAnimationFrame(tick)
+    video.addEventListener('play', onPlay)
+    video.addEventListener('playing', onPlay)
+    video.addEventListener('pause', onPause)
     video.addEventListener('seeked', syncCue)
+    video.addEventListener('timeupdate', syncCue)
     return () => {
-      video.removeEventListener('timeupdate', syncCue)
+      window.cancelAnimationFrame(raf)
+      video.removeEventListener('play', onPlay)
+      video.removeEventListener('playing', onPlay)
+      video.removeEventListener('pause', onPause)
       video.removeEventListener('seeked', syncCue)
+      video.removeEventListener('timeupdate', syncCue)
     }
   }, [
     subtitleCues,
@@ -1013,11 +1109,29 @@ export function Player({
     playlistIndex,
     timelineOffset,
     subtitleDelaySec,
+    videoMountKey,
   ])
 
   function toggleSubtitles() {
-    setSubsEnabled((on) => !on)
     bumpChrome()
+    // Not ready yet — kick a forced .srt fetch and leave subs enabled for when they arrive.
+    if (subsStatus === 'loading' || subsStatus === 'idle' || subsStatus === 'missing') {
+      if (!subtitleUrl) {
+        flash('No subtitles on this release')
+        return
+      }
+      setSubsEnabled(true)
+      setSubsStatus('loading')
+      setSubsFetchTick((n) => n + 1)
+      flash(subsStatus === 'missing' ? 'Retrying subtitles…' : 'Fetching subtitles…')
+      return
+    }
+    // Ready — real on/off toggle.
+    setSubsEnabled((on) => {
+      const next = !on
+      flash(next ? 'Subtitles on' : 'Subtitles off')
+      return next
+    })
   }
 
   function nudgeSubtitleDelay(delta: number) {
@@ -1056,6 +1170,12 @@ export function Player({
         !entry.url ||
         !/^https?:\/\//i.test(entry.url) ||
         isEphemeralLocalStreamUrl(entry.url))
+    const needsM2Box =
+      isM2BoxCatalogItem(item) &&
+      (options?.force ||
+        !entry.url ||
+        !/^https?:\/\//i.test(entry.url) ||
+        /hakunaymatata\.com|aoneroom\.com/i.test(entry.url))
 
     // Show the target episode in chrome immediately.
     setLoadingPlaylistIndex(index)
@@ -1126,7 +1246,49 @@ export function Player({
       setStatus(message)
     }
 
-    if (needsTorrent) {
+    if (needsM2Box) {
+      setEpisodeLoading(true)
+      setMediaReady(false)
+      setStatus('Loading episode…')
+      setError(null)
+      try {
+        const seMatch = /^S(\d{1,2})E(\d{1,3})$/i.exec(episodeKey)
+        const season = seMatch ? Number(seMatch[1]) : 1
+        const episode = seMatch ? Number(seMatch[2]) : index + 1
+        const resolved = await resolveM2BoxPlay(item.detailUrl || item.url, {
+          subjectId: item.m2boxSubjectId,
+          season,
+          episode,
+        })
+        if (episodeFailGenRef.current !== failGen) return
+        if (!resolved.ok || !resolved.url) {
+          failOnEpisode(resolved.ok === false ? resolved.error : 'Could not resolve M2Box stream')
+          return
+        }
+        if (window.signalDesktop?.setPlaybackHeaders) {
+          void window.signalDesktop.setPlaybackHeaders({
+            url: resolved.url,
+            referrer: resolved.referer,
+          })
+        }
+        setLocalPlaylist((prev) => {
+          const base = prev ?? item.playlist ?? []
+          return base.map((row, i) =>
+            i === index
+              ? {
+                  ...row,
+                  url: resolved.url,
+                  episodeKey: row.episodeKey || episodeKey || undefined,
+                }
+              : row,
+          )
+        })
+        setEpisodeLoading(false)
+      } catch (err) {
+        failOnEpisode(err instanceof Error ? err.message : 'Could not load M2Box episode')
+        return
+      }
+    } else if (needsTorrent) {
       if (!window.signalDesktop?.torrentStream) {
         failOnEpisode('Playback needs the Jiyu desktop app.')
         return
@@ -1341,39 +1503,50 @@ export function Player({
     hintTimer.current = window.setTimeout(() => setHint(null), 900)
   }
 
-  function applyVolume(next: number, options?: { unmute?: boolean }) {
+  /** Native element volume 0–100%. Loudness is app volume × OS mixer. */
+  function applyVolumeToElement(
+    level: number,
+    isMuted: boolean,
+    primaryAudio: boolean = isPrimary,
+  ) {
     const video = videoRef.current
-    const clamped = Math.min(1, Math.max(0, next))
+    if (!video) return
+    video.volume = Math.min(VOLUME_MAX, Math.max(0, level))
+    video.muted = isMuted || !primaryAudio
+  }
+
+  function applyVolume(next: number, options?: { unmute?: boolean }) {
+    const clamped = Math.min(VOLUME_MAX, Math.max(0, next))
     setVolume(clamped)
     try {
       localStorage.setItem(VOLUME_KEY, String(clamped))
     } catch {
       /* ignore */
     }
-    if (video) video.volume = clamped
+    let nextMuted = muted
     if (options?.unmute && muted) {
+      nextMuted = false
       setMuted(false)
-      if (video) video.muted = false
       try {
         localStorage.setItem(MUTE_KEY, '0')
       } catch {
         /* ignore */
       }
     }
-    flash(muted && !options?.unmute ? 'Muted' : `Volume ${Math.round(clamped * 100)}%`)
+    applyVolumeToElement(clamped, nextMuted)
+    flash(formatVolumeLabel(clamped, nextMuted && !options?.unmute))
   }
 
   function toggleMute() {
-    const video = videoRef.current
     const next = !muted
     setMuted(next)
-    if (video) video.muted = next
     try {
       localStorage.setItem(MUTE_KEY, next ? '1' : '0')
     } catch {
       /* ignore */
     }
-    flash(next ? 'Muted' : `Volume ${Math.round(volume * 100)}%`)
+    applyVolumeToElement(volume, next)
+    flash(formatVolumeLabel(volume, next))
   }
 
   function togglePause() {
@@ -1497,11 +1670,13 @@ export function Player({
   }, [isTile, isPip, item.id])
 
   useEffect(() => {
-    const video = videoRef.current
-    if (!video) return
-    video.volume = volume
-    video.muted = effectiveMuted
-  }, [item, retryTick, volume, effectiveMuted])
+    applyVolumeToElement(volume, effectiveMuted, isPrimary)
+  }, [item, retryTick, volume, effectiveMuted, isPrimary])
+
+  useEffect(() => {
+    applyVolumeToElement(volume, effectiveMuted, isPrimary)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- remount when video identity changes
+  }, [videoMountKey])
 
   useEffect(() => {
     const video = videoRef.current
@@ -1515,14 +1690,32 @@ export function Player({
     const applyHlsQuality = () => {
       if (!hls || hls.levels.length === 0) return
       const preference = getViewingQuality()
-      const levels = hls.levels
-        .map((level, index) => ({ index, height: level.height || 0 }))
-        .filter((level) => level.height > 0)
-        .sort((a, b) => a.height - b.height)
-      if (levels.length === 0) return
-      // Auto: let HLS abr pick, but never above what this device should decode.
-      const capHeight =
-        preference === 'auto' ? getPerformanceKnobs().maxQuality : preference
+      const isHevcLevel = (level: (typeof hls.levels)[number]) =>
+        /hev1|hvc1|h265|hevc/i.test(String(level.codecs || level.videoCodec || ''))
+      // Electron paints black for HEVC — prefer AVC when both exist.
+      const avcLevels = hls.levels
+        .map((level, index) => ({ index, height: level.height || 0, hevc: isHevcLevel(level) }))
+        .filter((level) => !level.hevc)
+      const pool = (avcLevels.length > 0 ? avcLevels : hls.levels.map((level, index) => ({
+        index,
+        height: level.height || 0,
+        hevc: isHevcLevel(level),
+      }))).filter((level) => level.height > 0)
+      const levels = [...pool].sort((a, b) => a.height - b.height)
+      if (levels.length === 0) {
+        // No height metadata — still avoid locking onto a HEVC track when AVC exists.
+        if (avcLevels.length > 0) {
+          hls.autoLevelCapping = Math.max(...avcLevels.map((l) => l.index))
+          if (preference !== 'auto') hls.currentLevel = avcLevels[avcLevels.length - 1].index
+          else hls.currentLevel = -1
+        }
+        return
+      }
+      // Auto: ABR capped by internet speed + device; fixed prefs lock the level.
+      const capHeight = Math.min(
+        resolveRequestedQuality(preference),
+        getPerformanceKnobs().maxQuality,
+      )
       const selected =
         [...levels].reverse().find((level) => level.height <= capHeight) ?? levels[0]
       hls.autoLevelCapping = selected.index
@@ -1578,6 +1771,89 @@ export function Player({
         window.clearInterval(leadBufferResumeTimer)
         leadBufferResumeTimer = 0
       }
+    }
+    let paintWatchTimer = 0
+    let audioOnlyHealAttempts = 0
+    function clearPaintWatch() {
+      if (paintWatchTimer) {
+        window.clearInterval(paintWatchTimer)
+        paintWatchTimer = 0
+      }
+    }
+    function markMediaReadyIfPainted() {
+      const el = videoRef.current
+      if (!el || cancelled) return false
+      const hasFrame = el.videoWidth > 0 && el.videoHeight > 0
+      // Live IPTV can paint while videoWidth is briefly 0, or report frames
+      // without a useful width — don't leave the opaque full-player overlay up
+      // (PiP hides that overlay, which is why picture only appeared there).
+      const playingWithData =
+        !el.paused &&
+        el.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+        (el.currentTime > 0.2 || (el.played?.length ?? 0) > 0)
+      if (hasFrame || playingWithData) {
+        setMediaReady(true)
+        clearPaintWatch()
+        return true
+      }
+      return false
+    }
+    /** Audio can start before the first decoded frame — keep polling so the
+     * opaque loading overlay doesn't sit forever over a working picture.
+     * If audio advances with videoWidth still 0, try another HLS level (HEVC). */
+    function startPaintWatch() {
+      if (paintWatchTimer || cancelled) return
+      const startedAt = Date.now()
+      paintWatchTimer = window.setInterval(() => {
+        if (cancelled) {
+          clearPaintWatch()
+          return
+        }
+        if (markMediaReadyIfPainted()) return
+        const el = videoRef.current
+        if (!el) return
+        const audioOnly =
+          !el.paused &&
+          el.currentTime > 0.4 &&
+          el.videoWidth === 0 &&
+          el.videoHeight === 0 &&
+          Date.now() - startedAt > 3500
+        if (!audioOnly) {
+          // Playing with data but no dimensions yet — still clear the cover.
+          if (
+            !el.paused &&
+            el.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+            Date.now() - startedAt > 900
+          ) {
+            setMediaReady(true)
+            clearPaintWatch()
+            return
+          }
+          if (Date.now() - startedAt > 20_000) clearPaintWatch()
+          return
+        }
+        if (hls && hls.levels.length > 1 && audioOnlyHealAttempts < hls.levels.length) {
+          audioOnlyHealAttempts += 1
+          const isHevc = (level: (typeof hls.levels)[number]) =>
+            /hev1|hvc1|h265|hevc/i.test(String(level.codecs || level.videoCodec || ''))
+          const next = hls.levels.findIndex(
+            (level, index) => index !== hls!.currentLevel && !isHevc(level),
+          )
+          const fallback = next >= 0 ? next : (hls.currentLevel + 1) % hls.levels.length
+          setStatus('Audio only — trying another quality…')
+          try {
+            hls.currentLevel = fallback
+            void el.play().catch(() => undefined)
+          } catch {
+            /* ignore */
+          }
+          return
+        }
+        // Truly no picture — drop the overlay so chrome/status stay usable.
+        setMediaReady(true)
+        setStatus('Playing (audio only — video codec unsupported)')
+        clearPaintWatch()
+      }, 400)
     }
     function tryResumeAfterLeadBuffer() {
       if (cancelled || !leadBufferPauseRef.current) {
@@ -1640,6 +1916,7 @@ export function Player({
         clearLeadBufferResume()
       }
       setPaused(false)
+      applyVolumeToElement(volume, effectiveMuted, isPrimary)
     }
 
     const onPlaying = () => {
@@ -1651,10 +1928,11 @@ export function Player({
         setError(null)
         setStatus('Playing')
         setPaused(false)
+        applyVolumeToElement(volume, effectiveMuted, isPrimary)
         // Only dismiss the loading screen once frames are actually painting.
         // loadeddata alone was leaving a black stage with no title overlay.
-        const el = videoRef.current
-        if (el && el.videoWidth > 0) setMediaReady(true)
+        // `playing` can also fire before videoWidth is known — keep watching.
+        if (!markMediaReadyIfPainted()) startPaintWatch()
         // Keep torrent pieces ahead of the playhead while watching.
         kickTorrentPrefetch()
         clearPlayPrefetch()
@@ -1868,10 +2146,23 @@ export function Player({
       const nearEnd =
         isTrustedDuration(trusted) && playhead / trusted >= 0.9
 
-      if (!cancelled && nearEnd && playlistIndex < playlist.length - 1) {
+      if (cancelled || !nearEnd) return
+
+      if (playlistIndex < playlist.length - 1) {
         // Re-resolve torrent URLs — don't just bump the index onto a dead remux link.
         void selectPlaylistItemRef.current(playlistIndex + 1)
+        return
       }
+
+      // Title / last episode finished — start the one-slot Up next queue.
+      const queued = watchNextRef.current
+      if (!queued || queued.id === item.id) return
+      const next = takeWatchNext()
+      if (!next) return
+      flash(`Up next: ${next.title}`)
+      window.setTimeout(() => {
+        navigate(next.href, { replace: true })
+      }, 400)
     }
 
     const onRemuxGuard = () => {
@@ -1929,6 +2220,8 @@ export function Player({
 
     video.addEventListener('play', onPlay)
     video.addEventListener('playing', onPlaying)
+    video.addEventListener('loadeddata', markMediaReadyIfPainted)
+    video.addEventListener('resize', markMediaReadyIfPainted)
     video.addEventListener('waiting', onWaiting)
     video.addEventListener('pause', onPause)
     video.addEventListener('ended', onEnded)
@@ -1958,6 +2251,16 @@ export function Player({
       new Promise<void>((resolve, reject) => {
         setEngineLabel('native')
         setStatus('Loading stream…')
+        if (
+          window.signalDesktop?.setPlaybackHeaders &&
+          (item.httpUserAgent || item.httpReferrer)
+        ) {
+          void window.signalDesktop.setPlaybackHeaders({
+            url: activePlaylistItem.url || item.url,
+            userAgent: item.httpUserAgent,
+            referrer: item.httpReferrer,
+          })
+        }
         let settled = false
         let resumeAttempt = 0
         const saved = getContinueEntry(item.id)
@@ -2119,10 +2422,21 @@ export function Player({
         setEngineLabel('hls')
         setStatus('Loading HLS…')
         const perf = getPerformanceKnobs()
+        const isIptv = item.sourceKind === 'iptv' || item.tags?.some((t) => /^iptv$/i.test(t))
+        const playbackHeaders = {
+          url: activePlaylistItem.url || item.url,
+          userAgent: item.httpUserAgent,
+          referrer: item.httpReferrer,
+        }
+        if (window.signalDesktop?.setPlaybackHeaders) {
+          void window.signalDesktop.setPlaybackHeaders(playbackHeaders)
+        }
         hls = new Hls({
           enableWorker: perf.enableMediaWorkers,
-          lowLatencyMode: perf.hlsLowLatency,
-          maxBufferLength: perf.hlsMaxBufferLength,
+          // Low-latency mode fights unstable public IPTV feeds (sports M3U).
+          lowLatencyMode: isIptv ? false : perf.hlsLowLatency,
+          maxBufferLength: isIptv ? Math.max(perf.hlsMaxBufferLength, 30) : perf.hlsMaxBufferLength,
+          liveSyncDurationCount: isIptv ? 3 : undefined,
           fragLoadingMaxRetry: 6,
           manifestLoadingMaxRetry: 5,
           levelLoadingMaxRetry: 5,
@@ -2275,10 +2589,13 @@ export function Player({
       clearPausePrefetch()
       clearPlayPrefetch()
       clearLeadBufferResume()
+      clearPaintWatch()
       leadBufferPauseRef.current = false
       saveContinueProgress()
       video.removeEventListener('play', onPlay)
       video.removeEventListener('playing', onPlaying)
+      video.removeEventListener('loadeddata', markMediaReadyIfPainted)
+      video.removeEventListener('resize', markMediaReadyIfPainted)
       video.removeEventListener('waiting', onWaiting)
       video.removeEventListener('pause', onPause)
       video.removeEventListener('ended', onEnded)
@@ -2286,7 +2603,15 @@ export function Player({
       window.removeEventListener('jiyu:viewing-quality', onViewingQuality)
       cleanupPlayers()
     }
-  }, [item.id, item.url, activePlaylistItem.url, playlistIndex, playlist.length, retryTick])
+  }, [
+    item.id,
+    item.url,
+    activePlaylistItem.url,
+    playlistIndex,
+    playlist.length,
+    retryTick,
+    videoMountKey,
+  ])
 
   useEffect(() => {
     if (isTile) return
@@ -2403,11 +2728,11 @@ export function Player({
           break
         case 'ArrowUp':
           e.preventDefault()
-          applyVolume(volume + 0.05, { unmute: true })
+          applyVolume(volume + VOLUME_STEP, { unmute: true })
           break
         case 'ArrowDown':
           e.preventDefault()
-          applyVolume(volume - 0.05)
+          applyVolume(volume - VOLUME_STEP)
           break
         case 'ArrowLeft':
         case 'j':
@@ -2438,11 +2763,8 @@ export function Player({
       const we = e as globalThis.WheelEvent
       we.preventDefault()
       bumpChrome()
-      const delta = we.deltaY > 0 ? -0.05 : 0.05
-      const video = videoRef.current
-      const current = video?.volume ?? volume
-      const next = Math.min(1, Math.max(0, current + delta))
-      applyVolume(next, { unmute: delta > 0 })
+      const delta = we.deltaY > 0 ? -VOLUME_STEP : VOLUME_STEP
+      applyVolume(volume + delta, { unmute: delta > 0 })
     }
 
     stage.addEventListener('wheel', onWheel, { passive: false })
@@ -2493,7 +2815,14 @@ export function Player({
           </div>
         </header>
         <div className="player-stage">
-          <video ref={videoRef} className="player-video" muted={effectiveMuted} autoPlay playsInline />
+          <video
+            key={videoMountKey}
+            ref={videoRef}
+            className="player-video"
+            crossOrigin="anonymous"
+            autoPlay
+            playsInline
+          />
           {error && (
             <div className="player-error tile-error">
               <p>{error}</p>
@@ -2524,7 +2853,9 @@ export function Player({
               <span>
                 {error ?? status}
                 {!error && engineLabel ? ` · ${engineLabel}` : ''}
-                {!error ? ` · ${muted ? 'Muted' : `Vol ${Math.round(volume * 100)}%`}` : ''}
+                {!error
+                  ? ` · ${muted ? 'Muted' : `Vol ${Math.round(volume * 100)}%`}`
+                  : ''}
                 {!error && showSubsLoading ? ' · Loading subtitles…' : ''}
                 {!error && subsStatus === 'missing' ? ' · No subs' : ''}
                 {!error && subsStatus === 'ready'
@@ -2550,6 +2881,20 @@ export function Player({
               >
                 {episodesChipLabel}
                 <span aria-hidden>{playlistOpen ? ' ▴' : ' ▾'}</span>
+              </button>
+            </div>
+          )}
+          {watchNext && !isPip && watchNext.id !== item.id && (
+            <div className="player-watch-next" title={`Up next: ${watchNext.title}`}>
+              <span className="player-watch-next-label">Up next</span>
+              <span className="player-watch-next-title">{watchNext.title}</span>
+              <button
+                type="button"
+                className="ghost-btn player-watch-next-clear"
+                onClick={() => clearWatchNext()}
+                title="Clear up next"
+              >
+                ×
               </button>
             </div>
           )}
@@ -2624,12 +2969,12 @@ export function Player({
               <button type="button" className="ghost-btn control-btn" onClick={toggleMute} title="M">
                 {muted || volume === 0 ? 'Unmute' : 'Mute'}
               </button>
-              <label className="volume-control" title="Scroll on video or drag">
+              <label className="volume-control" title="Scroll on video or drag · 0–100%">
                 <span className="sr-only">Volume</span>
                 <input
                   type="range"
                   min={0}
-                  max={100}
+                  max={Math.round(VOLUME_MAX * 100)}
                   value={Math.round((muted ? 0 : volume) * 100)}
                   onChange={(e) => {
                     const next = Number(e.target.value) / 100
@@ -2644,12 +2989,11 @@ export function Player({
                     type="button"
                     className={`ghost-btn control-btn${subsEnabled && subsStatus === 'ready' ? ' is-armed' : ''}`}
                     onClick={toggleSubtitles}
-                    disabled={subsStatus === 'missing'}
                     title={
                       showSubsLoading
-                        ? 'Detecting and loading the best subtitle track for this file…'
+                        ? 'Click to fetch subtitles now'
                         : subsStatus === 'missing'
-                          ? 'No text subtitles on this release (image/PGS-only or none)'
+                          ? 'Retry loading subtitles'
                           : subsEnabled
                             ? 'Hide subtitles (C)'
                             : 'Show subtitles (C)'
@@ -2658,7 +3002,7 @@ export function Player({
                     {showSubsLoading
                       ? 'Subs…'
                       : subsStatus === 'missing'
-                        ? 'No Subs'
+                        ? 'Retry Subs'
                         : subsEnabled
                           ? 'Subs On'
                           : 'Subs Off'}
@@ -2772,8 +3116,10 @@ export function Player({
 
       <div className="player-stage">
         <video
+          key={videoMountKey}
           ref={videoRef}
           className={`player-video${isRemuxPlaybackUrl(activePlaylistItem.url) ? ' is-remux' : ''}`}
+          crossOrigin="anonymous"
           controls={!isPip}
           controlsList="nofullscreen nodownload noremoteplayback"
           disablePictureInPicture
@@ -2781,14 +3127,14 @@ export function Player({
           playsInline
           onDoubleClick={isPip ? undefined : toggleFullscreen}
         />
-        {!isPip && !error && (!mediaReady || episodeLoading) && (
+        {!isPip && !error && !mediaReady && (
           <PlaybackLoadingScreen
             title={displayTitle}
             status={
-              status && status !== 'Playing' && status !== 'Ready'
-                ? status
-                : episodeLoading
-                  ? 'Loading episode…'
+              episodeLoading
+                ? 'Loading episode…'
+                : status && status !== 'Playing' && status !== 'Ready'
+                  ? status
                   : 'Starting playback…'
             }
             variant="stage"

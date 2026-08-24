@@ -172,6 +172,34 @@ export function resolvePlayableItem(
 export const BUILTIN_CATALOG: StreamItem[] = [
   ...LOCAL_CHANNELS,
   {
+    id: 'sports-tnt-uk-youtube',
+    title: 'TNT Sports UK — YouTube',
+    description:
+      'Official free Early Kick-Off (~30 min before Premier League fixtures) when live on YouTube. Full matches need HBO Max.',
+    category: 'sports',
+    url: 'https://www.youtube.com/@TNTSports/live',
+    poster:
+      'https://upload.wikimedia.org/wikipedia/en/thumb/b/b5/TNT_Sports_2023_logo.svg/320px-TNT_Sports_2023_logo.svg.png',
+    tags: ['tnt', 'premier-league', 'football', 'champions-league', 'youtube', 'uk'],
+    source: 'TNT Sports (official)',
+    sourceKind: 'builtin',
+    language: 'en',
+  },
+  {
+    id: 'sports-tnt-uk-hbomax',
+    title: 'TNT Sports UK — HBO Max',
+    description:
+      'Full Premier League, Champions League, FA Cup, rugby & more — sign in with your HBO Max / TNT Sports subscription.',
+    category: 'sports',
+    url: 'https://play.hbomax.com/',
+    poster:
+      'https://upload.wikimedia.org/wikipedia/commons/thumb/1/17/HBO_Max_Logo.svg/320px-HBO_Max_Logo.svg.png',
+    tags: ['tnt', 'premier-league', 'football', 'champions-league', 'hbomax', 'uk'],
+    source: 'HBO Max (official)',
+    sourceKind: 'builtin',
+    language: 'en',
+  },
+  {
     id: 'movie-bbb',
     title: 'Big Buck Bunny',
     description: 'Open movie project short — soft demo reel for the Movies shelf.',

@@ -47,6 +47,18 @@ export const WEB_PRESETS: WebPreset[] = [
     detail: 'Browse YouTube inside Jiyu.',
     url: 'https://www.youtube.com/',
   },
+  {
+    id: 'tnt-sports-youtube',
+    label: 'TNT Sports UK (YouTube)',
+    detail: 'Official free Early Kick-Off on match days — opens live when on-air.',
+    url: 'https://www.youtube.com/@TNTSports/live',
+  },
+  {
+    id: 'tnt-sports-hbomax',
+    label: 'TNT Sports UK (HBO Max)',
+    detail: 'Full Premier League, Champions League & FA Cup — sign in to stream.',
+    url: 'https://play.hbomax.com/',
+  },
 ]
 
 /** Map a local channel title to its live play URL */
@@ -56,6 +68,9 @@ export function liveUrlForChannelTitle(title: string): string {
   if (name.startsWith('tvj')) return 'https://www.youtube.com/@TelevisionJamaica/live'
   if (name.startsWith('nationwide') || name === 'nnn') {
     return 'https://www.youtube.com/@nationwidenewsnetwork/live'
+  }
+  if (/^tnt\s*sports/i.test(name) || name === 'tnt') {
+    return 'https://www.youtube.com/@TNTSports/live'
   }
   return `https://www.youtube.com/results?search_query=${encodeURIComponent(`${name} Jamaica live`)}`
 }
@@ -67,6 +82,27 @@ export function isYouTubeUrl(url: string): boolean {
   } catch {
     return /youtube\.com|youtu\.be/i.test(url)
   }
+}
+
+/** Opens in Jiyu Web browser — no native HLS/MP4 path (YouTube, HBO Max, etc.). */
+export function isWebBrowserOnlyUrl(url: string): boolean {
+  if (isYouTubeUrl(url)) return true
+  try {
+    const u = new URL(url)
+    const host = u.hostname.toLowerCase()
+    if (host === 'play.hbomax.com' || host.endsWith('.hbomax.com')) return true
+    if (host === 'play.max.com' || host.endsWith('.max.com')) return true
+    if (host.endsWith('tntsports.co.uk')) return true
+    // NetMirror / freemovies: route via ShowPage first (WatchPage); keep as
+    // browser-only for direct /web links and non-show entry points.
+    if (host === 'freemovies.lol' || host.endsWith('.freemovies.lol')) return true
+    if (host === 'netmirror-app.pages.dev') return true
+    if (/(^|\.)ww\d*\.surf$/i.test(host) && /netmirror/i.test(u.pathname)) return true
+    if (/netmirror/i.test(host)) return true
+  } catch {
+    /* ignore */
+  }
+  return false
 }
 
 /** Prefer /live pages so the current stream opens and can autoplay */

@@ -146,7 +146,20 @@ const CHROME_FULL_VERSION = String(process.versions.chrome || '150.0.7871.114').
 const CHROME_MAJOR = CHROME_FULL_VERSION.split('.')[0] || '150'
 const CHROME_VERSION = `${CHROME_MAJOR}.0.0.0`
 const BROWSER_UA = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${CHROME_VERSION} Safari/537.36`
-const STREAM_UA = `${BROWSER_UA} JiyuMedia/${APP_VERSION}`
+/** Match desktop Chrome — appending app tokens breaks many IPTV CDNs. */
+const STREAM_UA = BROWSER_UA
+
+/** Per-host UA / Referer overrides from M3U http-user-agent / EXTVLCOPT. */
+const playbackHeaderOverrides = new Map()
+
+function isIptvMediaUrl(url) {
+  const u = String(url || '')
+  if (!u) return false
+  if (/vimeocdn\.com|player\.vimeo\.com/i.test(u)) return true
+  if (/\.(m3u8?|ts|m4s|mpd|aac|mp4|mp3)(\?|#|$)/i.test(u)) return true
+  // Common IPTV panel / CDN path shapes without a file extension
+  return /\/(?:live|play|hls|stream|playlist|manifest)\b/i.test(u)
+}
 const DEV_URL = 'http://localhost:5173'
 const WEB_SESSION = 'persist:jiyu-web'
 
@@ -216,6 +229,101 @@ function looksLikeCloudflareChallenge(content, title = '') {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/** YTS / YIFY mirrors — catalog sync uses JSON API only; never open CF unlock UI. */
+function isYtsHost(hostname) {
+  const host = String(hostname || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^www\./, '')
+  return /(^|[.-])(yts|yify)([.-]|$)/i.test(host) || /yts-official|yifymovies/i.test(host)
+}
+
+function isYtsUrl(pageUrl) {
+  try {
+    return isYtsHost(new URL(pageUrl).hostname)
+  } catch {
+    return false
+  }
+}
+
+function isYtsApiPath(pageUrl) {
+  try {
+    const url = new URL(pageUrl)
+    return (
+      isYtsHost(url.hostname) &&
+      /\/api\/v2\/(?:list_movies|movie_details)\.json$/i.test(url.pathname)
+    )
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Quiet plain-fetch with backoff for YTS — no unlock windows.
+ * @param {string} targetUrl
+ * @param {number} [attempts]
+ */
+async function fetchYtsQuietly(targetUrl, attempts = 4) {
+  const delays = [0, 5_000, 15_000, 30_000]
+  let last = {
+    ok: false,
+    status: 0,
+    content: '',
+    error: 'YTS request failed',
+  }
+  for (let i = 0; i < attempts; i += 1) {
+    if (delays[i]) {
+      console.log('[yts] backing off before retry', {
+        waitMs: delays[i],
+        attempt: i + 1,
+        url: String(targetUrl).slice(0, 120),
+      })
+      await sleep(delays[i])
+    }
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 30_000)
+    try {
+      const response = await fetch(targetUrl, {
+        redirect: 'follow',
+        signal: controller.signal,
+        headers: withDesktopChromeClientHints({
+          'User-Agent': BROWSER_UA,
+          Accept: 'application/json,text/plain,*/*',
+          'Accept-Language': 'en-US,en;q=0.9',
+        }),
+      })
+      const content = await response.text()
+      const challenged = looksLikeCloudflareChallenge(content)
+      if (response.ok && !challenged) {
+        return { ok: true, status: response.status, content, error: '' }
+      }
+      last = {
+        ok: false,
+        status: response.status,
+        content,
+        error: challenged
+          ? 'YTS rate-limited (will retry quietly; no unlock window)'
+          : `Server returned ${response.status}`,
+      }
+      console.log('[yts] request blocked or failed', {
+        status: response.status,
+        challenged,
+        attempt: i + 1,
+      })
+    } catch (err) {
+      last = {
+        ok: false,
+        status: 0,
+        content: '',
+        error: err instanceof Error ? err.message : String(err),
+      }
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+  return last
 }
 
 function webSession() {
@@ -895,6 +1003,16 @@ async function warmViaSystemBrowser(origin) {
 async function warmScrapeOriginImpl(origin, { allowVisible = true } = {}) {
   const isEztv = /eztv/i.test(origin)
 
+  // YTS catalog uses the public JSON API — never open Verify/Chrome unlock UI.
+  if (isYtsUrl(origin)) {
+    if (await originAjaxUnlocked(origin, { verbose: false })) {
+      scrapeWarmedOrigins.add(origin)
+      return true
+    }
+    console.log('[cf-unlock] skipping visible unlock for YTS (API-only quiet mode)')
+    return false
+  }
+
   // EZTV Show List must use a live system Chrome page. A prior "warmed" flag or
   // a lucky session.fetch must not skip launching Chrome — that produced
   // "System browser not unlocked" during sync.
@@ -982,6 +1100,33 @@ async function tryStealthElectronUnlock(origin, timeoutMs) {
   win.on('closed', () => {
     if (unlockWindow === win) unlockWindow = null
   })
+  // Blank white challenge (common when CF refuses Electron) — don't block watching.
+  const blankWatch = setInterval(() => {
+    if (!win || win.isDestroyed()) {
+      clearInterval(blankWatch)
+      return
+    }
+    void win.webContents
+      .executeJavaScript(
+        `(() => {
+          const text = (document.body && document.body.innerText || '').trim();
+          const hasChallenge = /verify you are human|just a moment|cloudflare|cf-turnstile|challenge/i.test(
+            document.documentElement ? document.documentElement.innerHTML : '',
+          );
+          return { len: text.length, hasChallenge, title: document.title || '' };
+        })()`,
+      )
+      .then((info) => {
+        if (!info || win.isDestroyed()) return
+        if (info.len < 8 && !info.hasChallenge) {
+          console.log('[cf-unlock] blank challenge window — closing')
+          clearInterval(blankWatch)
+          destroyUnlockWindow()
+        }
+      })
+      .catch(() => {})
+  }, 4000)
+  setTimeout(() => clearInterval(blankWatch), Math.min(timeoutMs, 45_000))
   try {
     win.webContents.setUserAgent(BROWSER_UA)
   } catch {
@@ -1035,6 +1180,11 @@ async function fetchViaScrapeBrowser(targetUrl) {
   // Never open Chrome for the public JSON API — TMDB→EZTV sync uses only this.
   if (isEztvApiPath(targetUrl)) {
     return sessionFetchText(targetUrl)
+  }
+
+  // YTS: quiet API/backoff only — unlock windows crash more than they help.
+  if (isYtsUrl(targetUrl)) {
+    return fetchYtsQuietly(targetUrl)
   }
 
   const warmed = await warmScrapeOrigin(origin, { allowVisible: true })
@@ -1507,23 +1657,44 @@ app.whenReady().then(() => {
   // Many IPTV CDNs reject Electron's default UA or empty clients.
   // Still emit standard desktop Chrome Sec-CH-UA* alongside STREAM_UA.
   session.defaultSession.webRequest.onBeforeSendHeaders((details, callback) => {
+    const url = details.url || ''
+    let userAgent = STREAM_UA
+    let referer
+    let origin
+    try {
+      const host = new URL(url).host.toLowerCase()
+      const override = playbackHeaderOverrides.get(host)
+      if (override?.userAgent) userAgent = override.userAgent
+      if (override?.referrer) referer = override.referrer
+    } catch {
+      /* ignore bad URLs */
+    }
     const headers = withDesktopChromeClientHints({
       ...details.requestHeaders,
-      'User-Agent': STREAM_UA,
+      'User-Agent': userAgent,
     })
     if (!headers.Accept && !headers.accept) headers.Accept = '*/*'
     // CVM Vimeo live: player config + CDN segments expect the official site origin
-    if (/vimeocdn\.com|player\.vimeo\.com|vimeo\.com\/live\//i.test(details.url || '')) {
+    if (/vimeocdn\.com|player\.vimeo\.com|vimeo\.com\/live\//i.test(url)) {
       headers.Referer = 'https://site.cvmtv.com/'
       headers.Origin = 'https://site.cvmtv.com'
+    } else if (referer) {
+      headers.Referer = referer
+      try {
+        origin = new URL(referer).origin
+        headers.Origin = origin
+      } catch {
+        /* keep referer only */
+      }
     }
     callback({ requestHeaders: headers })
   })
 
-  // Vimeo HLS returns ACAO: https://vimeo.com — rewrite so hls.js in the app can preview/play
+  // IPTV / HLS often omits ACAO or pins it to another site — hls.js in the
+  // renderer needs * so manifests and .ts segments load (same fix as Vimeo).
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
     const url = details.url || ''
-    if (!/vimeocdn\.com|player\.vimeo\.com/i.test(url)) {
+    if (!isIptvMediaUrl(url)) {
       callback({})
       return
     }
@@ -2140,6 +2311,11 @@ ipcMain.handle('page:fetchHtml', async (_event, url) => {
       return await fetchViaScrapeBrowser(target)
     }
 
+    // YTS catalog: never open the Verify window — quiet fetch + backoff only.
+    if (isYtsUrl(target)) {
+      return await fetchYtsQuietly(target)
+    }
+
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 30_000)
     let response
@@ -2167,13 +2343,15 @@ ipcMain.handle('page:fetchHtml', async (_event, url) => {
     }
 
     // API-only sync must never open Chrome — return the failure as-is.
-    if (isEztvApiPath(target)) {
+    if (isEztvApiPath(target) || isYtsApiPath(target)) {
       return {
         ok: false,
         status: response.status,
         content,
         error: challenged
-          ? 'EZTV API looked blocked (unexpected)'
+          ? isYtsApiPath(target)
+            ? 'YTS rate-limited (quiet mode)'
+            : 'EZTV API looked blocked (unexpected)'
           : `Server returned ${response.status}`,
       }
     }
@@ -2190,7 +2368,8 @@ ipcMain.handle('page:fetchHtml', async (_event, url) => {
     }
   } catch (err) {
     const failedUrl = String(url || '').trim()
-    if (isEztvApiPath(failedUrl)) {
+    if (isEztvApiPath(failedUrl) || isYtsUrl(failedUrl)) {
+      if (isYtsUrl(failedUrl)) return await fetchYtsQuietly(failedUrl)
       return {
         ok: false,
         status: 0,
@@ -2207,6 +2386,99 @@ ipcMain.handle('page:fetchHtml', async (_event, url) => {
         content: '',
         error: err instanceof Error ? err.message : String(err),
       }
+    }
+  }
+})
+
+ipcMain.handle('page:fetchJsonPost', async (_event, url, body, referer) => {
+  try {
+    if (typeof url !== 'string' || !/^https?:\/\//i.test(url.trim())) {
+      return { ok: false, status: 0, content: '', error: 'Invalid API URL' }
+    }
+    if (!body || typeof body !== 'object') {
+      return { ok: false, status: 0, content: '', error: 'Invalid JSON body' }
+    }
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 30_000)
+    let response
+    try {
+      response = await fetch(url.trim(), {
+        method: 'POST',
+        redirect: 'follow',
+        signal: controller.signal,
+        headers: withDesktopChromeClientHints({
+          'User-Agent': BROWSER_UA,
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+          Origin: 'https://m2box.org',
+          Referer: typeof referer === 'string' && referer ? referer : 'https://m2box.org/web/tv-series',
+        }),
+        body: JSON.stringify(body),
+      })
+    } finally {
+      clearTimeout(timer)
+    }
+    const content = await response.text()
+    return {
+      ok: response.ok,
+      status: response.status,
+      content,
+      error: response.ok ? '' : `Server returned ${response.status}`,
+    }
+  } catch (err) {
+    return {
+      ok: false,
+      status: 0,
+      content: '',
+      error: err instanceof Error ? err.message : String(err),
+    }
+  }
+})
+
+ipcMain.handle('page:fetchJsonGet', async (_event, url, referer) => {
+  try {
+    if (typeof url !== 'string' || !/^https?:\/\//i.test(url.trim())) {
+      return { ok: false, status: 0, content: '', error: 'Invalid API URL' }
+    }
+    const ref =
+      typeof referer === 'string' && referer.trim() ? referer.trim() : 'https://m2box.org/web/tv-series'
+    let origin = 'https://m2box.org'
+    try {
+      origin = new URL(ref).origin
+    } catch {
+      /* keep default */
+    }
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 30_000)
+    let response
+    try {
+      response = await fetch(url.trim(), {
+        method: 'GET',
+        redirect: 'follow',
+        signal: controller.signal,
+        headers: withDesktopChromeClientHints({
+          'User-Agent': BROWSER_UA,
+          Accept: 'application/json',
+          Origin: origin,
+          Referer: ref,
+        }),
+      })
+    } finally {
+      clearTimeout(timer)
+    }
+    const content = await response.text()
+    return {
+      ok: response.ok,
+      status: response.status,
+      content,
+      error: response.ok ? '' : `Server returned ${response.status}`,
+    }
+  } catch (err) {
+    return {
+      ok: false,
+      status: 0,
+      content: '',
+      error: err instanceof Error ? err.message : String(err),
     }
   }
 })
@@ -2431,8 +2703,7 @@ async function probeHttpStream(rawUrl, timeoutMs = 2500) {
   }
 
   const headers = {
-    'User-Agent':
-      `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 JiyuMedia/${APP_VERSION}`,
+    'User-Agent': STREAM_UA,
     Accept: '*/*',
   }
 
@@ -2529,6 +2800,31 @@ async function probeHttpStream(rawUrl, timeoutMs = 2500) {
 
 ipcMain.handle('stream:probe', async (_event, url, timeoutMs) => {
   return probeHttpStream(url, typeof timeoutMs === 'number' ? timeoutMs : 2500)
+})
+
+/** Apply M3U http-user-agent / http-referrer for the next HLS requests to this host. */
+ipcMain.handle('stream:setPlaybackHeaders', async (_event, options) => {
+  const url = typeof options?.url === 'string' ? options.url.trim() : ''
+  if (!url) return { ok: false }
+  try {
+    const host = new URL(url).host.toLowerCase()
+    const userAgent =
+      typeof options?.userAgent === 'string' && options.userAgent.trim()
+        ? options.userAgent.trim()
+        : ''
+    const referrer =
+      typeof options?.referrer === 'string' && options.referrer.trim()
+        ? options.referrer.trim()
+        : ''
+    if (!userAgent && !referrer) {
+      playbackHeaderOverrides.delete(host)
+      return { ok: true, cleared: true }
+    }
+    playbackHeaderOverrides.set(host, { userAgent, referrer })
+    return { ok: true }
+  } catch {
+    return { ok: false }
+  }
 })
 
 ipcMain.handle('vimeo:resolveLiveHls', async (_event, input) => {
@@ -3357,15 +3653,25 @@ function abortSubtitleExtractors(exceptKey = null) {
 const SUBTITLE_EXTRACT_MIN_BYTES = 12 * 1024 * 1024
 const subtitleExtractDeferred = new Map()
 
+/** Companion .srt/.ass files are tiny — never gate them on the 12MB video buffer. */
+function subtitleSourceReadyForExtract(file) {
+  if (!file) return false
+  if (SUBTITLE_FILE_RE.test(file.name || '')) return true
+  const downloaded = Number(file.downloaded) || 0
+  const progress = Number(file.progress) || 0
+  return downloaded >= SUBTITLE_EXTRACT_MIN_BYTES || progress >= 0.12
+}
+
 function scheduleSubtitleExtractWhenReady(file, cacheKey) {
   if (!file || !cacheKey) return
   subtitleSources.set(cacheKey, file)
   if (subtitleExtractDeferred.has(cacheKey)) return
+  const sidecar = SUBTITLE_FILE_RE.test(file.name || '')
   const timer = setTimeout(() => {
     subtitleExtractDeferred.delete(cacheKey)
     const source = subtitleSources.get(cacheKey) || file
     startProgressiveSubtitleExtract(source, cacheKey)
-  }, 8_000)
+  }, sidecar ? 1_500 : 8_000)
   subtitleExtractDeferred.set(cacheKey, timer)
 }
 
@@ -3374,10 +3680,10 @@ function startProgressiveSubtitleExtract(file, cacheKey) {
   subtitleSources.set(cacheKey, file)
 
   const downloaded = Number(file.downloaded) || 0
-  const progress = Number(file.progress) || 0
-  // Slow swarms: remux needs the head pieces first. Defer ffmpeg probe/extract
-  // so "Subs..." polling cannot starve playback into a load timeout.
-  if (downloaded < SUBTITLE_EXTRACT_MIN_BYTES && progress < 0.12) {
+  const sidecar = SUBTITLE_FILE_RE.test(file.name || '')
+  // Sidecar subs: select + read immediately (a 100KB .srt never hits 12MB).
+  // Embedded: wait for opening buffer so extract can't starve remux.
+  if (!sidecar && !subtitleSourceReadyForExtract(file)) {
     console.log('[torrent subs] defer extract (need buffer first)', {
       file: file.name,
       downloaded,
@@ -3385,6 +3691,13 @@ function startProgressiveSubtitleExtract(file, cacheKey) {
     })
     scheduleSubtitleExtractWhenReady(file, cacheKey)
     return
+  }
+  if (sidecar) {
+    try {
+      file.select()
+    } catch {
+      /* ignore */
+    }
   }
 
   const existing = subtitleJobs.get(cacheKey)
@@ -3922,7 +4235,9 @@ async function handleAudioTranscode(req, res, source) {
   } else {
     args.push('-i', source)
   }
-  args.push('-map', '0:v:0', '-map', `0:a:${audioOrdinal}?`)
+  // Require an audio stream — optional `0:a:N?` produced silent video when the
+  // torrent head hadn't exposed audio yet (Chromium then plays picture-only).
+  args.push('-map', '0:v:0', '-map', `0:a:${audioOrdinal}`)
   if (forceHevcTranscode) {
     args.push(
       '-c:v',
@@ -4050,14 +4365,33 @@ async function handleSubtitleRequest(req, res, source, cacheKey) {
 }
 
 async function handleCachedSubtitleRequest(req, res, cacheKey) {
+  let force = false
+  try {
+    force = new URL(req.url || '/', 'http://127.0.0.1').searchParams.get('force') === '1'
+  } catch {
+    force = false
+  }
   const sourceFile = subtitleSources.get(cacheKey)
   const existing = subtitleJobs.get(cacheKey)
-  const downloaded = Number(sourceFile?.downloaded) || 0
-  const progress = Number(sourceFile?.progress) || 0
-  const bufferReady = downloaded >= SUBTITLE_EXTRACT_MIN_BYTES || progress >= 0.12
-  // Only kick extract from HTTP once the opening buffer exists — otherwise
-  // Player's sub poll storm competes with remux on a 1-peer swarm.
-  if (sourceFile && bufferReady) {
+  const sidecar = sourceFile && SUBTITLE_FILE_RE.test(sourceFile.name || '')
+  const bufferReady = subtitleSourceReadyForExtract(sourceFile)
+
+  // Subs button / manual retry: re-read companion .srt immediately.
+  if (force && sourceFile && sidecar) {
+    try {
+      subtitleExtractors.get(cacheKey)?.kill()
+    } catch {
+      /* ignore */
+    }
+    subtitleExtractors.delete(cacheKey)
+    subtitleJobs.delete(cacheKey)
+    if (!subtitleCache.has(cacheKey)) {
+      /* keep any prior cues if present; extract will overwrite */
+    }
+    startProgressiveSubtitleExtract(sourceFile, cacheKey)
+  } else if (sourceFile && bufferReady) {
+    // Sidecar .srt: kick immediately. Embedded: wait for opening buffer so the
+    // player's sub poll storm cannot starve remux on a 1-peer swarm.
     if (!existing || (existing.done && existing.retryable)) {
       startProgressiveSubtitleExtract(sourceFile, cacheKey)
     }
@@ -4921,16 +5255,15 @@ ipcMain.handle('torrent:stream', async (_event, input, options) => {
       console.warn('[torrent] runtime probe failed', err?.message || err)
     }
 
-    // Let remux attach and buffer first — early softsub extract steals the same
-    // HTTP/torrent pieces and commonly stalls 1080p MKV starts past 25s.
+    // Embedded softsubs: let remux claim the swarm first. Companion .srt/.ass
+    // files are tiny — start almost immediately (the old 12MB gate blocked them forever).
     const primarySubKey = `${torrent.infoHash}:${file.path || file.name}`
     if (playlist[0]?.subtitleUrl) {
-      // Wait for a real head buffer before softsub extract (was 12s — too early
-      // on slow SubsPlease swarms and caused player load timeouts).
+      const sidecar = playlist[0].subtitleKind === 'file'
       setTimeout(() => {
         const sourceFile = subtitleSources.get(primarySubKey)
         if (sourceFile) startProgressiveSubtitleExtract(sourceFile, primarySubKey)
-      }, 45_000)
+      }, sidecar ? 2_000 : 45_000)
     }
 
     // Single-play: drop leftover swarms after this one is ready. Multi-view keeps them.

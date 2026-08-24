@@ -13,22 +13,14 @@ import {
   type SectionGrowth,
 } from '../lib/libraryGrowth'
 import { getSectionSourcePrefs, setSectionSourcePrefs } from '../lib/sectionPrefs'
-import { upsertTorrentItems } from '../lib/torrentCatalogStore'
 import {
-  ANIME_SHELF_FULL_SHOWS,
   collapseEpisodeRowsToShows,
   isAnimeFullShowItem,
   isAnimeNewReleaseItem,
   isEztvShowUrl,
-  isEztvSource,
   isMoviesNewItem,
   isMoviesPopularItem,
-  isSeriesFullShowItem,
-  isSeriesTrendingItem,
   isYtsLabel,
-  linkToCatalogItem,
-  loadTorrentSources,
-  lookupEztvShowCard,
 } from '../lib/torrents'
 import {
   isKidsLiveItem,
@@ -40,6 +32,20 @@ import type { CategoryId, StreamItem } from '../types'
 
 const PAGE = 120
 const MIXED_SECTIONS = new Set<CategoryId>(['movies', 'series', 'anime', 'kids'])
+const SPORTS_PINNED_IDS = ['sports-tnt-uk-youtube', 'sports-tnt-uk-hbomax'] as const
+
+function pinSportsShortcuts(items: StreamItem[], category: CategoryId): StreamItem[] {
+  if (category !== 'sports') return items
+  const pinned = SPORTS_PINNED_IDS.map((id) => items.find((item) => item.id === id)).filter(
+    (item): item is StreamItem => !!item,
+  )
+  if (pinned.length === 0) return items
+  const rest = items.filter(
+    (item) => !SPORTS_PINNED_IDS.includes(item.id as (typeof SPORTS_PINNED_IDS)[number]),
+  )
+  return [...pinned, ...rest]
+}
+
 type ShelfTabId = 'primary' | 'full-shows' | 'live'
 
 function shelfTabStorageKey(category: CategoryId): string {
@@ -200,12 +206,11 @@ function matchesSectionQuery(item: StreamItem, q: string): boolean {
 
 export function SectionPage() {
   const { id } = useParams<{ id: string }>()
-  const { byCategory, ready, reloadTorrentCatalog } = useCatalog()
+  const { byCategory, ready } = useCatalog()
   const meta = CATEGORIES.find((c) => c.id === id)
   const saved = id ? getSectionView(id) : undefined
   const sentinelRef = useRef<HTMLDivElement>(null)
   const showSourceTools = Boolean(meta && MIXED_SECTIONS.has(meta.id))
-  const eztvLookupRef = useRef<string>('')
 
   const [query, setQuery] = useState(saved?.query ?? '')
   const [visible, setVisible] = useState(saved?.visible ?? PAGE)
@@ -216,9 +221,7 @@ export function SectionPage() {
   const [shelfTab, setShelfTab] = useState<ShelfTabId>(() =>
     readShelfTab(
       categoryId,
-      categoryId === 'series' || categoryId === 'anime' || categoryId === 'movies'
-        ? 'primary'
-        : 'full-shows',
+      categoryId === 'anime' || categoryId === 'movies' ? 'primary' : 'full-shows',
     ),
   )
   const userPickedShelfTabRef = useRef(false)
@@ -288,39 +291,7 @@ export function SectionPage() {
       }
     }
 
-    if (categoryId === 'series') {
-      // Full Shows = TMDB popular on EZTV; Now Airing = EZTV trending/landing.
-      const primary = prepareShelfList(
-        items.filter((item) => isSeriesFullShowItem(item) && match(item)),
-        shelfOpts,
-      )
-      const fullShows = prepareShelfList(
-        items.filter((item) => isSeriesTrendingItem(item) && match(item)),
-        { ...shelfOpts, newestFirst: true },
-      )
-      const other = prepareShelfList(
-        items.filter(
-          (item) =>
-            !isSeriesFullShowItem(item) && !isSeriesTrendingItem(item) && match(item),
-        ),
-        shelfOpts,
-      )
-      return {
-        primaryLabel: 'Full Shows',
-        fullLabel: 'Now Airing',
-        liveLabel: undefined as string | undefined,
-        primaryBlurb: '',
-        fullBlurb: '',
-        liveBlurb: undefined as string | undefined,
-        primaryEmpty: 'No full shows yet — sync the TV website in Library.',
-        fullEmpty: 'No airing titles yet — sync the TV website in Library.',
-        liveEmpty: undefined as string | undefined,
-        primary,
-        fullShows,
-        live: undefined as StreamItem[] | undefined,
-        other,
-      }
-    }
+    // Series is a single M2Box + NetMirror shelf — no Full Shows / Now Airing tabs.
 
     if (categoryId === 'movies') {
       const primary = prepareShelfList(
@@ -418,22 +389,7 @@ export function SectionPage() {
       ]
     }
     if (categoryId === 'series') {
-      return [
-        ...prepareShelfList(
-          items.filter((item) => isSeriesFullShowItem(item)),
-          shelfOpts,
-        ),
-        ...prepareShelfList(
-          items.filter((item) => isSeriesTrendingItem(item)),
-          { ...shelfOpts, newestFirst: true },
-        ),
-        ...prepareShelfList(
-          items.filter(
-            (item) => !isSeriesFullShowItem(item) && !isSeriesTrendingItem(item),
-          ),
-          shelfOpts,
-        ),
-      ]
+      return prepareShelfList(items, shelfOpts)
     }
     if (categoryId === 'movies') {
       return [
@@ -474,7 +430,7 @@ export function SectionPage() {
         ),
       ]
     }
-    return prepareShelfList(items, shelfOpts)
+    return pinSportsShortcuts(prepareShelfList(items, shelfOpts), categoryId)
   }, [items, categoryId, shelfOpts])
 
   const filtered = useMemo(() => {
@@ -495,35 +451,6 @@ export function SectionPage() {
     }
     setGrowth(recordSectionTitleCount(categoryId, shelfItems.length))
   }, [ready, trackGrowth, categoryId, shelfItems.length])
-
-  // Older EZTV titles aren't in the recent-API shelf — resolve by name on search.
-  useEffect(() => {
-    if (!ready || categoryId !== 'series') return
-    const q = query.trim()
-    if (q.length < 3) return
-    const qLower = q.toLowerCase()
-    if (eztvLookupRef.current === qLower) return
-    // Avoid scanning the full shelf on every catalog mutation during sync.
-    const timer = window.setTimeout(() => {
-      void (async () => {
-        const sources = loadTorrentSources().filter((source) =>
-          isEztvSource(source.url, source.label),
-        )
-        if (sources.length === 0) return
-        for (const source of sources) {
-          const link = await lookupEztvShowCard(q, source)
-          if (!link) continue
-          eztvLookupRef.current = qLower
-          await upsertTorrentItems([
-            linkToCatalogItem(link, source, 'series', ANIME_SHELF_FULL_SHOWS),
-          ])
-          await reloadTorrentCatalog()
-          break
-        }
-      })()
-    }, 600)
-    return () => window.clearTimeout(timer)
-  }, [ready, categoryId, query, reloadTorrentCatalog])
 
   const growthLine = growth ? formatSectionGrowth(growth) : null
 
@@ -707,7 +634,7 @@ export function SectionPage() {
         )}
         {showSourceTools && (
           <>
-            {meta.id !== 'kids' && (
+            {meta.id !== 'kids' && meta.id !== 'series' && (
               <label className="check-toggle tool-toggle">
                 <input
                   type="checkbox"
@@ -717,6 +644,7 @@ export function SectionPage() {
                 Hide IPTV
               </label>
             )}
+            {meta.id !== 'series' && (
             <label className="check-toggle tool-toggle">
               <input
                 type="checkbox"
@@ -725,6 +653,7 @@ export function SectionPage() {
               />
               Websites first
             </label>
+            )}
             {meta.id !== 'movies' && (
               <label className="check-toggle tool-toggle">
                 <input
@@ -813,7 +742,11 @@ export function SectionPage() {
           autoCheck={showSourceTools ? false : autoCheck}
           showHealthFilters={!showSourceTools}
           autoHideUnresponsive={!showSourceTools}
-          emptyHint={`No ${meta.label.toLowerCase()} titles yet. Import a playlist or add a website in Library to fill this shelf.`}
+          emptyHint={
+            categoryId === 'series'
+              ? 'No shows yet — sync M2Box or NetMirror in Library.'
+              : `No ${meta.label.toLowerCase()} titles yet. Import a playlist or add a website in Library to fill this shelf.`
+          }
         />
       )}
       {remaining > 0 && (
