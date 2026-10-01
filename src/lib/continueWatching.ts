@@ -59,6 +59,7 @@ const CATEGORY_LABEL: Record<VodCategoryId, string> = {
   movies: 'Movie',
   series: 'Series',
   anime: 'Anime',
+  kids: 'Kids',
 }
 
 export function vodCategoryLabel(category: CategoryId): string {
@@ -250,6 +251,9 @@ export function streamItemFromContinueEntry(entry: ContinueWatchingEntry): Strea
   const transport =
     entry.transport ||
     (entry.torrentUri || entry.sourceKind === 'torrent' ? 'torrent' : 'direct')
+  const sourceKind =
+    entry.sourceKind ||
+    (transport === 'torrent' || entry.torrentUri ? 'torrent' : undefined)
   return {
     id: entry.id,
     title: entry.title,
@@ -260,7 +264,7 @@ export function streamItemFromContinueEntry(entry: ContinueWatchingEntry): Strea
     torrentUri: entry.torrentUri,
     detailUrl: entry.detailUrl || entry.playUrl,
     transport,
-    sourceKind: entry.sourceKind || (transport === 'torrent' ? 'torrent' : undefined),
+    sourceKind,
     source: entry.source,
     runtimeSeconds: entry.runtimeSeconds,
   }
@@ -554,6 +558,52 @@ export function upsertContinueEntry(
   // Replace only this title id — never drop other categories' resumes.
   const others = readAll().filter((item) => item.id !== next.id)
   writeAll([next, ...others])
+}
+
+/**
+ * Record Continue watching for Web Browser embeds (YMovies / NetMirror).
+ * Native Player never runs for those, so progress must be seeded here.
+ */
+export function recordWebEmbedContinue(input: {
+  id: string
+  title: string
+  poster?: string
+  category: CategoryId
+  playlistIndex: number
+  episodeTitle?: string
+  detailUrl?: string
+  playUrl?: string
+  transport?: StreamTransport
+  sourceKind?: StreamSourceKind
+  source?: string
+  currentTime?: number
+  duration?: number
+}) {
+  if (!isVodCategory(input.category)) return
+  const existing = getContinueEntry(input.id)
+  const playhead = Math.max(
+    MIN_SECONDS,
+    Number(input.currentTime) || 0,
+    existing?.currentTime || 0,
+  )
+  upsertContinueEntry(
+    {
+      id: input.id,
+      title: input.title,
+      poster: input.poster || existing?.poster,
+      category: input.category,
+      playlistIndex: input.playlistIndex,
+      episodeTitle: input.episodeTitle || existing?.episodeTitle,
+      currentTime: playhead,
+      duration: Number(input.duration) || existing?.duration || 0,
+      detailUrl: input.detailUrl || existing?.detailUrl,
+      playUrl: input.playUrl || existing?.playUrl,
+      transport: input.transport || existing?.transport || 'direct',
+      sourceKind: input.sourceKind || existing?.sourceKind,
+      source: input.source || existing?.source,
+    },
+    { allowUnknownDuration: true, playbackUrl: input.playUrl },
+  )
 }
 
 export function progressPercent(entry: ContinueWatchingEntry): number {

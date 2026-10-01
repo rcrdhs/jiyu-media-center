@@ -10,6 +10,7 @@ import {
 } from '../lib/activityLog'
 import { buildXtreamPlaylistUrl, normalizeIptvPlaylistUrl, type IptvOutput } from '../lib/iptv'
 import { probeStreamUrl } from '../lib/streamHealth'
+import { maskActivityMessage } from '../lib/sourceMask'
 import {
   ensurePerformanceProfile,
   getPerformanceMode,
@@ -322,11 +323,11 @@ export function LibraryPage() {
     <div className="page">
       <header className="page-header">
         <p className="eyebrow">Library</p>
-        <h1>{kidsMode ? 'Kids mode lock' : 'Streams, IPTV & websites'}</h1>
+        <h1>{kidsMode ? 'Kids mode lock' : 'Streams & IPTV'}</h1>
         <p className="lede">
           {kidsMode
             ? 'Enter the PIN below to unlock Sports, Movies, and the rest of the library.'
-            : 'Add M3U / IPTV sources and catalog websites — each stays active together. No need to replace the previous list.'}
+            : 'Add M3U / IPTV sources. Each list stays active together. No need to replace the previous one.'}
         </p>
       </header>
 
@@ -625,7 +626,7 @@ export function LibraryPage() {
                       <span className={`activity-kind activity-kind-${entry.kind}`}>
                         {entry.kind}
                       </span>
-                      <span>{entry.message}</span>
+                      <span>{maskActivityMessage(entry.message)}</span>
                     </li>
                   ))}
                 </ul>

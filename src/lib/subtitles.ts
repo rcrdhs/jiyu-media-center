@@ -4,6 +4,13 @@ export interface SubtitleCue {
   text: string
 }
 
+/** Wyzie free-tier (and similar) injects ad copy as fake cues — never show those. */
+export function isJunkSubtitleText(text: string): boolean {
+  return /store\.wyzie\.io|wyzie\.io\/|free plan|unlock every source|ad-free subs|ai translation/i.test(
+    String(text || ''),
+  )
+}
+
 function parseTimestamp(value: string): number {
   // SRT uses commas for millis; WebVTT uses dots.
   const normalized = value.trim().replace(',', '.')
@@ -42,7 +49,7 @@ export function parseSubtitleCues(raw: string): SubtitleCue[] {
       .replace(/<\/?[^>]+>/g, '')
       .replace(/\{[^}]+\}/g, '')
       .trim()
-    if (!cueText) continue
+    if (!cueText || isJunkSubtitleText(cueText)) continue
 
     cues.push({
       start: parseTimestamp(match[1]),
@@ -57,7 +64,9 @@ export function parseSubtitleCues(raw: string): SubtitleCue[] {
 export function activeSubtitleText(cues: SubtitleCue[], time: number): string {
   for (let i = cues.length - 1; i >= 0; i -= 1) {
     const cue = cues[i]
-    if (time >= cue.start && time <= cue.end) return cue.text
+    if (time >= cue.start && time <= cue.end) {
+      return isJunkSubtitleText(cue.text) ? '' : cue.text
+    }
   }
   return ''
 }

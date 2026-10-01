@@ -7,6 +7,7 @@
 import { stableTorrentItemId } from './torrentCatalogStore'
 import { TorrentSyncCancelledError } from './torrentSyncControl'
 import { hasRealDebridToken } from './debridSettings'
+import { nativeFetchText, isNativeHttpPlatform } from './nativeHttp'
 import {
   fetchTorrentioEpisodeStreams,
   isDebridHttpPlayUrl,
@@ -53,17 +54,84 @@ import {
   parseNetMirrorListHtml,
   NETMIRROR_CATALOG_ORIGIN,
 } from './netmirror'
+import {
+  fetchYmoviesEpisodeList,
+  isYmoviesCatalogItem,
+  isYmoviesSeriesFeedUrl,
+  isYmoviesTvListUrl,
+  isYmoviesUrl,
+  parseYmoviesListHtml,
+  ymoviesFeedOrigin,
+  ymoviesListPageNumber,
+  ymoviesTvListPageUrl,
+  YMOVIES_CATALOG_ORIGIN,
+  YMOVIES_CATALOG_PAGES,
+} from './ymovies'
+import {
+  CINETARO_CATALOG_ORIGIN,
+  CINETARO_CATALOG_PAGES,
+  cinetaroFeedOrigin,
+  cinetaroListPageNumber,
+  cinetaroTvListPageUrl,
+  fetchCinetaroEpisodeList,
+  isCinetaroCatalogItem,
+  isCinetaroSeriesFeedUrl,
+  isCinetaroTvListUrl,
+  isCinetaroUrl,
+  parseCinetaroListHtml,
+} from './cinetaro'
+import {
+  fetchTmdbTvCatalogLinks,
+  fetchTmdbTvEpisodeList,
+  isTmdbAnimeFullFeedUrl,
+  isTmdbKidsShowsFeedUrl,
+  isTmdbTvCatalogItem,
+  isTmdbTvFeedUrl,
+  isTmdbTvUrl,
+  tmdbAnimeFullFeedUrl,
+  tmdbKidsShowsFeedUrl,
+  tmdbTvAiringFeedUrl,
+  tmdbTvByYearFeedUrl,
+  tmdbTvFeedKind,
+  tmdbTvIdFromUrl,
+  tmdbTvPopularFeedUrl,
+  tmdbTvTrendingFeedUrl,
+  TMDB_ANIME_SOURCE_ID,
+  TMDB_KIDS_SOURCE_ID,
+  TMDB_TV_SOURCE_ID,
+} from './tmdbTv'
+import {
+  fetchZenoxAnimationCatalogLinks,
+  isZenoxAnimationFeedUrl,
+  isZenoxCatalogItem,
+  isZenoxUrl,
+  zenoxAnimationFeedUrl,
+  ZENOX_SOURCE_ID,
+} from './zenox'
 
 export { getConnectionDownlinkMbps, targetQualityForSpeed }
 export { isM2BoxUrl, isM2BoxCatalogItem } from './m2box'
 export { isNetMirrorUrl, isNetMirrorCatalogItem } from './netmirror'
+export { isYmoviesUrl, isYmoviesCatalogItem } from './ymovies'
+export { isCinetaroUrl, isCinetaroCatalogItem } from './cinetaro'
+export { isTmdbTvUrl, isTmdbTvCatalogItem } from './tmdbTv'
+export { isZenoxUrl, isZenoxCatalogItem } from './zenox'
 
-/** Series shelf web catalogs (M2Box + NetMirror) — not torrents / IPTV. */
+/** Series shelf web catalogs — not raw torrents / IPTV. */
 export function isSeriesWebCatalogItem(item: {
   url?: string
   detailUrl?: string
+  torrentSourceId?: string
+  rivestreamTmdbId?: string
 }): boolean {
-  return isM2BoxCatalogItem(item) || isNetMirrorCatalogItem(item)
+  return (
+    isM2BoxCatalogItem(item) ||
+    isNetMirrorCatalogItem(item) ||
+    isYmoviesCatalogItem(item) ||
+    isTmdbTvCatalogItem(item) ||
+    isCinetaroCatalogItem(item) ||
+    isZenoxCatalogItem(item)
+  )
 }
 
 export interface TorrentSource {
@@ -73,6 +141,11 @@ export interface TorrentSource {
   url: string
   /** Synced titles stay in the catalog but are omitted from Movies/Series/Anime shelves */
   hiddenFromShelves?: boolean
+  /**
+   * Shipped with Jiyu — cannot be removed or renamed by end users.
+   * New user-added sites stay unlocked.
+   */
+  locked?: boolean
 }
 
 export interface TorrentResult {
@@ -101,6 +174,14 @@ export interface TorrentPageLink {
   /** NetMirror freemovies post / TMDB ids when known. */
   netmirrorPostId?: string
   netmirrorTmdbId?: string
+  /** YMovies internal show id when known. */
+  ymoviesId?: string
+  /** Cinetaro TMDB TV id when known. */
+  cinetaroTmdbId?: string
+  /** TMDB TV id for RiveStream / TMDB catalog rows. */
+  rivestreamTmdbId?: string
+  /** Optional per-link shelf tag (Zenox Animation splits anime/kids/series). */
+  shelfTag?: string
 }
 
 const SOURCES_KEY = 'jiyu.torrent.sources'
@@ -115,10 +196,75 @@ const TORRENTFUNK_SOURCE: TorrentSource = {
   label: 'torrentfunk.com',
   url: 'https://www.torrentfunk.com/television.html',
 }
-const NETMIRROR_SOURCE: TorrentSource = {
-  id: 'builtin-netmirror',
-  label: 'NetMirror · TV Series',
-  url: 'https://ww1.surf/netmirror/',
+const YTS_SOURCE: TorrentSource = {
+  id: 'builtin-yts',
+  label: 'YTS',
+  url: 'https://yts.gg/',
+}
+const CINETARO_SOURCE: TorrentSource = {
+  id: 'builtin-cinetaro',
+  label: 'Cinetaro · TV Series',
+  url: 'https://cinetaro.to/movie/tv-series?page=1',
+}
+/** Backup TV shelf — hidden by default (CF/origin flaky); Sync + Show still available. */
+const YMOVIES_SOURCE: TorrentSource = {
+  id: 'builtin-ymovies',
+  label: 'YMovies · TV Series (backup)',
+  url: 'https://ww.ymovies.vip/movie/filter/series/',
+  hiddenFromShelves: true,
+}
+const TMDB_TV_SOURCE: TorrentSource = {
+  id: TMDB_TV_SOURCE_ID,
+  label: 'TMDB · TV Series (Rive)',
+  url: tmdbTvPopularFeedUrl(),
+}
+const TMDB_ANIME_SOURCE: TorrentSource = {
+  id: TMDB_ANIME_SOURCE_ID,
+  label: 'TMDB · Anime Full Shows (Rive)',
+  url: tmdbAnimeFullFeedUrl(),
+}
+const TMDB_KIDS_SOURCE: TorrentSource = {
+  id: TMDB_KIDS_SOURCE_ID,
+  label: 'TMDB · Kids Shows (Rive)',
+  url: tmdbKidsShowsFeedUrl(),
+}
+const ZENOX_SOURCE: TorrentSource = {
+  id: ZENOX_SOURCE_ID,
+  label: 'Zenox · Animation',
+  url: 'https://zenox.lol/tv?genre=16',
+}
+
+/** Canonical sites shipped with Jiyu — always restored; not user-removable. */
+export const SHIPPED_TORRENT_SOURCES: readonly TorrentSource[] = [
+  { ...SUBSPLEASE_SOURCE, locked: true },
+  { ...TORRENTFUNK_SOURCE, locked: true },
+  { ...YTS_SOURCE, locked: true },
+  { ...CINETARO_SOURCE, locked: true },
+  { ...YMOVIES_SOURCE, locked: true },
+  { ...TMDB_TV_SOURCE, locked: true },
+  { ...TMDB_ANIME_SOURCE, locked: true },
+  { ...TMDB_KIDS_SOURCE, locked: true },
+  { ...ZENOX_SOURCE, locked: true },
+]
+
+/** Rev 3: Cinetaro is primary TV series; YMovies hidden from shelves (backup only). */
+const SHIPPED_SOURCES_REVISION = 3
+const SHIPPED_SOURCES_REVISION_KEY = 'jiyu.torrent.sources.shippedRev'
+
+function sourceUrlKey(url: string): string {
+  try {
+    const u = new URL(url.trim())
+    return `${u.hostname.replace(/^www\./, '').toLowerCase()}${u.pathname.replace(/\/$/, '').toLowerCase()}`
+  } catch {
+    return url.trim().toLowerCase()
+  }
+}
+
+export function isShippedTorrentSource(source: Pick<TorrentSource, 'id' | 'url' | 'locked'>): boolean {
+  if (source.locked) return true
+  if (SHIPPED_TORRENT_SOURCES.some((s) => s.id === source.id)) return true
+  const key = sourceUrlKey(source.url)
+  return SHIPPED_TORRENT_SOURCES.some((s) => sourceUrlKey(s.url) === key)
 }
 
 function labelSubsPleaseSource(source: TorrentSource): TorrentSource {
@@ -145,10 +291,47 @@ function labelTorrentFunkSource(source: TorrentSource): TorrentSource {
   }
 }
 
-function labelNetMirrorSource(source: TorrentSource): TorrentSource {
+function labelYmoviesSource(source: TorrentSource): TorrentSource {
   try {
-    if (!isNetMirrorUrl(source.url)) return source
-    return { ...source, label: source.label?.trim() || 'NetMirror · TV Series' }
+    if (!isYmoviesUrl(source.url)) return source
+    const label = source.label?.trim() || ''
+    if (!label || /^YMovies · TV Series$/i.test(label)) {
+      return { ...source, label: 'YMovies · TV Series (backup)' }
+    }
+    return { ...source, label }
+  } catch {
+    return source
+  }
+}
+
+function labelCinetaroSource(source: TorrentSource): TorrentSource {
+  try {
+    if (!isCinetaroUrl(source.url)) return source
+    return { ...source, label: source.label?.trim() || 'Cinetaro · TV Series' }
+  } catch {
+    return source
+  }
+}
+
+function labelTmdbTvSource(source: TorrentSource): TorrentSource {
+  try {
+    if (source.id === TMDB_KIDS_SOURCE_ID || isTmdbKidsShowsFeedUrl(source.url)) {
+      return { ...source, label: source.label?.trim() || 'TMDB · Kids Shows (Rive)' }
+    }
+    if (source.id === TMDB_ANIME_SOURCE_ID || isTmdbAnimeFullFeedUrl(source.url)) {
+      return { ...source, label: source.label?.trim() || 'TMDB · Anime Full Shows (Rive)' }
+    }
+    if (!isTmdbTvUrl(source.url) && source.id !== TMDB_TV_SOURCE_ID) return source
+    return { ...source, label: source.label?.trim() || 'TMDB · TV Series (Rive)' }
+  } catch {
+    return source
+  }
+}
+
+function labelZenoxSource(source: TorrentSource): TorrentSource {
+  try {
+    if (source.id !== ZENOX_SOURCE_ID && !isZenoxUrl(source.url)) return source
+    return { ...source, label: source.label?.trim() || 'Zenox · Animation' }
   } catch {
     return source
   }
@@ -161,17 +344,55 @@ function normalizeTorrentSourceList(parsed: unknown): TorrentSource[] {
           Boolean(s && typeof s === 'object' && typeof (s as TorrentSource).url === 'string'),
       )
     : []
-  if (!sources.some((source) => isSubsPleaseUrl(source.url))) {
-    sources.push(SUBSPLEASE_SOURCE)
+  // Drop NetMirror — freemovies.lol CF unlock is unreliable; Cinetaro replaces it.
+  const kept = sources.filter((source) => !isNetMirrorUrl(source.url))
+  for (const source of kept) {
+    // yts.mx no longer resolves; the live API is on yts.gg.
+    if (!isYtsSource(source.url, source.label)) continue
+    try {
+      const host = new URL(source.url).hostname.replace(/^www\./, '')
+      if (host === 'yts.mx' || host.endsWith('.yts.mx')) {
+        source.url = 'https://yts.gg/'
+        source.label = source.label?.trim() || 'YTS'
+      }
+    } catch {
+      /* keep url */
+    }
   }
-  if (!sources.some((source) => isTorrentFunkUrl(source.url))) {
-    sources.push(TORRENTFUNK_SOURCE)
+
+  const shippedById = new Map(SHIPPED_TORRENT_SOURCES.map((s) => [s.id, { ...s, locked: true }]))
+  const shippedUrlKeys = new Set(SHIPPED_TORRENT_SOURCES.map((s) => sourceUrlKey(s.url)))
+  const userExtras: TorrentSource[] = []
+
+  for (const source of kept) {
+    const shipped = shippedById.get(source.id)
+    if (shipped) {
+      // Keep hide preference only — url/label/id stay canonical.
+      shippedById.set(source.id, {
+        ...shipped,
+        hiddenFromShelves: Boolean(source.hiddenFromShelves),
+        locked: true,
+      })
+      continue
+    }
+    if (shippedUrlKeys.has(sourceUrlKey(source.url))) {
+      // Duplicate of a shipped site under another id — drop the duplicate.
+      continue
+    }
+    userExtras.push({ ...source, locked: false })
   }
-  if (!sources.some((source) => isNetMirrorUrl(source.url))) {
-    sources.push(NETMIRROR_SOURCE)
-  }
-  return sources.map((source) =>
-    labelNetMirrorSource(labelTorrentFunkSource(labelSubsPleaseSource(source))),
+
+  const merged = [...shippedById.values(), ...userExtras]
+  return merged.map((source) =>
+    labelZenoxSource(
+      labelTmdbTvSource(
+        labelCinetaroSource(
+          labelYmoviesSource(
+            labelTorrentFunkSource(labelSubsPleaseSource(source)),
+          ),
+        ),
+      ),
+    ),
   )
 }
 
@@ -180,14 +401,26 @@ function readTorrentSourcesLocal(): TorrentSource[] {
     const raw = localStorage.getItem(SOURCES_KEY)
     return normalizeTorrentSourceList(raw ? JSON.parse(raw) : [])
   } catch {
-    return [SUBSPLEASE_SOURCE, TORRENTFUNK_SOURCE]
+    return normalizeTorrentSourceList([])
   }
 }
 
 export function loadTorrentSources(): TorrentSource[] {
-  const sources = readTorrentSourcesLocal()
+  let sources = readTorrentSourcesLocal()
   try {
+    const rev = Number(localStorage.getItem(SHIPPED_SOURCES_REVISION_KEY) || '0') || 0
+    if (rev < 3) {
+      // Prefer Cinetaro for Series; keep YMovies as optional backup only.
+      sources = sources.map((source) =>
+        source.id === 'builtin-ymovies' || isYmoviesUrl(source.url)
+          ? { ...source, hiddenFromShelves: true }
+          : source,
+      )
+    }
     localStorage.setItem(SOURCES_KEY, JSON.stringify(sources))
+    if (rev < SHIPPED_SOURCES_REVISION) {
+      localStorage.setItem(SHIPPED_SOURCES_REVISION_KEY, String(SHIPPED_SOURCES_REVISION))
+    }
   } catch {
     /* ignore */
   }
@@ -891,7 +1124,8 @@ function scrapeTorlockTorznab(xml: string, pageUrl: string): {
 } {
   const feedCategory = torlockCategoryFromUrl(pageUrl) ?? 'movies'
   const origin = new URL(pageUrl).origin
-  const offset = Math.max(0, Number(new URL(pageUrl).searchParams.get('offset') || 0) || 0)
+  const _offset = Math.max(0, Number(new URL(pageUrl).searchParams.get('offset') || 0) || 0)
+  void _offset
   const links: TorrentPageLink[] = []
   const seen = new Set<string>()
 
@@ -1028,6 +1262,10 @@ function torrentFunkSeriesFeedUrl(origin: string): string {
 function torrentFunkAnimeFeedUrl(origin: string): string {
   return `${TORRENTFUNK_ANIME_FEED_PREFIX}?origin=${encodeURIComponent(normalizeTorrentFunkOrigin(origin))}`
 }
+
+// Keep feed URL helpers available for sync / diagnostics even if unused in this module.
+void torrentFunkSeriesFeedUrl
+void torrentFunkAnimeFeedUrl
 
 function isTorrentFunkSeriesFeedUrl(pageUrl: string): boolean {
   return pageUrl.startsWith(TORRENTFUNK_SERIES_FEED_PREFIX)
@@ -1593,6 +1831,235 @@ async function scrapeNetMirrorPage(
   }
   // Wrapper / root URLs → TV Series category on freemovies.lol.
   return scrapeNetMirrorCatalogFeed(netmirrorSeriesFeedUrl(NETMIRROR_CATALOG_ORIGIN), sourceLabel)
+}
+
+/** One YMovies listing page (~40 titles). Browse + sync paginate; never crawl all pages here. */
+async function scrapeYmoviesListing(
+  listUrl: string,
+  origin: string,
+  sourceLabel: string,
+): Promise<TorrentScrapeOutcome> {
+  const page = ymoviesListPageNumber(listUrl)
+  const { ok, content, error: fetchError } = await fetchText(listUrl)
+  if (!ok || !content) {
+    return emptyOutcome(
+      listUrl,
+      sourceLabel,
+      fetchError || 'could not load YMovies TV Series',
+    )
+  }
+  const links = parseYmoviesListHtml(content, origin)
+  const nextPage =
+    links.length > 0 && page < YMOVIES_CATALOG_PAGES
+      ? ymoviesTvListPageUrl(origin, page + 1)
+      : null
+  const prevPage = page > 1 ? ymoviesTvListPageUrl(origin, page - 1) : null
+  return {
+    results: [],
+    links,
+    pageTitle: `${sourceLabel} · TV Series · page ${page}`,
+    pageUrl: listUrl,
+    nextPage,
+    prevPage,
+    searchTemplate: null,
+    error:
+      links.length === 0 ? `${sourceLabel}: no TV series found on YMovies` : null,
+  }
+}
+
+async function scrapeYmoviesPage(
+  pageUrl: string,
+  sourceLabel: string,
+): Promise<TorrentScrapeOutcome> {
+  if (isYmoviesSeriesFeedUrl(pageUrl)) {
+    const origin = ymoviesFeedOrigin(pageUrl)
+    return scrapeYmoviesListing(ymoviesTvListPageUrl(origin, 1), origin, sourceLabel)
+  }
+  if (isYmoviesTvListUrl(pageUrl)) {
+    let origin = YMOVIES_CATALOG_ORIGIN
+    try {
+      origin = new URL(pageUrl).origin
+    } catch {
+      /* default */
+    }
+    return scrapeYmoviesListing(pageUrl, origin, sourceLabel)
+  }
+  // Detail / other paths → first catalog page (ShowPage handles play).
+  return scrapeYmoviesListing(
+    ymoviesTvListPageUrl(YMOVIES_CATALOG_ORIGIN, 1),
+    YMOVIES_CATALOG_ORIGIN,
+    sourceLabel,
+  )
+}
+
+/** One Cinetaro listing page (~20 titles). Browse + sync paginate; never crawl all pages here. */
+async function scrapeCinetaroListing(
+  listUrl: string,
+  origin: string,
+  sourceLabel: string,
+): Promise<TorrentScrapeOutcome> {
+  const page = cinetaroListPageNumber(listUrl)
+  // Android: never open cinetaro.to HTML during series sync. That page is a
+  // Cloudflare check, and a title tap before sync finishes reloads it forever.
+  try {
+    const { Capacitor } = await import('@capacitor/core')
+    if (Capacitor.isNativePlatform()) {
+      const { fetchCinetaroCatalogViaTmdb } = await import('./cinetaro')
+      const viaTmdb = await fetchCinetaroCatalogViaTmdb(origin)
+      if (viaTmdb.links.length > 0) {
+        return {
+          results: [],
+          links: viaTmdb.links,
+          pageTitle: `${sourceLabel} · TV Series · TMDB mirror (${viaTmdb.links.length.toLocaleString()})`,
+          pageUrl: listUrl,
+          nextPage: null,
+          prevPage: null,
+          searchTemplate: null,
+          error: null,
+        }
+      }
+      return emptyOutcome(
+        listUrl,
+        sourceLabel,
+        viaTmdb.error || 'could not load Cinetaro TV Series',
+      )
+    }
+  } catch (err) {
+    try {
+      const { Capacitor } = await import('@capacitor/core')
+      if (Capacitor.isNativePlatform()) {
+        return emptyOutcome(
+          listUrl,
+          sourceLabel,
+          err instanceof Error ? err.message : 'could not load Cinetaro TV Series',
+        )
+      }
+    } catch {
+      /* desktop HTML scrape below */
+    }
+  }
+  const { ok, content, error: fetchError } = await fetchText(listUrl)
+  if (ok && content) {
+    const links = parseCinetaroListHtml(content, origin)
+    if (links.length > 0) {
+      const nextPage =
+        page < CINETARO_CATALOG_PAGES ? cinetaroTvListPageUrl(origin, page + 1) : null
+      const prevPage = page > 1 ? cinetaroTvListPageUrl(origin, page - 1) : null
+      return {
+        results: [],
+        links,
+        pageTitle: `${sourceLabel} · TV Series · page ${page}`,
+        pageUrl: listUrl,
+        nextPage,
+        prevPage,
+        searchTemplate: null,
+        error: null,
+      }
+    }
+  }
+
+  // Cloudflare often blocks list HTML on Android — mirror via TMDB (same detail ids).
+  if (page <= 1) {
+    try {
+      const { fetchCinetaroCatalogViaTmdb } = await import('./cinetaro')
+      const viaTmdb = await fetchCinetaroCatalogViaTmdb(origin)
+      if (viaTmdb.links.length > 0) {
+        return {
+          results: [],
+          links: viaTmdb.links,
+          pageTitle: `${sourceLabel} · TV Series · TMDB mirror (${viaTmdb.links.length.toLocaleString()})`,
+          pageUrl: listUrl,
+          nextPage: null,
+          prevPage: null,
+          searchTemplate: null,
+          error: null,
+        }
+      }
+      return emptyOutcome(
+        listUrl,
+        sourceLabel,
+        viaTmdb.error || fetchError || 'could not load Cinetaro TV Series',
+      )
+    } catch (err) {
+      return emptyOutcome(
+        listUrl,
+        sourceLabel,
+        err instanceof Error ? err.message : fetchError || 'could not load Cinetaro TV Series',
+      )
+    }
+  }
+
+  return emptyOutcome(
+    listUrl,
+    sourceLabel,
+    fetchError || 'could not load Cinetaro TV Series',
+  )
+}
+
+async function scrapeCinetaroPage(
+  pageUrl: string,
+  sourceLabel: string,
+): Promise<TorrentScrapeOutcome> {
+  if (isCinetaroSeriesFeedUrl(pageUrl)) {
+    const origin = cinetaroFeedOrigin(pageUrl)
+    return scrapeCinetaroListing(cinetaroTvListPageUrl(origin, 1), origin, sourceLabel)
+  }
+  if (isCinetaroTvListUrl(pageUrl)) {
+    let origin = CINETARO_CATALOG_ORIGIN
+    try {
+      origin = new URL(pageUrl).origin
+    } catch {
+      /* default */
+    }
+    return scrapeCinetaroListing(pageUrl, origin, sourceLabel)
+  }
+  return scrapeCinetaroListing(
+    cinetaroTvListPageUrl(CINETARO_CATALOG_ORIGIN, 1),
+    CINETARO_CATALOG_ORIGIN,
+    sourceLabel,
+  )
+}
+
+async function scrapeTmdbTvPage(
+  pageUrl: string,
+  sourceLabel: string,
+  onProgress?: (done: number, total: number) => void,
+): Promise<TorrentScrapeOutcome> {
+  const kind = isTmdbTvFeedUrl(pageUrl) ? tmdbTvFeedKind(pageUrl) : 'popular'
+  const api = await fetchTmdbTvCatalogLinks(kind, onProgress)
+  return {
+    results: [],
+    links: api.links,
+    pageTitle: `${sourceLabel} · ${kind} (${api.links.length.toLocaleString()})`,
+    pageUrl,
+    nextPage: null,
+    prevPage: null,
+    searchTemplate: null,
+    error: api.links.length === 0 ? api.error || `${sourceLabel}: no TMDB TV series` : null,
+  }
+}
+
+async function scrapeZenoxPage(
+  pageUrl: string,
+  sourceLabel: string,
+  onProgress?: (done: number, total: number) => void,
+): Promise<TorrentScrapeOutcome> {
+  const api = await fetchZenoxAnimationCatalogLinks(onProgress)
+  const counts = api.counts
+  const summary = `anime ${counts.anime} · kids ${counts.kids} · series ${counts.series}`
+  return {
+    results: [],
+    links: api.links,
+    pageTitle: `${sourceLabel} · Animation (${api.links.length.toLocaleString()}) · ${summary}`,
+    pageUrl: isZenoxAnimationFeedUrl(pageUrl) ? pageUrl : zenoxAnimationFeedUrl(),
+    nextPage: null,
+    prevPage: null,
+    searchTemplate: null,
+    error:
+      api.links.length === 0
+        ? api.error || `${sourceLabel}: no Zenox Animation titles`
+        : null,
+  }
 }
 
 async function scrapeTorrentFunkPage(
@@ -2200,12 +2667,26 @@ export function buildEpisodeChoices(
   return episodes
 }
 
-/** Series / anime / Kids Shows / M2Box / NetMirror cards open an episode list before playback. */
+/** Series / anime / Kids Shows / M2Box / NetMirror / YMovies / TMDB cards open an episode list before playback. */
 export function isShowBrowseItem(
-  item: Pick<StreamItem, 'category' | 'transport' | 'sourceKind' | 'tags' | 'url' | 'detailUrl'>,
+  item: Pick<
+    StreamItem,
+    | 'category'
+    | 'transport'
+    | 'sourceKind'
+    | 'tags'
+    | 'url'
+    | 'detailUrl'
+    | 'torrentSourceId'
+    | 'rivestreamTmdbId'
+    | 'cinetaroTmdbId'
+  >,
 ): boolean {
   if (isM2BoxCatalogItem(item)) return true
   if (isNetMirrorCatalogItem(item)) return true
+  if (isYmoviesCatalogItem(item)) return true
+  if (isTmdbTvCatalogItem(item)) return true
+  if (isCinetaroCatalogItem(item)) return true
   if (!(item.transport === 'torrent' || item.sourceKind === 'torrent')) return false
   if (item.category === 'series' || item.category === 'anime') return true
   if (item.category === 'kids') {
@@ -2256,9 +2737,15 @@ export function collapseEpisodeRowsToShows(items: StreamItem[]): StreamItem[] {
     let best = group[0]
     for (const row of group) {
       const betterPoster = !best.poster && row.poster
+      const seeds = (item: StreamItem) => {
+        const m = /(\d[\d,]*)\s*seeders?\b/i.exec(item.description || '')
+        return m ? Number(m[1]!.replace(/,/g, '')) || 0 : 0
+      }
+      const moreSeeds = seeds(row) > seeds(best)
       const newer = (row.releasedAt ?? 0) > (best.releasedAt ?? 0)
       const sharper = parseQuality(row.title) > parseQuality(best.title)
-      if (betterPoster || newer || sharper) best = row
+      // Prefer living swarms over a sharper dead release.
+      if (moreSeeds || betterPoster || (!seeds(best) && (newer || sharper))) best = row
     }
     const showTitle = cleanShowDisplayTitle(best.title) || best.title
     const epCount = new Set(group.map((row) => parseEpisodeKey(row.title)).filter(Boolean)).size
@@ -2301,6 +2788,9 @@ export async function resolveShowEpisodes(
   netmirrorPostId?: string
   netmirrorTmdbId?: string
   m2boxSubjectId?: string
+  ymoviesId?: string
+  cinetaroTmdbId?: string
+  rivestreamTmdbId?: string
 }> {
   if (isM2BoxCatalogItem(item)) {
     const detail = item.detailUrl || item.url
@@ -2341,6 +2831,67 @@ export async function resolveShowEpisodes(
       description: result.description,
       netmirrorPostId: result.postId || undefined,
       netmirrorTmdbId: result.tmdbId || undefined,
+    }
+  }
+
+  if (isYmoviesCatalogItem(item)) {
+    const detail = item.detailUrl || item.url
+    const result = await fetchYmoviesEpisodeList(detail, item.ymoviesId)
+    if (result.episodes.length === 0) {
+      return { episodes: [], error: result.error || 'No episodes found on YMovies.' }
+    }
+    return {
+      episodes: result.episodes.map((ep) => ({
+        key: ep.key,
+        title: ep.title,
+        torrentUri: '',
+        quality: 0,
+      })),
+      error: result.error,
+      description: result.description,
+      ymoviesId: result.ymoviesId || undefined,
+    }
+  }
+
+  if (isCinetaroCatalogItem(item)) {
+    const detail = item.detailUrl || item.url
+    const result = await fetchCinetaroEpisodeList(detail, item.cinetaroTmdbId)
+    if (result.episodes.length === 0) {
+      return { episodes: [], error: result.error || 'No episodes found on Cinetaro.' }
+    }
+    return {
+      episodes: result.episodes.map((ep) => ({
+        key: ep.key,
+        title: ep.title,
+        torrentUri: '',
+        quality: 0,
+      })),
+      error: result.error,
+      description: result.description,
+      cinetaroTmdbId: result.tmdbId || undefined,
+      rivestreamTmdbId: result.tmdbId || undefined,
+    }
+  }
+
+  if (isTmdbTvCatalogItem(item)) {
+    const tmdbId =
+      item.rivestreamTmdbId ||
+      tmdbTvIdFromUrl(item.detailUrl || '') ||
+      tmdbTvIdFromUrl(item.url || '')
+    const result = await fetchTmdbTvEpisodeList(tmdbId)
+    if (result.episodes.length === 0) {
+      return { episodes: [], error: result.error || 'No episodes found on TMDB.' }
+    }
+    return {
+      episodes: result.episodes.map((ep) => ({
+        key: ep.key,
+        title: ep.title,
+        torrentUri: '',
+        quality: 0,
+      })),
+      error: result.error,
+      description: result.description,
+      rivestreamTmdbId: result.tmdbId || undefined,
     }
   }
 
@@ -2510,7 +3061,10 @@ export function buildCatalogEpisodeChoices(
     uri: item.torrentUri!,
     kind: 'magnet',
     sizeBytes: 0,
-    seeders: 0,
+    seeders: (() => {
+      const fromDesc = /(\d[\d,]*)\s*seeders?\b/i.exec(item.description || '')
+      return fromDesc ? Number(fromDesc[1]!.replace(/,/g, '')) || 0 : 0
+    })(),
     sourceLabel: item.source || 'catalog',
   }))
 
@@ -2520,22 +3074,28 @@ export function buildCatalogEpisodeChoices(
 }
 
 async function fetchText(url: string): Promise<{ ok: boolean; content: string; error: string }> {
-  // Prefer the browser-UA HTML fetch so torrent sites don't serve a block page
-  if (window.signalDesktop?.fetchHtml) {
-    const result = await window.signalDesktop.fetchHtml(url)
-    return { ok: result.ok, content: result.content, error: result.error }
-  }
-  if (window.signalDesktop?.fetchPlaylist) {
-    const result = await window.signalDesktop.fetchPlaylist(url)
-    return { ok: result.ok, content: result.content, error: result.error }
-  }
+  // Prefer Electron HTML fetch (browser UA + optional CF helper), else native/Android HTTP.
+  const quiet = isYmoviesUrl(url) || isCinetaroUrl(url)
+  const headers: Record<string, string> = {}
   try {
-    const res = await fetch(url)
-    const content = await res.text()
-    return { ok: res.ok, content, error: res.ok ? '' : `HTTP ${res.status}` }
-  } catch (err) {
-    return { ok: false, content: '', error: err instanceof Error ? err.message : 'Fetch failed' }
+    const origin = new URL(url).origin
+    if (isYmoviesUrl(url) || isCinetaroUrl(url) || /freemovies\.lol/i.test(url)) {
+      headers.Referer = `${origin}/`
+      headers.Accept = 'text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8'
+    }
+  } catch {
+    /* ignore */
   }
+  const preferWebView = isYmoviesUrl(url) || isCinetaroUrl(url) || /freemovies\.lol/i.test(url)
+  // Android has no Electron CF helper — show the in-app Verify overlay when challenged.
+  const allowUnlock = isNativeHttpPlatform() && preferWebView
+  const result = await nativeFetchText(url, {
+    quiet,
+    headers: Object.keys(headers).length ? headers : undefined,
+    preferWebView,
+    allowUnlock,
+  })
+  return { ok: result.ok, content: result.content, error: result.error }
 }
 
 export interface TorrentScrapeOutcome {
@@ -2700,8 +3260,13 @@ export function isSubsPleaseLatestFeedUrl(pageUrl: string): boolean {
 
 export const ANIME_SHELF_NEW_RELEASES = 'new-releases'
 export const ANIME_SHELF_FULL_SHOWS = 'full-shows'
-/** EZTV Show List “Trending / Airing” (letter empty, status=landing). */
-export const SERIES_SHELF_TRENDING = 'trending-airing'
+/** @deprecated Prefer SERIES_SHELF_AIRING / SERIES_SHELF_TRENDING. */
+export const SERIES_SHELF_TRENDING_LEGACY = 'trending-airing'
+export const SERIES_SHELF_POPULAR = 'popular-series'
+export const SERIES_SHELF_AIRING = 'airing-series'
+export const SERIES_SHELF_TRENDING = 'trending-series'
+/** Always-on 24/7 channels routed into TV Series (PPV.st cartoons, etc.). */
+export const SERIES_SHELF_247 = '247-series'
 /** YTS most-downloaded shelf. */
 export const MOVIES_SHELF_POPULAR = 'popular-movies'
 /** YTS recently uploaded (+ other untagged movie rows). */
@@ -2712,38 +3277,74 @@ export function itemHasShelfTag(item: StreamItem, tag: string): boolean {
 }
 
 export function isAnimeNewReleaseItem(item: StreamItem): boolean {
-  return itemHasShelfTag(item, ANIME_SHELF_NEW_RELEASES)
+  if (item.category !== 'anime') return false
+  if (itemHasShelfTag(item, ANIME_SHELF_NEW_RELEASES)) return true
+  // Weekly single-ep magnets (SubsPlease/Nyaa-style "Show - 09") belong on New Releases
+  // even if an older sync tagged them full-shows or left them untagged.
+  if (itemHasShelfTag(item, ANIME_SHELF_FULL_SHOWS) && !isAnimeSingleEpisodeMagnet(item)) {
+    return false
+  }
+  return isAnimeSingleEpisodeMagnet(item)
+}
+
+/** True for a one-off episode magnet row (not a show hub / TMDB card). */
+function isAnimeSingleEpisodeMagnet(item: StreamItem): boolean {
+  if (item.category !== 'anime') return false
+  if (isTmdbTvCatalogItem(item)) return false
+  if (!(item.torrentUri && isTorrentInput(item.torrentUri))) return false
+  return Boolean(parseEpisodeKey(item.title))
 }
 
 export function isAnimeFullShowItem(item: StreamItem): boolean {
-  if (itemHasShelfTag(item, ANIME_SHELF_NEW_RELEASES)) return false
+  if (item.category !== 'anime') return false
+  // Single weekly episodes never belong on Full Shows.
+  if (isAnimeNewReleaseItem(item) || isAnimeSingleEpisodeMagnet(item)) return false
   if (itemHasShelfTag(item, ANIME_SHELF_FULL_SHOWS)) return true
-  // Legacy SubsPlease / other torrent anime without a shelf tag → Full Shows.
-  return item.category === 'anime' && (item.sourceKind === 'torrent' || item.transport === 'torrent')
+  // TMDB anime catalog rows (Ended / complete) always belong on Full Shows.
+  if (isTmdbTvCatalogItem(item)) return true
+  // Show-level torrent hubs (SubsPlease /shows/…, etc.) without an episode key.
+  if (item.sourceKind === 'torrent' || item.transport === 'torrent') {
+    return !parseEpisodeKey(item.title)
+  }
+  return false
+}
+
+export function isSeriesPopularItem(item: StreamItem): boolean {
+  if (item.category !== 'series') return false
+  if (isSeries247Item(item)) return false
+  if (isSeriesAiringItem(item) || isSeriesTrendingItem(item)) return false
+  if (itemHasShelfTag(item, SERIES_SHELF_POPULAR)) return true
+  if (itemHasShelfTag(item, ANIME_SHELF_FULL_SHOWS)) return true
+  // Web catalogs (M2Box / NetMirror / YMovies / TMDB) default to Popular.
+  if (isSeriesWebCatalogItem(item)) return true
+  // Legacy EZTV / torrent series without a shelf tag → Popular.
+  return item.sourceKind === 'torrent' || item.transport === 'torrent'
 }
 
 export function isSeriesTrendingItem(item: StreamItem): boolean {
   return item.category === 'series' && itemHasShelfTag(item, SERIES_SHELF_TRENDING)
 }
 
-/** EZTV ALL-catalogue rows that are currently airing (summary from showlist). */
+/** Now Airing (TMDB on_the_air / EZTV airing feed / legacy trending-airing tag). */
 export function isSeriesAiringItem(item: StreamItem): boolean {
+  if (item.category !== 'series') return false
+  if (isSeries247Item(item)) return false
+  if (itemHasShelfTag(item, SERIES_SHELF_AIRING)) return true
+  if (itemHasShelfTag(item, SERIES_SHELF_TRENDING_LEGACY)) return true
   return (
-    item.category === 'series' &&
     (item.sourceKind === 'torrent' || item.transport === 'torrent') &&
     /\bAiring:/i.test(item.description || '')
   )
 }
 
+/** Always-on 24/7 streams under TV Series (e.g. South Park / Family Guy / Simpsons). */
+export function isSeries247Item(item: StreamItem): boolean {
+  return item.category === 'series' && itemHasShelfTag(item, SERIES_SHELF_247)
+}
+
+/** @deprecated Use isSeriesPopularItem — kept for older call sites. */
 export function isSeriesFullShowItem(item: StreamItem): boolean {
-  if (item.category !== 'series') return false
-  // Web catalog series (M2Box / NetMirror) belong on the Full Shows shelf.
-  if (isSeriesWebCatalogItem(item)) return true
-  if (itemHasShelfTag(item, ANIME_SHELF_FULL_SHOWS)) return true
-  // Trending-only rows stay on the Trending tab until the ALL catalogue tags them.
-  if (itemHasShelfTag(item, SERIES_SHELF_TRENDING)) return false
-  // Legacy EZTV / other torrent series without a shelf tag → Full Shows.
-  return item.sourceKind === 'torrent' || item.transport === 'torrent'
+  return isSeriesPopularItem(item)
 }
 
 export function isMoviesPopularItem(item: StreamItem): boolean {
@@ -3331,7 +3932,7 @@ export function isEztvTmdbFeedUrl(pageUrl: string): boolean {
 export type EztvTmdbFeedKind = 'popular' | 'on_the_air'
 
 async function mapPoolLimited<T, R>(
-  items: T[],
+  items: readonly T[],
   concurrency: number,
   fn: (item: T, index: number) => Promise<R>,
   checkpoint?: () => Promise<void>,
@@ -3393,8 +3994,13 @@ export async function scrapeEztvTmdbFeed(
   const limit = kind === 'on_the_air' ? EZTV_TMDB_AIRING_LIMIT : EZTV_TMDB_POPULAR_LIMIT
   const catalog = window.signalDesktop?.tmdbTvCatalog
   const legacy = window.signalDesktop?.tmdbPopularTv
-  if (!catalog && !(kind === 'popular' && legacy)) {
-    return eztvFailed(sourceLabel, origin, 'TMDB sync needs the Jiyu desktop app')
+  const { canFetchTmdbClientSide, fetchTmdbTvCatalogClient } = await import('./tmdbClient')
+  if (!catalog && !(kind === 'popular' && legacy) && !canFetchTmdbClientSide()) {
+    return eztvFailed(
+      sourceLabel,
+      origin,
+      'TMDB_API_KEY missing — add it to .env and rebuild (desktop or Android)',
+    )
   }
   await checkpoint?.()
   onProgress?.(0, limit, 0, 'tmdb')
@@ -3405,9 +4011,31 @@ export async function scrapeEztvTmdbFeed(
       onProgress?.(p.done, p.total || limit, 0, 'tmdb')
     }
   })
-  let tmdb: Awaited<ReturnType<NonNullable<typeof catalog>>>
+  let tmdb: {
+    ok: boolean
+    shows?: Array<{
+      tmdbId: number
+      name: string
+      imdbId?: string
+      overview?: string
+      poster?: string
+      firstAirDate?: string
+    }>
+    error?: string | null
+    cancelled?: boolean
+  }
   try {
-    tmdb = catalog ? await catalog(kind, limit) : await legacy!(limit)
+    if (catalog) {
+      tmdb = await catalog(kind, limit)
+    } else if (kind === 'popular' && legacy) {
+      tmdb = await legacy(limit)
+    } else {
+      // Android / non-Electron: client TMDB with IMDb ids for EZTV matching.
+      tmdb = await fetchTmdbTvCatalogClient(kind, limit, {
+        withExternalIds: true,
+        onProgress: (done, total) => onProgress?.(done, total, 0, 'tmdb'),
+      })
+    }
   } finally {
     stopTmdbProgress?.()
   }
@@ -4383,6 +5011,7 @@ async function scrapeEztvPage(
 export async function scrapePage(
   pageUrl: string,
   sourceLabel: string,
+  onProgress?: (done: number, total: number) => void,
 ): Promise<TorrentScrapeOutcome> {
   if (isKidsShowsFeedUrl(pageUrl)) {
     let origin = ''
@@ -4451,6 +5080,22 @@ export async function scrapePage(
   if (isNetMirrorUrl(pageUrl)) {
     return scrapeNetMirrorPage(pageUrl, sourceLabel)
   }
+  // YMovies TV Series — ShowPage + Web Browser player.
+  if (isYmoviesUrl(pageUrl)) {
+    return scrapeYmoviesPage(pageUrl, sourceLabel)
+  }
+  // Cinetaro TV Series — ShowPage + cinextream embed.
+  if (isCinetaroUrl(pageUrl)) {
+    return scrapeCinetaroPage(pageUrl, sourceLabel)
+  }
+  // Zenox Animation → Anime Full Shows / Kids / Series.
+  if (isZenoxUrl(pageUrl) || isZenoxAnimationFeedUrl(pageUrl)) {
+    return scrapeZenoxPage(pageUrl, sourceLabel, onProgress)
+  }
+  // TMDB TV (Rive play) — no Cloudflare scrape.
+  if (isTmdbTvFeedUrl(pageUrl) || isTmdbTvUrl(pageUrl)) {
+    return scrapeTmdbTvPage(pageUrl, sourceLabel, onProgress)
+  }
   const { ok, content, error: fetchError } = await fetchText(pageUrl)
   if (!ok) {
     return {
@@ -4505,6 +5150,24 @@ export function scrapeWebsite(source: TorrentSource): Promise<TorrentScrapeOutco
   }
   if (isNetMirrorUrl(source.url)) {
     return scrapePage(netmirrorSeriesFeedUrl(NETMIRROR_CATALOG_ORIGIN), source.label)
+  }
+  if (isYmoviesUrl(source.url)) {
+    return scrapePage(ymoviesTvListPageUrl(YMOVIES_CATALOG_ORIGIN, 1), source.label)
+  }
+  if (isCinetaroUrl(source.url)) {
+    return scrapePage(cinetaroTvListPageUrl(CINETARO_CATALOG_ORIGIN, 1), source.label)
+  }
+  if (source.id === ZENOX_SOURCE_ID || isZenoxUrl(source.url) || isZenoxAnimationFeedUrl(source.url)) {
+    return scrapePage(zenoxAnimationFeedUrl(), source.label)
+  }
+  if (source.id === TMDB_TV_SOURCE_ID || isTmdbTvUrl(source.url)) {
+    if (source.id === TMDB_KIDS_SOURCE_ID || isTmdbKidsShowsFeedUrl(source.url)) {
+      return scrapePage(tmdbKidsShowsFeedUrl(), source.label)
+    }
+    if (source.id === TMDB_ANIME_SOURCE_ID || isTmdbAnimeFullFeedUrl(source.url)) {
+      return scrapePage(tmdbAnimeFullFeedUrl(), source.label)
+    }
+    return scrapePage(tmdbTvPopularFeedUrl(), source.label)
   }
   return scrapePage(source.url, source.label)
 }
@@ -4579,14 +5242,14 @@ export function catalogFeedsForSource(source: TorrentSource): CatalogFeed[] {
           url: eztvTmdbPopularFeedUrl(origin),
           category: 'series',
           maxPages: 1,
-          shelfTag: ANIME_SHELF_FULL_SHOWS,
+          shelfTag: SERIES_SHELF_POPULAR,
         },
         {
           // Now Airing: TMDB on_the_air present on EZTV API (no Cloudflare).
           url: eztvTmdbAiringFeedUrl(origin),
           category: 'series',
           maxPages: 1,
-          shelfTag: SERIES_SHELF_TRENDING,
+          shelfTag: SERIES_SHELF_AIRING,
         },
         {
           // Curated under-13 allowlist present on EZTV.
@@ -4598,18 +5261,14 @@ export function catalogFeedsForSource(source: TorrentSource): CatalogFeed[] {
       ]
     }
     if (isSubsPleaseUrl(source.url)) {
-      // Root URL → New Releases; /shows/ → Full Shows catalog.
-      if (isSubsPleaseLatestFeedUrl(source.url)) {
-        return [
-          {
-            url: `${origin}/`,
-            category: 'anime',
-            maxPages: 1,
-            shelfTag: ANIME_SHELF_NEW_RELEASES,
-          },
-        ]
-      }
+      // Always sync both shelves from SubsPlease (latest drops + full show list).
       return [
+        {
+          url: `${origin}/`,
+          category: 'anime',
+          maxPages: 1,
+          shelfTag: ANIME_SHELF_NEW_RELEASES,
+        },
         {
           url: `${origin}/shows/`,
           category: 'anime',
@@ -4622,15 +5281,15 @@ export function catalogFeedsForSource(source: TorrentSource): CatalogFeed[] {
       const tfOrigin = normalizeTorrentFunkOrigin(source.url)
       return [
         {
-          url: torrentFunkSeriesFeedUrl(tfOrigin),
+          url: torrentFunkListingPageUrl(tfOrigin, 'series', 1),
           category: 'series',
-          maxPages: 1,
-          shelfTag: SERIES_SHELF_TRENDING,
+          maxPages: TORRENTFUNK_CATALOG_PAGES,
+          shelfTag: SERIES_SHELF_POPULAR,
         },
         {
-          url: torrentFunkAnimeFeedUrl(tfOrigin),
+          url: torrentFunkListingPageUrl(tfOrigin, 'anime', 1),
           category: 'anime',
-          maxPages: 1,
+          maxPages: TORRENTFUNK_CATALOG_PAGES,
           shelfTag: ANIME_SHELF_NEW_RELEASES,
         },
       ]
@@ -4657,6 +5316,92 @@ export function catalogFeedsForSource(source: TorrentSource): CatalogFeed[] {
         },
       ]
     }
+    if (isYmoviesUrl(source.url)) {
+      return [
+        {
+          url: ymoviesTvListPageUrl(YMOVIES_CATALOG_ORIGIN, 1),
+          category: 'series',
+          maxPages: YMOVIES_CATALOG_PAGES,
+          shelfTag: ANIME_SHELF_FULL_SHOWS,
+        },
+      ]
+    }
+    if (isCinetaroUrl(source.url)) {
+      return [
+        {
+          url: cinetaroTvListPageUrl(CINETARO_CATALOG_ORIGIN, 1),
+          category: 'series',
+          maxPages: CINETARO_CATALOG_PAGES,
+          shelfTag: SERIES_SHELF_POPULAR,
+        },
+      ]
+    }
+    if (
+      source.id === ZENOX_SOURCE_ID ||
+      isZenoxAnimationFeedUrl(source.url) ||
+      (isZenoxUrl(source.url) && /[?&]genre=16\b/i.test(source.url)) ||
+      isZenoxUrl(source.url)
+    ) {
+      return [
+        {
+          url: zenoxAnimationFeedUrl(),
+          category: 'anime',
+          maxPages: 1,
+          // Per-link shelfTag from classifyZenoxAnimationShow overrides this.
+          shelfTag: ANIME_SHELF_FULL_SHOWS,
+        },
+      ]
+    }
+    if (source.id === TMDB_KIDS_SOURCE_ID || isTmdbKidsShowsFeedUrl(source.url)) {
+      return [
+        {
+          url: tmdbKidsShowsFeedUrl(),
+          category: 'kids',
+          maxPages: 1,
+          shelfTag: KIDS_SHELF_SHOWS,
+        },
+      ]
+    }
+    if (source.id === TMDB_ANIME_SOURCE_ID || isTmdbAnimeFullFeedUrl(source.url)) {
+      return [
+        {
+          // Anime Full Shows only — no New Releases feed from TMDB.
+          url: tmdbAnimeFullFeedUrl(),
+          category: 'anime',
+          maxPages: 1,
+          shelfTag: ANIME_SHELF_FULL_SHOWS,
+        },
+      ]
+    }
+    if (source.id === TMDB_TV_SOURCE_ID || isTmdbTvUrl(source.url)) {
+      return [
+        {
+          url: tmdbTvPopularFeedUrl(),
+          category: 'series',
+          maxPages: 1,
+          shelfTag: SERIES_SHELF_POPULAR,
+        },
+        {
+          // Top 20 TMDB-popular shows for each first-air year 2000 → now.
+          url: tmdbTvByYearFeedUrl(),
+          category: 'series',
+          maxPages: 1,
+          shelfTag: SERIES_SHELF_POPULAR,
+        },
+        {
+          url: tmdbTvAiringFeedUrl(),
+          category: 'series',
+          maxPages: 1,
+          shelfTag: SERIES_SHELF_AIRING,
+        },
+        {
+          url: tmdbTvTrendingFeedUrl(),
+          category: 'series',
+          maxPages: 1,
+          shelfTag: SERIES_SHELF_TRENDING,
+        },
+      ]
+    }
   } catch {
     /* fall through */
   }
@@ -4680,7 +5425,19 @@ export function linkToCatalogItem(
 
   const m2boxItem = isM2BoxUrl(source.url) || isM2BoxUrl(link.url)
   const netmirrorItem = isNetMirrorUrl(source.url) || isNetMirrorUrl(link.url)
-  const webCatalogItem = m2boxItem || netmirrorItem
+  const ymoviesItem = isYmoviesUrl(source.url) || isYmoviesUrl(link.url)
+  const cinetaroItem = isCinetaroUrl(source.url) || isCinetaroUrl(link.url)
+  const zenoxItem =
+    source.id === ZENOX_SOURCE_ID || isZenoxUrl(source.url) || isZenoxUrl(link.url)
+  const tmdbItem =
+    source.id === TMDB_TV_SOURCE_ID ||
+    source.id === TMDB_ANIME_SOURCE_ID ||
+    source.id === TMDB_KIDS_SOURCE_ID ||
+    isTmdbTvUrl(source.url) ||
+    isTmdbTvUrl(link.url) ||
+    Boolean(link.rivestreamTmdbId && link.url.startsWith('jiyu://tmdb-tv'))
+  const webCatalogItem =
+    m2boxItem || netmirrorItem || ymoviesItem || cinetaroItem || tmdbItem || zenoxItem
 
   // EZTV is exclusively episodic television. Force its entries into TV
   // Series even if generic URL/title inference would choose another shelf.
@@ -4700,16 +5457,19 @@ export function linkToCatalogItem(
               : link.category ??
                 fallbackCategory ??
                 inferTorrentCategory(link.url, link.title, link.summary)
-  const tags = [category]
-  if (shelfTag && !tags.includes(shelfTag)) tags.push(shelfTag)
+  const effectiveShelfTag = link.shelfTag || shelfTag
+  const tags: string[] = [category]
+  if (effectiveShelfTag && !tags.includes(effectiveShelfTag)) tags.push(effectiveShelfTag)
   // New-release magnets still keep the show page for full episode lists.
   const showPage =
-    shelfTag === ANIME_SHELF_NEW_RELEASES
+    effectiveShelfTag === ANIME_SHELF_NEW_RELEASES
       ? link.url.replace(/#.*$/, '').replace(/\/$/, '')
       : undefined
   const baseId = stableTorrentItemId(link.url)
+  const tmdbAnime = tmdbItem && (category === 'anime' || source.id === TMDB_ANIME_SOURCE_ID)
+  const tmdbKids = tmdbItem && (category === 'kids' || source.id === TMDB_KIDS_SOURCE_ID)
   return {
-    id: kidsFeed ? `kids-${baseId}` : baseId,
+    id: kidsFeed || category === 'kids' ? `kids-${baseId}` : baseId,
     title: link.title,
     description: link.summary || '',
     category,
@@ -4717,8 +5477,16 @@ export function linkToCatalogItem(
     poster: link.poster,
     // Category (+ optional shelf) — never put origin hostnames in shelf-facing fields.
     tags,
-    source: 'Web catalog',
-    sourceKind: webCatalogItem ? undefined : 'torrent',
+    source: zenoxItem
+      ? 'Zenox'
+      : tmdbKids
+        ? 'TMDB Kids'
+        : tmdbAnime
+          ? 'TMDB Anime'
+          : tmdbItem
+            ? 'TMDB'
+            : 'Web catalog',
+    sourceKind: tmdbItem || zenoxItem ? 'builtin' : webCatalogItem ? undefined : 'torrent',
     transport: webCatalogItem ? 'direct' : 'torrent',
     torrentUri: webCatalogItem ? undefined : link.torrentUri,
     detailUrl: webCatalogItem ? link.url : link.torrentUri ? showPage : link.url,
@@ -4728,5 +5496,8 @@ export function linkToCatalogItem(
     m2boxSubjectId: link.m2boxSubjectId,
     netmirrorPostId: link.netmirrorPostId,
     netmirrorTmdbId: link.netmirrorTmdbId,
+    ymoviesId: link.ymoviesId,
+    cinetaroTmdbId: link.cinetaroTmdbId,
+    rivestreamTmdbId: link.rivestreamTmdbId,
   }
 }

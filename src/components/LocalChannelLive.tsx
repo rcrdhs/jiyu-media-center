@@ -3,8 +3,9 @@ import { Link } from 'react-router-dom'
 import Hls from 'hls.js'
 import type { StreamItem } from '../types'
 import { isYouTubeUrl } from '../lib/webBrowser'
-import { isYouTubeLiveNow } from '../lib/youtubeLive'
+import { resolveYouTubeLivePlay } from '../lib/youtubeLive'
 import { isVimeoLiveEventUrl, resolveVimeoLiveHls } from '../lib/vimeoLive'
+import { androidHlsConfig } from '../lib/hlsAndroid'
 
 interface LocalChannelLiveProps {
   item: StreamItem
@@ -17,17 +18,41 @@ export function LocalChannelLive({ item }: LocalChannelLiveProps) {
   const [failed, setFailed] = useState(false)
   const [connecting, setConnecting] = useState(false)
   const [youtubeLive, setYoutubeLive] = useState<boolean | null>(null)
+  const [youtubePreview, setYoutubePreview] = useState('')
+  const [youtubePoster, setYoutubePoster] = useState('')
+  const [youtubeEmbedReady, setYoutubeEmbedReady] = useState(false)
   const youtube = isYouTubeUrl(item.url)
 
   useEffect(() => {
     if (!youtube) {
       setYoutubeLive(null)
+      setYoutubePreview('')
+      setYoutubePoster('')
+      setYoutubeEmbedReady(false)
       return
     }
     let cancelled = false
     setYoutubeLive(null)
-    void isYouTubeLiveNow(item.url).then((live) => {
-      if (!cancelled) setYoutubeLive(live)
+    setYoutubePreview('')
+    setYoutubePoster('')
+    setYoutubeEmbedReady(false)
+    void resolveYouTubeLivePlay(item.url).then((resolved) => {
+      if (cancelled) return
+      if (!resolved.ok) {
+        setYoutubeLive(false)
+        setYoutubePreview('')
+        setYoutubePoster('')
+        return
+      }
+      setYoutubeLive(true)
+      setYoutubePreview(resolved.previewUrl)
+      // Live thumb always available even if the muted embed is slow/blocked.
+      setYoutubePoster(
+        resolved.posterUrl ||
+          (resolved.videoId
+            ? `https://i.ytimg.com/vi/${resolved.videoId}/hqdefault.jpg`
+            : ''),
+      )
     })
     return () => {
       cancelled = true
@@ -82,6 +107,7 @@ export function LocalChannelLive({ item }: LocalChannelLiveProps) {
           xhrSetup(xhr) {
             xhr.withCredentials = false
           },
+          ...androidHlsConfig({ lowLatencyMode: false }),
         })
         hlsRef.current = hls
         hls.loadSource(sourceUrl)
@@ -139,12 +165,14 @@ export function LocalChannelLive({ item }: LocalChannelLiveProps) {
   const detail = youtube
     ? offline
       ? 'Not on-air on YouTube right now — open Watch when they go live.'
-      : 'Live on YouTube — opens in Jiyu’s Web Browser.'
+      : 'Live on YouTube — Watch opens the full player (PiP on Back).'
     : failed
       ? 'Preview unavailable — open Watch to try the full player.'
       : connecting
         ? 'Connecting to live stream…'
         : item.description
+  const showYoutubeEmbed = Boolean(youtube && youtubePreview && youtubeLive)
+  const showYoutubeThumb = Boolean(youtube && youtubeLive && youtubePoster && !youtubeEmbedReady)
 
   return (
     <div className="local-channel-live">
@@ -154,10 +182,12 @@ export function LocalChannelLive({ item }: LocalChannelLiveProps) {
         className="local-channel-live-stage"
         title={`Watch ${item.title}`}
       >
-        {item.poster && (
+        {(showYoutubeThumb || (!youtube && item.poster) || (youtube && !youtubeLive && item.poster)) && (
           <img
-            className={`local-channel-live-poster ${playing && !youtube ? 'is-hidden' : ''}`}
-            src={item.poster}
+            className={`local-channel-live-poster ${
+              (playing && !youtube) || (showYoutubeEmbed && youtubeEmbedReady) ? 'is-hidden' : ''
+            }`}
+            src={youtubePoster || item.poster}
             alt=""
             aria-hidden
           />
@@ -169,6 +199,20 @@ export function LocalChannelLive({ item }: LocalChannelLiveProps) {
             muted
             playsInline
             autoPlay
+          />
+        )}
+        {showYoutubeEmbed && (
+          <iframe
+            className={`local-channel-live-video ${youtubeEmbedReady ? 'is-visible' : ''}`}
+            src={youtubePreview}
+            title={`${item.title} live preview`}
+            allow="autoplay; encrypted-media; picture-in-picture"
+            referrerPolicy="strict-origin-when-cross-origin"
+            tabIndex={-1}
+            onLoad={() => {
+              // Give the muted player a moment to paint before hiding the live thumb.
+              window.setTimeout(() => setYoutubeEmbedReady(true), 700)
+            }}
           />
         )}
         <span

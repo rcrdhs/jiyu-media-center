@@ -1,0 +1,38 @@
+[
+  {
+    "status": 200,
+    "ct": "application/json; charset=utf-8",
+    "url": "https://ww.ymovies.vip/manifest.json",
+    "body": "{\r\n  \"short_name\": \"YMovies\",\r\n  \"name\": \"Ww.ymovies.vip\",\r\n  \"icons\": [\r\n    {\r\n      \"src\": \"https://ww.ymovies.vip/images/ymovies-touch-icon-192x192.png?v=0.1\",\r\n      \"type\": \"image/png\",\r\n      \"sizes\": \"192x192\",\r\n      \"purpose\": \"any maskable\"\r\n    },\r\n    {\r\n      \"src\": \"https://ww.ymovies.vip/images/ymovies-touch-icon-512x512.png?v=0.1\",\r\n      \"type\": \"image/png\",\r\n      \"sizes\": \"512x512\",\r\n      \"purpose\": \"any maskable\"\r\n    }\r\n  ],\r\n  \"start_url\": \"/home?source=pwa\",\r\n  \"background_color\": \"#202125\",\r\n  \"display\": \"standalone\",\r\n  \"scope\": \"/\",\r\n  \"theme_color\": \"#202125\",\r\n  \"description\": \"Watch Free Full Length yify Movies Online on YMovies. Torrents, Watch Films online in HD 720p and 1080p quality yts on YMovies.\"\r\n}"
+  },
+  {
+    "status": 200,
+    "ct": "application/json; charset=utf-8",
+    "url": "https://ww.ymovies.vip/ajax/notification/latest",
+    "body": "{\"status\":true,\"html\":\"<div class=\\\"btn-logged\\\" data-toggle=\\\"dropdown\\\" aria-expanded=\\\"false\\\"\\n\\t\\t\\t\\t\\t\\t aria-controls=\\\"user_feed\\\">\\n\\t\\t\\t\\t\\t\\t<span class=\\\"avatar\\\"><i class=\\\"fa fa-bell\\\"><\\/i><\\/span>\\n\\t\\t\\t\\t\\t\\t\\n\\t\\t\\t\\t\\t<\\/div>\\n\\t\\t\\t\\t\\t<ul id=\\\"user_feed\\\" class=\\\"dropdown-menu dropdown-menu-right\\\">\\n\\t\\t\\t\\t\\t\\t<li class=\\\"nnl-mark\\\">\\n\\t\\t\\t\\t\\t\\t\\t<a class=\\\"btn-noti-maar\\\" data-position=\\\"dropdown\\\"><i class=\\\"fas fa-check mr10\\\"><\\/i> Mark all as read<\\/a>\\n\\t\\t\\t\\t\\t\\t<\\/li><div style=\\\"display: block; padding: 25px 15px; text-align: center; font-size: 14px;\\\">\\n\\t\\t\\t\\t<div class=\\\"block mb-2\\\"><i class=\\\"fas fa-box-open\\\" style=\\\"font-size: 20px;\\\"><\\/i><\\/div>\\n\\t\\t\\t\\tNo Notifications\\n\\t\\t\\t<\\/div>\\n\\t\\t\\n\\t<\\/div><\\/li>\\n\\t\\t\\t\\t\\t<\\/ul>\"}"
+  },
+  {
+    "status": 200,
+    "ct": "application/json; charset=utf-8",
+    "url": "https://ww.ymovies.vip/ajax/movie/episode/servers/s6ptq_1_1",
+    "body": "{\"status\":true,\"html\":\"<div class=\\\"server-notice text-center\\\">\\n    <span>If current server doesn&#39;t work please try other servers below.<\\/span><\\/div>\\n<ul class=\\\"nav\\\">\\n    \\n        <li class=\\\"nav-item\\\">\\n            <a data-id=\\\"52586a3176563141725757713963622b706f2b3472747a4d672f43356e48575437684f615272777a5076304b6456344738396b6944346857377356442b334f5770724442464e6d5848336439384d52724a68544870513d3d\\\" data-name=\\\"11\\\" id=\\\"watch-11\\\"\\n               class=\\\"nav-link btn btn-sm btn-secondary link-item \\\"\\n               href=\\\"javascript:;\\\" title=\\\"Server A1\\\"><i\\n                        class=\\\"fas fa-play mr5\\\"><\\/i><span>Server A1<\\/span><\\/a>\\n        <\\/li>\\n    \\n<li class=\\\"nav-item\\\">\\n            <a data-id=\\\"52586a3176563141725757713963622b706f2b3472747a4d672f43356e48575437684f615272777a5076304b6456344738396b6944346857377356442b334f5770724442464e6d5848336439384d52724a68544870513d3d\\\" data-name=\\\"12\\\" id=\\\"watch-12\\\"\\n               class=\\\"nav-link btn btn-sm btn-secondary link-item \\\"\\n               href=\\\"javascript:;\\\" title=\\\"Server A2\\\"><i\\n                        class=\\\"fas fa-play mr5\\\"><\\/i><span>Server A2<\\/span><\\/a>\\n        <\\/li>\\n    \\n<\\/ul>\"}"
+  },
+  {
+    "status": 200,
+    "ct": "application/json; charset=utf-8",
+    "url": "https://ww.ymovies.vip/ajax/movie/episode/server/sources/52586a3176563141725757713963622b706f2b3472747a4d672f43356e48575437684f615272777a5076304b6456344738396b6944346857377356442b334f5770724442464e6d5848336439384d52724a68544870513d3d_11",
+    "body": "{\"status\":true,\"src\":\"https://fstream365.com/embed/movie/52586a3176563141725757713963622b706f2b3472747a4d672f43356e48575437684f615272777a507630346c7a51564f35464948536a6256464e6d4a63796c6a414950693975525775622b41623968505a704e6d2f4869636f59397632483258795a2b56376b557936685934416b5847324f735a6762352b622b6471656b78/exmovie?srv=6\"}"
+  },
+  {
+    "status": 200,
+    "ct": "text/html; charset=utf-8",
+    "url": "https://fstream365.com/ajax/getSources/?id=656761363747475a7842416c76726b6b527a776539435a79556c6558355675592f3036662f7041374c6d57782b64444a73672b39776b7149335072752b70656d77544c362f504a5957424f474e4f48726f3571775161595a41336a50484d3569645355415643654a525071413054477835433875652b6d544d777451456f6958364969436c544d54503659476e4373394c4441565053786661434855497956684349416b2f584f487a462b5a63616747627545754447642f35545749527657656531694f4b6246344a4f4b324176713968536176736639326448783546377a6f714e4f3763755870612f3872626b486b7a2f383379334277454832696f72467730595a6a76754c732f47756f5777327463664a4f32673d3d&h=4469635938622f354f496231766b745a52646a745674535530337146594b6b6b436e586b5956794c662b553d&a=76cd1ddbda2bfbefa3648412124dc502&t=af4cc093ed48a588",
+    "body": "{\"sources\":\"eyJjdCI6IkxcL0NYZnByVVwvVGF4NXVaS1F6RlBOYXQreE5NSEFESEZmVjd5SGJzaVlYelJYNFE4Zmsxb0lBZjQzNmFtaUhYRzdzVUIxV0VoTTJ1cUhNU21EajRycCtVZzYybnJZUDY2TUJpS2ZTYnR2SVg0XC9HOE14dk5CXC9RRGNoWThZREh5RHNNVHoreExlNUVPVVdGYXVpTlRWaW84cnJrd1N2ME1aVjFGM0lyZW9BcVNyUTN3TWlNZ2x6YWp3bFlWWmtRcFVIbHNseFJhWGkxZyszZ250ZHdlM1ZGMVl2ajM3cHdacWYyMXoxS0NQZjJtZHNueXBnMW1CSnQ4clA4cVVYYnpiRHJVTTlxQTBWamtNOUlpZFNYRG95bkdEMU5sR05oMVRSZVcxb2hDYTZzVGxYNldDSm1oSmJRSktZTEs0WTR0TnJ0STBGVU84N1dyMTNhU0ZnM0c0OWtxQWh4MSttZWFsZkdrbjh5UU9hWUpXeStKUk1KbTNqZTBnOFo5YmlmNUNRT0JCQVRUTmlSeVZJTjlKMzhPODlUa25nK05mMkZaK3dNMUNYcWxrSW9xd2xad1lhNk1kYXlVeUphNFwvZ2JDVFVCR1wveFkxMVpDUkFjRVpXTzVRdk5xRTN3NVI0ekYrOWlpXC9BeXFRaUJ1N1wvRVU1VnZJaVhlMjFMR0U5b0Vud21kMTZpOUZsK3c0SGJaOTBOWXQzdVdRPT0iLCJpdiI6IjVmZTkzNTlkZjBhOGY3YWI0Nzg1MmYzYjAyMDExOTNhIiwicyI6ImUwMDRlOWExZDA5NmI4NjUifQ==\",\"tracks\":[],\"backupLink\":\"\",\"e\":1}"
+  },
+  {
+    "status": 200,
+    "ct": "application/json; charset=utf-8",
+    "url": "https://my.rtmark.net/gid.js",
+    "body": "{\"gid\":\"0803a18da617426cede586415aac2e2c\",\"skipSubscribe\":false}\n"
+  }
+]

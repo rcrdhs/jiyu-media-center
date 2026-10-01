@@ -5,10 +5,11 @@ import { useCatalog } from '../context/CatalogContext'
 import { usePlayback } from '../context/PlaybackContext'
 import { CatalogGrid } from '../components/CatalogGrid'
 import { ContinueWatching } from '../components/ContinueWatching'
+import { RecommendedShelf } from '../components/RecommendedShelf'
+import { NewTitlesDialog } from '../components/NewTitlesDialog'
 import { WatchNextStrip } from '../components/WatchNextStrip'
 import { WatchHistory } from '../components/WatchHistory'
 import { LocalChannelLive } from '../components/LocalChannelLive'
-import { LocalYoutubeLiveNow } from '../components/LocalYoutubeLiveNow'
 import { filterShelfVisibleItems, isSeriesWebCatalogItem } from '../lib/torrents'
 import { isLikelyEnglish, shouldApplyEnglishFilter } from '../lib/language'
 import { VOD_CATEGORIES } from '../lib/continueWatching'
@@ -18,6 +19,12 @@ import {
   recordCatalogTitleCount,
   type SectionGrowth,
 } from '../lib/libraryGrowth'
+import { catalogNewTitleItems } from '../lib/newTitlesList'
+import {
+  favoriteTeamMatches,
+  readFavoriteTeams,
+  subscribeFavoriteTeams,
+} from '../lib/favoriteTeams'
 
 export function HomePage() {
   const { byCategory, items, ready, englishOnly } = useCatalog()
@@ -27,6 +34,10 @@ export function HomePage() {
   const [catalogGrowth, setCatalogGrowth] = useState<SectionGrowth>(() =>
     getCatalogGrowth(items.length),
   )
+  const [newTitlesOpen, setNewTitlesOpen] = useState(false)
+  const [favoriteTeams, setFavoriteTeams] = useState(readFavoriteTeams)
+
+  useEffect(() => subscribeFavoriteTeams(() => setFavoriteTeams(readFavoriteTeams())), [])
 
   useEffect(() => subscribeKidsMode(() => setKidsMode(isKidsModeEnabled())), [])
 
@@ -44,16 +55,35 @@ export function HomePage() {
     // Wait for the catalog to finish the daily load/sync before snapshotting,
     // so a partial cold start isn't stored as today's baseline.
     const timer = window.setTimeout(() => {
-      setCatalogGrowth(recordCatalogTitleCount(items.length))
+      setCatalogGrowth(
+        recordCatalogTitleCount(
+          items.length,
+          items.map((item) => ({ id: item.id, releasedAt: item.releasedAt })),
+        ),
+      )
     }, 2000)
     return () => window.clearTimeout(timer)
-  }, [ready, items.length])
+  }, [ready, items.length, items])
+
+  const newTodayItems = useMemo(
+    () => catalogNewTitleItems(items, 'today', catalogGrowth.newToday),
+    [items, catalogGrowth.newToday],
+  )
 
   const localChannels = useMemo(() => resolveLocalChannels(items), [items])
   const tvjChannel = localChannels.find((c) => c.id === 'local-tvj') ?? LOCAL_CHANNELS[0]
   const cvmChannel = localChannels.find((c) => c.id === 'local-cvm') ?? LOCAL_CHANNELS[1]
+  const nationwideChannel =
+    localChannels.find((c) => c.id === 'local-nationwide') ?? LOCAL_CHANNELS[2]
   const tvjPlayingElsewhere = playingItem?.id === tvjChannel.id && mode !== 'off'
   const cvmPlayingElsewhere = playingItem?.id === cvmChannel.id && mode !== 'off'
+  const nationwidePlayingElsewhere =
+    playingItem?.id === nationwideChannel.id && mode !== 'off'
+
+  const favoriteMatches = useMemo(
+    () => (kidsMode ? [] : favoriteTeamMatches(items, favoriteTeams)),
+    [items, favoriteTeams, kidsMode],
+  )
 
   const searchHits = useMemo(() => {
     const q = homeQuery.trim().toLowerCase()
@@ -98,25 +128,55 @@ export function HomePage() {
             />
           </div>
         </div>
-        <div className="hero-panel" aria-hidden>
-          <div className="hero-glow" />
+        <div className="hero-panel">
+          <div className="hero-glow" aria-hidden />
           <div className="hero-frame">
             <span>Total titles</span>
             <strong>{catalogGrowth.today.toLocaleString()}</strong>
-            <em>
-              Added today{' '}
-              {catalogGrowth.newToday > 0
-                ? catalogGrowth.newToday.toLocaleString()
-                : '0'}
-            </em>
+            {catalogGrowth.newToday > 0 ? (
+              <button
+                type="button"
+                className="growth-hit"
+                onClick={() => setNewTitlesOpen(true)}
+              >
+                Added today {catalogGrowth.newToday.toLocaleString()}
+              </button>
+            ) : (
+              <em>Added today 0</em>
+            )}
           </div>
         </div>
       </header>
+
+      {newTitlesOpen ? (
+        <NewTitlesDialog
+          title="Added today"
+          items={newTodayItems}
+          onClose={() => setNewTitlesOpen(false)}
+        />
+      ) : null}
+
+      {!homeQuery.trim() && !kidsMode && favoriteMatches.length > 0 && (
+        <section className="section-block favorite-matches">
+          <div className="section-head">
+            <h2>Your teams</h2>
+            <p>Live and upcoming matches for your teams, plus recent replays (last 3 days).</p>
+          </div>
+          <CatalogGrid
+            items={favoriteMatches}
+            showToolbar={false}
+            showHealthFilters={false}
+            emptyHint="No matches for your teams right now."
+          />
+        </section>
+      )}
 
       {!homeQuery.trim() &&
         homeVodCategories.map((category) => (
           <ContinueWatching key={category} category={category} />
         ))}
+
+      {!homeQuery.trim() && <RecommendedShelf />}
 
       {!homeQuery.trim() && <WatchNextStrip />}
 
@@ -171,20 +231,23 @@ export function HomePage() {
           <div className="section-head">
             <h2>Local channels</h2>
           </div>
-          {(tvjPlayingElsewhere || cvmPlayingElsewhere) && (
+          {(tvjPlayingElsewhere || cvmPlayingElsewhere || nationwidePlayingElsewhere) && (
             <p className="fine-print local-channel-note">
-              {(tvjPlayingElsewhere ? tvjChannel.title : cvmChannel.title) +
+              {(tvjPlayingElsewhere
+                ? tvjChannel.title
+                : cvmPlayingElsewhere
+                  ? cvmChannel.title
+                  : nationwideChannel.title) +
                 ' is playing in the corner — browse or search for another stream below.'}
             </p>
           )}
-          {(!tvjPlayingElsewhere || !cvmPlayingElsewhere) && (
+          {(!tvjPlayingElsewhere || !cvmPlayingElsewhere || !nationwidePlayingElsewhere) && (
             <div className="local-channel-live-row">
               {!tvjPlayingElsewhere && <LocalChannelLive item={tvjChannel} />}
               {!cvmPlayingElsewhere && <LocalChannelLive item={cvmChannel} />}
+              {!nationwidePlayingElsewhere && <LocalChannelLive item={nationwideChannel} />}
             </div>
           )}
-          <LocalYoutubeLiveNow />
-          <CatalogGrid items={localChannels} autoCheck showToolbar autoHideUnresponsive={false} />
         </section>
       )}
     </div>

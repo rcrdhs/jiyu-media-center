@@ -14,6 +14,7 @@ import {
   type ContinueWatchingEntry,
 } from '../lib/continueWatching'
 import { isWeakPosterUrl, resolveCatalogPoster } from '../lib/posterFallback'
+import { isShowBrowseItem } from '../lib/torrents'
 
 function ContinueCard({
   entry,
@@ -35,6 +36,8 @@ function ContinueCard({
   const title = item?.title || entry.title
   const percent = progressPercent(entry)
   const posterCategory = item?.category || entry.category
+  const resumeTo =
+    item && isShowBrowseItem(item) ? `/show/${entry.id}` : `/watch/${entry.id}`
 
   useEffect(() => {
     if (catalogPoster || !isVodCategory(posterCategory)) {
@@ -52,7 +55,7 @@ function ContinueCard({
 
   return (
     <div className="continue-card-wrap">
-      <Link to={`/watch/${entry.id}`} className="continue-card" state={{ from: fromPath }}>
+      <Link to={resumeTo} className="continue-card" state={{ from: fromPath }}>
         <div className="continue-card-art" aria-hidden={!poster}>
           {poster ? (
             <img src={poster} alt="" loading="lazy" decoding="async" />

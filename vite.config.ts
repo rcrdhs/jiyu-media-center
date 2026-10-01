@@ -13,6 +13,10 @@ const appVersion = pkg.version || '0.0.0'
 export default defineConfig({
   plugins: [react()],
   base: './',
+  // Electron reads TMDB_API_KEY from .env; expose the same key to the Vite
+  // bundle so Android/Capacitor can sync TMDB shelves without Electron IPC.
+  // WYZIE_PROXY_URL is a public Worker URL (no secret). Never expose WYZIE_API_KEY.
+  envPrefix: ['VITE_', 'TMDB_', 'WYZIE_PROXY_'],
   define: {
     __JIYU_VERSION__: JSON.stringify(appVersion),
   },
@@ -26,8 +30,17 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     watch: {
-      // Scratch HTML under scripts/ must not trigger full page reloads.
-      ignored: ['**/scripts/**'],
+      // Scratch HTML, Capacitor copies, and packaged installers must not reload
+      // or lock the desktop dev server (EBUSY on release/*.exe during pack).
+      ignored: [
+        '**/scripts/**',
+        '**/android/**',
+        '**/ios/**',
+        '**/tizen/**',
+        '**/release/**',
+        '**/release-pack/**',
+        '**/dist/**',
+      ],
     },
   },
   build: {

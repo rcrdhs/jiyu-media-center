@@ -1,9 +1,11 @@
-import { useEffect, useSyncExternalStore } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { createPortal } from 'react-dom'
+import { useLocation } from 'react-router-dom'
+import { Capacitor } from '@capacitor/core'
+import { usePlayback } from '../context/PlaybackContext'
+import { useWebBrowser } from '../context/WebBrowserContext'
 import {
-  cancelTorrentSync,
   getTorrentSyncControlState,
-  pauseTorrentSync,
-  resumeTorrentSync,
   subscribeTorrentSyncControl,
 } from '../lib/torrentSyncControl'
 import {
@@ -12,8 +14,68 @@ import {
   subscribeTorrentSyncMessage,
 } from '../lib/torrentSyncStatus'
 
+const isAndroidShell =
+  typeof window !== 'undefined' &&
+  (() => {
+    try {
+      return Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android'
+    } catch {
+      return false
+    }
+  })()
+
+/** Shelf name only — drop page counts, title totals, and the percent suffix. */
+function syncSectionLabel(message: string): string {
+  let text = message.replace(/^Paused\s*·\s*/i, '').trim()
+  const updating = text.match(/Updating catalog\s*·\s*([^·]+)/i)
+  if (updating?.[1]) {
+    text = updating[1]
+  } else {
+    text = text.split('·')[0] || text
+  }
+  text = text
+    .replace(/\d{1,3}%/g, '')
+    .replace(/…+|\.{3}/g, '')
+    .replace(/:\s*loading.*$/i, '')
+    .replace(/:\s*$/, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return text || 'Catalog'
+}
+
+function isCompletionMessage(message: string): boolean {
+  const m = message.trim()
+  return /^(synced|added)\b/i.test(m) || /\b(synced|added)\s+\d/i.test(m)
+}
+
 /** Catalog sync progress — shown above the sidebar Library tile. */
 export function CatalogSyncBar() {
+  const { mode: webMode } = useWebBrowser()
+  const { mode: playbackMode, slots } = usePlayback()
+  const { pathname } = useLocation()
+  const [scrolling, setScrolling] = useState(false)
+  const scrollingRef = useRef(false)
+
+  useEffect(() => {
+    if (!isAndroidShell) return
+    let timer = 0
+    const onScroll = () => {
+      if (!scrollingRef.current) {
+        scrollingRef.current = true
+        setScrolling(true)
+      }
+      window.clearTimeout(timer)
+      timer = window.setTimeout(() => {
+        scrollingRef.current = false
+        setScrolling(false)
+      }, 220)
+    }
+    document.addEventListener('scroll', onScroll, { capture: true, passive: true })
+    return () => {
+      document.removeEventListener('scroll', onScroll, true)
+      window.clearTimeout(timer)
+    }
+  }, [])
   const status = useSyncExternalStore(
     subscribeTorrentSyncMessage,
     getTorrentSyncStatus,
@@ -25,87 +87,52 @@ export function CatalogSyncBar() {
     getTorrentSyncControlState,
   )
 
-  const done =
-    Boolean(status.message) &&
-    /^(synced|added)\b/i.test(status.message!.trim())
+  const done = Boolean(status.message) && isCompletionMessage(status.message!)
   const cancelled =
     Boolean(status.message) && /^catalog sync cancelled\b/i.test(status.message!.trim())
-  const busy = Boolean(status.message) && !done && !cancelled && control.active
+  const finished =
+    done || cancelled || (Boolean(status.message) && status.percent === 100 && !control.active)
+  const busy = Boolean(status.message) && !finished && control.active
 
-  // Dismiss from the UI layer so the bar cannot stick after completion.
+  // Dismiss when sync finishes — and clear any stuck idle message (e.g. CF Verify text).
   useEffect(() => {
-    if (!done && !cancelled) return
+    if (!status.message) return
+    if (busy) return
+    const delay = finished ? 900 : 2800
     const timer = window.setTimeout(() => {
       clearTorrentSyncStatus()
-    }, 2200)
+    }, delay)
     return () => window.clearTimeout(timer)
-  }, [done, cancelled, status.message])
+  }, [busy, finished, status.message, status.percent])
 
+  // A started title, embed, or multi-view owns the screen — the bar covers the stream.
+  // /watch is the "getting ready" screen before playback mode flips on.
+  if (pathname.startsWith('/watch')) return null
+  if (playbackMode !== 'off' || slots.length > 0) return null
+  if (webMode === 'page' || webMode === 'pip') return null
   if (!status.message) return null
 
-  const pct = done ? 100 : status.percent
+  const pct = finished && !cancelled ? 100 : status.percent
   const determinate = pct != null && pct >= 0
-  const displayMessage = control.paused
-    ? status.message.startsWith('Paused ·')
-      ? status.message
-      : `Paused · ${status.message}`
-    : status.message
+  const section = syncSectionLabel(status.message)
 
-  return (
+  const bar = (
     <div
-      className={`catalog-sync-bar${control.paused ? ' is-paused' : ''}`}
+      className={`catalog-sync-bar${control.paused ? ' is-paused' : ''}${
+        isAndroidShell ? ' is-android-float' : ''
+      }${isAndroidShell && scrolling ? ' is-transparent' : ''}`}
       role="status"
       aria-live="polite"
       aria-busy={busy && !control.paused}
+      aria-label={determinate ? `${section} ${pct}%` : section}
     >
-      <div className="catalog-sync-bar-copy">
-        <span className="catalog-sync-bar-message">{displayMessage}</span>
-        {determinate ? (
-          <span className="catalog-sync-bar-percent">{pct}%</span>
-        ) : null}
-      </div>
-      <div
-        className="catalog-sync-bar-track"
-        role="progressbar"
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={determinate ? pct : undefined}
-        aria-valuetext={determinate ? `${pct}%` : displayMessage}
-        aria-label="Catalog sync progress"
-      >
-        <span
-          className={`catalog-sync-bar-fill${determinate ? '' : ' is-indeterminate'}${control.paused ? ' is-paused' : ''}`}
-          style={determinate ? { width: `${pct}%` } : undefined}
-        />
-      </div>
-      {busy ? (
-        <div className="catalog-sync-bar-actions">
-          {control.paused ? (
-            <button
-              type="button"
-              className="catalog-sync-bar-btn"
-              onClick={() => resumeTorrentSync()}
-            >
-              Resume
-            </button>
-          ) : (
-            <button
-              type="button"
-              className="catalog-sync-bar-btn"
-              onClick={() => pauseTorrentSync()}
-            >
-              Pause
-            </button>
-          )}
-          <button
-            type="button"
-            className="catalog-sync-bar-btn catalog-sync-bar-btn-cancel"
-            onClick={() => cancelTorrentSync()}
-          >
-            Cancel
-          </button>
-        </div>
-      ) : null}
+      <span className="catalog-sync-bar-message">{section}</span>
+      {determinate ? <span className="catalog-sync-bar-percent">{pct}%</span> : null}
     </div>
   )
+
+  if (isAndroidShell && typeof document !== 'undefined') {
+    return createPortal(bar, document.body)
+  }
+  return bar
 }

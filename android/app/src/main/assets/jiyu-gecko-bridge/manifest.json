@@ -1,0 +1,20 @@
+{
+  "manifest_version": 2,
+  "name": "jiyu-bridge",
+  "version": "1.0.26",
+  "description": "Page-world eval bridge for Jiyu in-app browser",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "jiyu-bridge@jiyu.app"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>", "file:///*", "about:*"],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true
+    }
+  ]
+}

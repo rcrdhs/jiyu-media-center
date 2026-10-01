@@ -14,17 +14,32 @@ export interface TorrentCatalogMeta {
 
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION)
-    req.onupgradeneeded = () => {
-      const db = req.result
-      if (!db.objectStoreNames.contains(STORE)) {
-        const store = db.createObjectStore(STORE, { keyPath: 'id' })
-        store.createIndex('torrentSourceId', 'torrentSourceId', { unique: false })
-        store.createIndex('category', 'category', { unique: false })
-      }
+    let settled = false
+    const fail = (err: unknown) => {
+      if (settled) return
+      settled = true
+      reject(err instanceof Error ? err : new Error(String(err || 'Torrent catalog DB open failed')))
     }
-    req.onsuccess = () => resolve(req.result)
-    req.onerror = () => reject(req.error ?? new Error('Torrent catalog DB open failed'))
+    try {
+      const req = indexedDB.open(DB_NAME, DB_VERSION)
+      req.onupgradeneeded = () => {
+        const db = req.result
+        if (!db.objectStoreNames.contains(STORE)) {
+          const store = db.createObjectStore(STORE, { keyPath: 'id' })
+          store.createIndex('torrentSourceId', 'torrentSourceId', { unique: false })
+          store.createIndex('category', 'category', { unique: false })
+        }
+      }
+      req.onsuccess = () => {
+        if (settled) return
+        settled = true
+        resolve(req.result)
+      }
+      req.onerror = () => fail(req.error ?? new Error('Torrent catalog DB open failed'))
+      req.onblocked = () => fail(new Error('Torrent catalog DB blocked'))
+    } catch (err) {
+      fail(err)
+    }
   })
 }
 

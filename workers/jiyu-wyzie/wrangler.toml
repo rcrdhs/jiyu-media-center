@@ -1,0 +1,11 @@
+name = "jiyu-wyzie"
+main = "src/index.js"
+compatibility_date = "2024-11-01"
+
+# Soft UA filter (not a secret). Clients send User-Agent containing this / Electron.
+[vars]
+ALLOWED_UA_SUBSTR = "Jiyu"
+
+# Set after deploy:
+#   npx wrangler secret put WYZIE_API_KEY
+# (paste your Wyzie key — never commit it)

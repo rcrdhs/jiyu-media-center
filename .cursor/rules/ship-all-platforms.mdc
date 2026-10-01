@@ -1,0 +1,38 @@
+---
+description: Ship every shared-app change to all platforms (Android + Windows)
+alwaysApply: true
+---
+
+# Ship all platforms
+
+When a change affects the shared app (`src/`, Capacitor web assets, or cross-platform play/search/UI behavior), do **not** stop at a desktop-only rebuild.
+
+## Required shipping
+
+1. Bump version (`package.json`, `android/.../versionName` + `versionCode`, **and** `APP_RELEASES` in `appVersion.ts` — newest first, clear one-line summary).
+2. `npm run build` → `npx cap sync android` → signed Android release APK.
+3. Windows pack (`electron-builder` / `pack:win`, `npmRebuild=false` if needed).
+4. Publish **both** to the same GitHub Release: APK + `latest-android.yml`, and Windows Setup/portable + `latest.yml`. Keep the GitHub release body aligned with `APP_RELEASES`.
+5. Tell the user the release URL and which platforms updated.
+
+## Desktop test build (preferred while iterating)
+
+- Prefer `npm run dev:desktop` (Vite + Electron) for local desktop verification so changes show without reinstalling Setup/portable.
+- When the user is on the test version or asks to verify on desktop, launch or restart `npm run dev:desktop`.
+- Do **not** auto-start `Jiyu Setup *.exe` or portable installers unless the user explicitly asks.
+
+## After publish — leave the installed release alone
+
+- Do **not** kill, restart, or relaunch the user's **installed** Jiyu release app after publishing.
+- The user updates that install from the in-app menu (Check for updates / Download update / yellow banner).
+
+## Exceptions
+
+- Pure Electron-only fixes (e.g. `electron/main.cjs` session headers) still bump and publish Windows; skip Android only if the web bundle is unchanged **and** you say so explicitly.
+- Linux: build/publish when the packaging path is already in use for that release; otherwise note it was skipped.
+
+## Do not
+
+- Relaunch desktop locally and leave Android (or the GitHub updater feeds) on an older build after a shared fix.
+- Skip `APP_RELEASES` / changelog updates when bumping a version.
+- Print keystore or GitHub credential values.

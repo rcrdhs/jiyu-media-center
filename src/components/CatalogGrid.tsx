@@ -38,44 +38,61 @@ export function CatalogGrid({
   }, [autoHideUnresponsive, showHealthFilters])
 
   useEffect(() => {
-    if (!autoCheck || items.length === 0) return
+    if (!autoCheck || !showHealthFilters || items.length === 0) return
     const unchecked = items.filter(
       (item) =>
         item.transport !== 'torrent' &&
         item.sourceKind !== 'torrent' &&
+        !item.torrentSourceId &&
         getStatus(item.id) === 'idle',
     )
     if (unchecked.length === 0) return
     void checkMany(unchecked)
-  }, [autoCheck, itemKey])
+  }, [autoCheck, showHealthFilters, itemKey])
 
   const visibleItems = useMemo(() => {
+    // Torrent / website catalog shelves skip health filtering entirely.
+    if (!showHealthFilters) return items
     return items.filter((item) => {
-      if (item.transport === 'torrent' || item.sourceKind === 'torrent') return true
+      if (item.transport === 'torrent' || item.sourceKind === 'torrent' || item.torrentSourceId) {
+        return true
+      }
       const status = getStatus(item.id)
       if (status === 'checking' || status === 'idle') return !filterOnline
       if (filterOnline && status !== 'online') return false
       if (hideOffline && (status === 'offline' || status === 'timeout')) return false
       return true
     })
-  }, [items, filterOnline, hideOffline, getStatus, checkingCount])
+  }, [items, filterOnline, hideOffline, getStatus, checkingCount, showHealthFilters])
 
-  const probeable = items.filter(
-    (item) => item.transport !== 'torrent' && item.sourceKind !== 'torrent',
-  )
+  const probeable = useMemo(() => {
+    if (!showHealthFilters) return [] as StreamItem[]
+    return items.filter(
+      (item) =>
+        item.transport !== 'torrent' &&
+        item.sourceKind !== 'torrent' &&
+        !item.torrentSourceId,
+    )
+  }, [items, showHealthFilters])
 
   // Torrents are never HTTP-probed — they stay "idle" forever. Only count IPTV /
   // direct streams in the health summary so Anime (mostly SubsPlease) doesn't
   // show "120 pending · auto-check" for magnet titles.
-  const onlineCount = probeable.filter((item) => getStatus(item.id) === 'online').length
-  const offlineCount = probeable.filter((item) => {
-    const s = getStatus(item.id)
-    return s === 'offline' || s === 'timeout'
-  }).length
-  const pendingCount = probeable.filter((item) => {
-    const s = getStatus(item.id)
-    return s === 'idle' || s === 'checking'
-  }).length
+  const onlineCount = showHealthFilters
+    ? probeable.filter((item) => getStatus(item.id) === 'online').length
+    : 0
+  const offlineCount = showHealthFilters
+    ? probeable.filter((item) => {
+        const s = getStatus(item.id)
+        return s === 'offline' || s === 'timeout'
+      }).length
+    : 0
+  const pendingCount = showHealthFilters
+    ? probeable.filter((item) => {
+        const s = getStatus(item.id)
+        return s === 'idle' || s === 'checking'
+      }).length
+    : 0
 
   if (items.length === 0) {
     return (

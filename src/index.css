@@ -28,6 +28,10 @@
   box-sizing: border-box;
 }
 
+html {
+  font-size: 17px;
+}
+
 html,
 body,
 #root {
@@ -66,6 +70,75 @@ code {
   grid-template-columns: var(--sidebar) 1fr;
   min-height: 100%;
   height: 100%;
+}
+
+.welcome-tour {
+  position: fixed;
+  inset: 0;
+  z-index: 100000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: max(1rem, env(safe-area-inset-top, 0px)) 1rem max(1rem, env(safe-area-inset-bottom, 0px));
+  background: rgba(8, 10, 13, 0.72);
+}
+
+.welcome-tour-card {
+  width: min(28rem, 100%);
+  padding: 1.25rem 1.3rem 1.15rem;
+  border-radius: 18px;
+  border: 1px solid rgba(240, 180, 41, 0.28);
+  background: #141920;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+}
+
+.welcome-tour-kicker {
+  margin: 0 0 0.35rem;
+  color: #f0b429;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.welcome-tour-card h2 {
+  margin: 0 0 0.45rem;
+  font-family: Syne, Manrope, system-ui, sans-serif;
+  font-size: 1.35rem;
+  line-height: 1.2;
+}
+
+.welcome-tour-card p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+.welcome-tour-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.55rem;
+  margin-top: 1.15rem;
+}
+
+.welcome-tour-skip,
+.welcome-tour-next {
+  margin: 0;
+  padding: 0.5rem 0.9rem;
+  border-radius: 999px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.welcome-tour-skip {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+}
+
+.welcome-tour-next {
+  border: 1px solid rgba(240, 180, 41, 0.5);
+  background: rgba(240, 180, 41, 0.16);
+  color: var(--text);
 }
 
 .sidebar {
@@ -184,6 +257,30 @@ code {
   border: 1px solid var(--line);
   background: var(--bg-1);
   box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+  max-height: min(70vh, 28rem);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.brand-update-banner {
+  display: block;
+  width: calc(100% - 0.7rem);
+  margin: 0.35rem 0.35rem 0;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid rgba(201, 162, 39, 0.55);
+  border-radius: 10px;
+  background: rgba(201, 162, 39, 0.16);
+  color: #f0d78c;
+  font: inherit;
+  font-size: 0.88rem;
+  font-weight: 650;
+  text-align: center;
+  cursor: pointer;
+}
+
+.brand-update-banner:hover {
+  background: rgba(201, 162, 39, 0.28);
 }
 
 .brand-menu-item {
@@ -221,7 +318,29 @@ code {
   font-size: 0.85rem;
 }
 
-.brand-menu-version ul {
+.brand-menu-updater {
+  margin: 0;
+  color: #c9a227;
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.brand-menu-item-primary {
+  font-weight: 650;
+}
+
+.brand-menu-changelog {
+  margin-top: 0.35rem;
+  padding: 0.55rem 0.75rem 0.35rem;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.35;
+  max-height: min(40vh, 16rem);
+  overflow: auto;
+}
+
+.brand-menu-changelog ul {
   list-style: none;
   margin: 0;
   padding: 0;
@@ -229,12 +348,12 @@ code {
   gap: 0.45rem;
 }
 
-.brand-menu-version li {
+.brand-menu-changelog li {
   display: grid;
   gap: 0.1rem;
 }
 
-.brand-menu-version li span:first-child {
+.brand-menu-changelog li span:first-child {
   color: #c9a227;
   font-weight: 650;
 }
@@ -249,12 +368,11 @@ code {
 .brand-logo-wrap::after {
   content: '';
   position: absolute;
-  inset: -3px;
+  inset: -2px;
   border-radius: 0.85rem;
-  background: linear-gradient(135deg, rgba(240, 180, 41, 0.55), transparent 60%);
-  opacity: 0.55;
+  background: rgba(240, 180, 41, 0.28);
+  opacity: 0.45;
   z-index: -1;
-  animation: brand-ring 3.6s ease-in-out infinite;
 }
 
 @keyframes brand-ring {
@@ -423,6 +541,134 @@ code {
 .section-growth-flat {
   color: var(--muted);
   font-weight: 500;
+}
+
+.growth-hit {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--accent);
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 0.12em;
+}
+
+.growth-hit:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.growth-hit.is-disabled,
+.growth-hit:disabled {
+  color: var(--muted);
+  cursor: default;
+  text-decoration: none;
+}
+
+.hero-frame .growth-hit {
+  font-style: normal;
+  font-size: 0.95rem;
+}
+
+.new-titles-backdrop {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  /* Stay in the main stage — full-bleed inset:0 put the grid under the sidebar. */
+  left: var(--sidebar);
+  /* Above Android top chrome (sidebar z-index 200) so Close is not covered. */
+  z-index: 320;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 2.5rem 1.25rem 1.5rem;
+  background: rgba(6, 8, 14, 0.72);
+  backdrop-filter: blur(6px);
+  -webkit-overflow-scrolling: touch;
+  overflow: auto;
+}
+
+.new-titles-dialog {
+  width: min(1120px, 100%);
+  max-height: min(82vh, 900px);
+  overflow: auto;
+  margin: 0;
+  padding: 1.1rem 1.15rem 1.25rem;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  background: var(--panel, #12151c);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
+}
+
+.new-titles-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin: -1.1rem -1.15rem 0.85rem;
+  padding: 1.1rem 1.15rem 0.75rem;
+  background: var(--panel, #12151c);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.new-titles-head-copy {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.new-titles-head h2 {
+  margin: 0 0 0.2rem;
+  font-size: 1.35rem;
+}
+
+.new-titles-head p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.new-titles-close {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  min-height: 2.4rem;
+  padding-inline: 0.9rem;
+}
+
+html.is-android .new-titles-backdrop {
+  left: 0;
+  padding-top: max(4.75rem, calc(env(safe-area-inset-top, 0px) + 3.5rem));
+  padding-left: max(0.65rem, env(safe-area-inset-left, 0px));
+  padding-right: max(0.65rem, env(safe-area-inset-right, 0px));
+  padding-bottom: max(1rem, env(safe-area-inset-bottom, 0px));
+}
+
+html.is-android .new-titles-dialog {
+  width: 100%;
+  max-height: min(78dvh, 900px);
+  padding: 0.85rem 0.85rem 1rem;
+}
+
+html.is-android .new-titles-head {
+  margin: -0.85rem -0.85rem 0.7rem;
+  padding: 0.85rem 0.85rem 0.65rem;
+  gap: 0.5rem;
+}
+
+html.is-android .new-titles-head h2 {
+  font-size: 1.15rem;
+}
+
+@media (orientation: landscape) {
+  html.is-android .new-titles-backdrop {
+    left: 4.75rem;
+    padding-top: max(0.85rem, env(safe-area-inset-top, 0px));
+  }
 }
 
 .library-activity {
@@ -851,6 +1097,153 @@ code {
   margin: 0 0 0.35rem;
 }
 
+.favorite-teams {
+  margin: 0 0 1.25rem;
+  padding: 0.9rem 1rem 1rem;
+  border-radius: 16px;
+  border: 1px solid rgba(240, 180, 41, 0.28);
+  background: rgba(240, 180, 41, 0.06);
+}
+
+.favorite-teams .section-head h2 {
+  margin: 0 0 0.25rem;
+  font-size: 1.15rem;
+}
+
+.favorite-teams .section-head p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.favorite-teams-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.favorite-teams-form .search-input {
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+.favorite-teams-sport,
+.favorite-teams-add {
+  font: inherit;
+  border-radius: 10px;
+  border: 1px solid rgba(240, 180, 41, 0.35);
+  background: rgba(12, 14, 18, 0.9);
+  color: var(--text);
+  padding: 0.55rem 0.75rem;
+}
+
+.favorite-teams-add {
+  font-weight: 700;
+  cursor: pointer;
+  background: rgba(240, 180, 41, 0.16);
+}
+
+.favorite-teams-add:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.favorite-teams-list {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin: 0.75rem 0 0;
+  padding: 0;
+}
+
+.favorite-teams-list li {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.35rem 0.45rem 0.35rem 0.7rem;
+  border-radius: 999px;
+  border: 1px solid rgba(240, 180, 41, 0.35);
+  background: rgba(8, 10, 13, 0.72);
+}
+
+.favorite-teams-list em {
+  margin-left: 0.4rem;
+  font-style: normal;
+  color: var(--accent);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.favorite-teams-list button {
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 700;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0.2rem 0.35rem;
+}
+
+.favorite-matches {
+  border: 1px solid rgba(240, 180, 41, 0.35);
+  border-radius: 18px;
+  padding: 0.85rem 0.85rem 0.2rem;
+  background: rgba(240, 180, 41, 0.05);
+}
+
+/* Shrink to the cards on hand — don't leave empty auto-fill columns. */
+.favorite-matches .catalog-grid {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(11.5rem, 14rem);
+  justify-content: start;
+  overflow-x: auto;
+  padding-bottom: 0.45rem;
+  scroll-snap-type: x proximity;
+}
+
+.favorite-matches .catalog-grid > * {
+  scroll-snap-align: start;
+}
+
+.sports-sport-filters {
+  gap: 0.45rem 0.75rem;
+  margin: 0.55rem 0 0.15rem;
+}
+
+.sports-sport-filters .anime-shelf-tab {
+  font-size: 0.92rem;
+  opacity: 0.85;
+}
+
+.football-league-shelves {
+  display: grid;
+  gap: 1.5rem;
+}
+
+.football-league-shelf {
+  min-width: 0;
+}
+
+.football-league-heading {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin: 0 0 0.65rem;
+  font-size: 1.05rem;
+  font-weight: 650;
+  color: var(--text);
+}
+
+.football-league-heading .count-chip {
+  font-size: 0.72rem;
+  font-weight: 550;
+}
+
 .anime-shelf-tab {
   appearance: none;
   border: 0;
@@ -934,6 +1327,27 @@ code {
   scroll-snap-type: x proximity;
 }
 
+.recommended-row {
+  grid-auto-columns: minmax(10.5rem, 12.5rem);
+  align-items: start;
+}
+
+.recommended-card-wrap {
+  scroll-snap-align: start;
+  min-width: 0;
+}
+
+.recommended-reason {
+  margin: 0.35rem 0 0;
+  font-size: 0.72rem;
+  line-height: 1.35;
+  color: var(--muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
 .continue-card-wrap {
   position: relative;
   scroll-snap-align: start;
@@ -1012,20 +1426,29 @@ code {
 
 .continue-remove {
   position: absolute;
-  top: 0.35rem;
-  right: 0.35rem;
-  z-index: 2;
-  width: 1.7rem;
-  height: 1.7rem;
-  border: 0;
+  top: 0.4rem;
+  right: 0.4rem;
+  z-index: 3;
+  width: 2rem;
+  height: 2rem;
+  border: 1px solid rgba(255, 255, 255, 0.35);
   border-radius: 999px;
-  background: rgba(8, 10, 13, 0.72);
+  background: rgba(8, 10, 13, 0.88);
   color: #fff;
-  font-size: 1.1rem;
+  font-size: 1.35rem;
   line-height: 1;
   cursor: pointer;
-  opacity: 0;
-  transition: opacity 140ms ease;
+  opacity: 1;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.55);
+  transition: background 140ms ease, transform 140ms ease;
+}
+
+.continue-remove:hover,
+.continue-remove:focus-visible {
+  background: rgba(220, 60, 60, 0.92);
+  border-color: rgba(255, 255, 255, 0.55);
+  transform: scale(1.06);
+  outline: none;
 }
 
 .continue-card-wrap:hover .continue-remove,
@@ -1243,6 +1666,29 @@ code {
   background: rgba(16, 20, 26, 0.75);
 }
 
+.sort-select {
+  gap: 0.5rem;
+  color: var(--muted);
+  font-size: 0.88rem;
+  user-select: none;
+}
+
+.sort-select select {
+  border: 0;
+  background: transparent;
+  color: var(--text, #f2f4f7);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  outline: none;
+  max-width: 11rem;
+}
+
+.sort-select select option {
+  color: #111;
+  background: #fff;
+}
+
 .health-summary {
   color: var(--muted);
   font-size: 0.85rem;
@@ -1296,6 +1742,11 @@ code {
   overflow: hidden;
 }
 
+/* TMDB / show posters are portrait — keep them in a matching frame so crop scale looks even. */
+.media-card-art.is-poster {
+  aspect-ratio: 2 / 3;
+}
+
 .status-badge {
   position: absolute;
   top: 0.55rem;
@@ -1329,6 +1780,118 @@ code {
   color: #1a1408;
   background: var(--accent);
   border-color: transparent;
+}
+
+.event-badge {
+  position: absolute;
+  top: 0.55rem;
+  left: 0.55rem;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  padding: 0.28rem 0.55rem;
+  border-radius: 999px;
+  background: rgba(8, 10, 13, 0.82);
+  border: 1px solid var(--line);
+  color: var(--text);
+}
+
+.event-badge.event-live {
+  color: #0d1a12;
+  background: #6fdfa0;
+  border-color: transparent;
+}
+
+/* PPV.st-style live viewer count: dark pill + red dot + number */
+.event-badge.event-live.has-viewers {
+  color: var(--text);
+  background: rgba(8, 10, 13, 0.88);
+  border-color: rgba(255, 255, 255, 0.12);
+  font-weight: 600;
+}
+
+.event-live-dot {
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 50%;
+  background: #e11;
+  box-shadow: 0 0 0 1px rgba(238, 17, 17, 0.35);
+  flex: 0 0 auto;
+}
+
+.event-badge.event-soon {
+  color: var(--text);
+  background: rgba(8, 10, 13, 0.82);
+  border-color: rgba(255, 255, 255, 0.12);
+  font-weight: 600;
+}
+
+.event-badge.event-upcoming {
+  color: var(--text);
+  background: rgba(8, 10, 13, 0.82);
+  font-weight: 600;
+}
+
+.event-badge.event-ended {
+  color: var(--muted);
+  opacity: 0.85;
+}
+
+.media-card-sport-meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.45rem;
+  margin-top: 0.3rem;
+  min-height: 1.1rem;
+  flex-wrap: wrap;
+}
+
+.media-card-sport {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.event-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  flex: 0 0 auto;
+  font-size: 0.78rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.event-meta.has-viewers,
+.event-meta.event-live.has-viewers {
+  color: var(--text);
+}
+
+.event-meta.event-soon,
+.event-meta.event-upcoming {
+  color: var(--muted);
+}
+
+.event-meta.event-ended {
+  opacity: 0.75;
+}
+
+.media-card-art .status-badge {
+  left: auto;
+  right: 0.55rem;
 }
 
 .card-check-btn {
@@ -1415,6 +1978,49 @@ code {
   font-weight: 700;
   letter-spacing: -0.015em;
   line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  /* Reserve two lines so short titles don't shrink the card vs long ones. */
+  min-height: calc(1.4em * 2);
+}
+
+.media-card.is-sports .media-card-body h3 {
+  -webkit-line-clamp: 4;
+  min-height: 0;
+  font-size: 0.92rem;
+  line-height: 1.32;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.media-card.is-sports .media-card-art {
+  background: #0a0c10;
+}
+
+.media-card.is-sports .media-card-art img {
+  object-fit: contain;
+  object-position: center;
+}
+
+.media-card.is-sports .media-card-body {
+  padding: 0.7rem 0.75rem 0.85rem;
+  gap: 0.28rem;
+}
+
+.media-card-body .media-card-match-detail {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  max-height: none;
+  opacity: 1;
+  margin-top: 0;
 }
 
 .media-card-body p {
@@ -1431,8 +2037,8 @@ code {
   transition: opacity 160ms ease, max-height 160ms ease, margin 160ms ease;
 }
 
-.media-card-wrap:hover .media-card-body p,
-.media-card:focus-visible .media-card-body p {
+.media-card-wrap:hover .media-card-body p:not(.media-card-match-detail),
+.media-card:focus-visible .media-card-body p:not(.media-card-match-detail) {
   max-height: 3rem;
   opacity: 1;
   margin-top: 0.15rem;
@@ -1749,48 +2355,45 @@ select.url-input {
   color: #9be7b4;
 }
 
-/* Sits above the sidebar Library tile while catalog sync runs. */
+/* Same footprint as Back to top: one pill, section name and percent. */
 .catalog-sync-bar {
-  display: flex;
-  flex-direction: column;
+  display: inline-flex;
+  align-items: center;
   gap: 0.4rem;
-  padding: 0.7rem 0.85rem 0.75rem;
-  border-radius: 12px;
-  border: 1px solid rgba(240, 180, 41, 0.35);
-  background: rgba(12, 15, 20, 0.96);
+  width: max-content;
+  max-width: min(16rem, calc(100% - 1rem));
+  padding: 0.65rem 0.95rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(16, 20, 26, 0.92);
+  color: var(--text);
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 1;
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
   backdrop-filter: blur(10px);
   min-width: 0;
 }
 
-.catalog-sync-bar-copy {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 0.55rem;
-  margin-bottom: 0;
-}
-
 .catalog-sync-bar-message {
   color: var(--text);
-  font-size: 0.72rem;
+  font-size: inherit;
   font-weight: 600;
-  line-height: 1.25;
+  line-height: 1;
   min-width: 0;
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
+  white-space: nowrap;
   overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .catalog-sync-bar-percent {
   flex: 0 0 auto;
   color: var(--accent);
   font-variant-numeric: tabular-nums;
-  font-weight: 800;
-  font-size: 0.85rem;
-  line-height: 1.2;
-  padding-top: 0.05rem;
+  font-weight: 600;
+  font-size: inherit;
+  line-height: 1;
 }
 
 .catalog-sync-bar-track {
@@ -1998,6 +2601,27 @@ select.url-input {
   box-sizing: border-box;
 }
 
+/* PiP close — larger hit target than the rest of the chrome */
+.player-shell-pip .player-back-btn {
+  width: 2.35rem;
+  min-width: 2.35rem;
+  height: 2.05rem;
+  min-height: 2.05rem;
+  padding: 0;
+  font-size: 1.45rem;
+  font-weight: 600;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.28);
+}
+
+.player-shell-pip .player-back-btn:hover,
+.player-shell-pip .player-back-btn:focus-visible {
+  background: rgba(220, 60, 60, 0.9);
+  border-color: rgba(255, 255, 255, 0.5);
+  outline: none;
+}
+
 .player-shell-pip .player-meta {
   display: flex;
   align-items: center;
@@ -2056,6 +2680,68 @@ select.url-input {
   left: var(--sidebar);
 }
 
+/* Android: desktop --sidebar (248px) leaves a dead strip; fill the stage. */
+html.is-android .multi-view-full {
+  left: 0;
+}
+
+.multi-view-full.is-fullscreen {
+  inset: 0 !important;
+  left: 0 !important;
+  right: 0 !important;
+  top: 0 !important;
+  bottom: 0 !important;
+  z-index: 250000;
+  border: 0;
+  width: 100vw;
+  height: 100dvh;
+  max-width: 100vw;
+  max-height: 100dvh;
+}
+
+/* Fullscreen hides the Close all / Add stream bar. The tile header stays so audio can move. */
+.multi-view.is-fullscreen .multi-view-bar {
+  display: none;
+}
+
+.multi-view.is-fullscreen .player-shell-tile .tile-chrome {
+  opacity: 1;
+  pointer-events: auto;
+  max-height: none;
+  padding: 0.28rem 0.4rem;
+  overflow: visible;
+  background: rgba(8, 10, 13, 0.92);
+}
+
+.multi-view.is-fullscreen .player-shell-tile .tile-chrome > .ghost-btn {
+  display: none;
+}
+
+.multi-view-fs-exit {
+  position: absolute;
+  top: max(0.45rem, env(safe-area-inset-top, 0px));
+  right: max(0.45rem, env(safe-area-inset-right, 0px));
+  z-index: 5;
+  padding: 0.4rem 0.7rem;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(8, 10, 13, 0.72);
+  color: #f2f2f2;
+  font-size: 0.78rem;
+  pointer-events: auto;
+}
+
+.multi-view-fs-exit:hover,
+.multi-view-fs-exit:focus-visible {
+  background: rgba(8, 10, 13, 0.9);
+  outline: none;
+}
+
+html.is-android .multi-view-full.is-fullscreen {
+  position: fixed !important;
+  z-index: 250000 !important;
+}
+
 .multi-view-float {
   position: fixed;
   inset: auto auto 0.75rem 0.75rem;
@@ -2099,6 +2785,37 @@ select.url-input {
   margin-left: auto;
 }
 
+.multiview-pick-bar {
+  position: fixed;
+  top: 0.65rem;
+  left: calc(var(--sidebar) + 0.75rem);
+  right: 0.75rem;
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.55rem 0.75rem;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: rgba(8, 10, 13, 0.94);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+}
+
+.multiview-pick-bar strong {
+  font-size: 0.9rem;
+}
+
+.multiview-pick-bar span {
+  color: var(--muted);
+  font-size: 0.78rem;
+  flex: 1;
+  min-width: 0;
+}
+
+.multiview-pick-bar .control-btn {
+  flex: 0 0 auto;
+}
+
 .multi-view-grid {
   flex: 1;
   min-height: 0;
@@ -2113,6 +2830,10 @@ select.url-input {
 
 .multi-view-grid.cols-2 {
   grid-template-columns: 1fr 1fr;
+}
+
+.multi-view-grid.cols-3 {
+  grid-template-columns: 1fr 1fr 1fr;
 }
 
 .multi-view-grid.cols-2x2 {
@@ -2209,6 +2930,28 @@ select.url-input {
   padding: 0.75rem;
   background: rgba(0, 0, 0, 0.72);
   font-size: 0.8rem;
+}
+
+.web-embed-tile {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  min-height: 0;
+  background: #000;
+}
+
+.web-embed-tile-stage {
+  position: relative;
+  min-height: 0;
+  height: 100%;
+  background: #000;
+  pointer-events: none;
+}
+
+.web-embed-tile-badge {
+  font-size: 0.72rem;
+  color: var(--accent);
+  font-weight: 650;
+  padding: 0 0.35rem;
 }
 
 .guide-toolbar {
@@ -2436,6 +3179,8 @@ select.url-input {
   height: 100%;
   object-fit: cover;
   display: block;
+  border: 0;
+  pointer-events: none;
 }
 
 .local-channel-live-poster.is-hidden {
@@ -2502,81 +3247,6 @@ select.url-input {
 
 .local-channel-note {
   margin: 0 0 1rem;
-}
-
-.local-youtube-status {
-  margin: 0 0 1rem;
-}
-
-.local-youtube-live {
-  margin: 0 0 1.25rem;
-  padding: 0.85rem;
-  border-radius: 14px;
-  border: 1px solid rgba(220, 38, 38, 0.35);
-  background:
-    linear-gradient(135deg, rgba(220, 38, 38, 0.12), transparent 55%),
-    rgba(16, 20, 26, 0.85);
-}
-
-.local-youtube-live-head h3 {
-  margin: 0;
-  font-size: 1rem;
-}
-
-.local-youtube-live-head p {
-  margin: 0.2rem 0 0.75rem;
-  color: var(--muted);
-  font-size: 0.85rem;
-}
-
-.local-youtube-live-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
-  gap: 0.65rem;
-}
-
-.local-youtube-live-card {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 0.25rem;
-  text-align: left;
-  padding: 0.85rem 0.9rem;
-  border-radius: 12px;
-  border: 1px solid var(--line);
-  background: rgba(8, 10, 13, 0.72);
-  color: var(--text);
-  cursor: pointer;
-  transition: border-color 150ms ease, transform 150ms ease;
-}
-
-.local-youtube-live-card:hover {
-  border-color: rgba(220, 38, 38, 0.55);
-  transform: translateY(-1px);
-}
-
-.local-youtube-live-card strong {
-  font-size: 1.05rem;
-}
-
-.local-youtube-live-card span:last-child {
-  color: var(--muted);
-  font-size: 0.8rem;
-}
-
-.local-youtube-live-badge {
-  position: absolute;
-  top: 0.55rem;
-  right: 0.55rem;
-  padding: 0.12rem 0.45rem;
-  border-radius: 999px;
-  font-size: 0.65rem;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: #fff;
-  background: rgba(220, 38, 38, 0.95);
 }
 
 .local-video-sources {
@@ -2652,6 +3322,12 @@ select.url-input {
   min-height: 100%;
 }
 
+html.is-android.android-player-fs,
+html.is-android.android-player-fs body,
+html.is-android.android-player-fs #root {
+  background: #000;
+}
+
 .web-browser-header {
   margin-bottom: 0;
   flex: 0 0 auto;
@@ -2703,6 +3379,23 @@ select.url-input {
   display: flex;
   flex-direction: column;
   gap: 0.05rem;
+}
+
+.web-chrome-brand {
+  display: block;
+  height: 1.15rem;
+  width: auto;
+  max-width: 7.5rem;
+  object-fit: contain;
+  object-position: left center;
+  margin: 0 0 0.1rem;
+  pointer-events: none;
+  user-select: none;
+}
+
+.web-browser-page.is-embed-player.is-watching .web-chrome-brand {
+  height: 1.35rem;
+  max-width: 8.5rem;
 }
 
 .web-chrome-title {
@@ -2829,10 +3522,109 @@ select.url-input {
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
 }
 
+.web-player-tile {
+  position: relative;
+}
+
+.web-volume-flash {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  z-index: 6;
+  transform: translate(-50%, -50%);
+  padding: 0.55rem 0.9rem;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(10, 12, 16, 0.82);
+  color: #f4f6fb;
+  font-size: 0.95rem;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+  backdrop-filter: blur(8px);
+}
+
+.web-ad-dock-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin: 0 0 0.4rem;
+  padding: 0.35rem 0.55rem;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: rgba(18, 14, 10, 0.92);
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.web-ad-dock-bar .web-ad-dock-host {
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8em;
+}
+
+.web-browser-page.is-fullscreen .web-ad-dock-bar,
+.web-browser-page.is-embed-player .web-ad-dock-bar {
+  margin-inline: 0.75rem;
+}
+
 .web-browser-page.is-watching .web-player-tile {
   min-height: calc(100vh - 7.5rem);
   border-radius: 12px;
   box-shadow: none;
+}
+
+.web-browser-page.is-embed-player.is-watching {
+  gap: 0;
+  padding: 0;
+  min-height: 100%;
+}
+
+.web-browser-page.is-embed-player.is-watching .web-player-tile {
+  min-height: calc(100vh - 3.25rem);
+  border: none;
+  border-radius: 0;
+}
+
+.web-browser-page.is-embed-player.is-fullscreen .web-player-tile {
+  min-height: 100%;
+}
+
+.web-browser-page.is-embed-player .web-chrome {
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+
+.web-browser-page.is-embed-player.chrome-hidden .web-chrome {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-6px);
+}
+
+/* Android overlay browser: never bury controls under GeckoView. */
+html.is-android .web-browser-page.is-embed-player.chrome-hidden .web-chrome {
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
+}
+
+html.is-android .web-browser-page.is-embed-player.is-watching .web-chrome {
+  z-index: 30;
+  background: rgba(8, 10, 13, 0.96);
+}
+
+.web-browser-page.is-embed-player.chrome-hidden .web-player-tile {
+  min-height: 100vh;
+}
+
+.web-browser-page.is-embed-player.is-watching .web-chrome {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  border-radius: 0;
+  border-left: none;
+  border-right: none;
+  border-top: none;
 }
 
 .web-player-tile-fs,
@@ -2867,7 +3659,7 @@ select.url-input {
   top: 0;
   left: 0;
   right: 0;
-  z-index: 90;
+  z-index: 120;
   height: 40px;
   display: flex;
   align-items: center;
@@ -2879,19 +3671,26 @@ select.url-input {
   pointer-events: auto;
 }
 
+.web-browser-pip-fs-bar .web-browser-pip-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex-shrink: 0;
+}
+
 .web-browser-pip {
   position: fixed;
-  z-index: 72;
+  z-index: 120;
   /* Width / bottom / right set inline from getPipLayout() to match native stage */
   display: flex;
   align-items: stretch;
   border-radius: 14px 14px 0 0;
-  overflow: hidden;
+  overflow: visible;
   border: 1px solid var(--line);
   border-bottom: 0;
   background: rgba(8, 10, 13, 0.95);
   box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
-  pointer-events: none;
+  pointer-events: auto;
   box-sizing: border-box;
 }
 
@@ -2899,11 +3698,11 @@ select.url-input {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 0.35rem;
+  gap: 0.25rem;
   width: 100%;
   height: 100%;
   min-height: 0;
-  padding: 0 0.4rem;
+  padding: 0 0.35rem;
   background: rgba(8, 10, 13, 0.95);
   border-bottom: 1px solid var(--line);
   pointer-events: auto;
@@ -2914,9 +3713,10 @@ select.url-input {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 0.25rem;
+  gap: 0.2rem;
   flex-shrink: 0;
   height: 100%;
+  pointer-events: auto;
 }
 
 .web-browser-pip-bar .web-browser-pip-actions {
@@ -2929,11 +3729,12 @@ select.url-input {
   display: flex;
   align-items: center;
   height: 100%;
+  overflow: hidden;
 }
 
 .web-browser-pip-meta strong {
   display: block;
-  font-size: 0.78rem;
+  font-size: 0.72rem;
   line-height: 1.2;
   white-space: nowrap;
   overflow: hidden;
@@ -2950,13 +3751,52 @@ select.url-input {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  height: 26px;
-  min-height: 26px;
-  padding: 0 0.55rem;
-  font-size: 0.72rem;
+  height: 28px;
+  min-height: 28px;
+  min-width: 28px;
+  padding: 0 0.4rem;
+  font-size: 0.7rem;
   line-height: 1;
   white-space: nowrap;
   box-sizing: border-box;
+  pointer-events: auto;
+}
+
+.web-browser-pip .pip-close-btn,
+.web-browser-pip-fs-bar .pip-close-btn {
+  width: 2.35rem;
+  min-width: 2.35rem;
+  height: 2.05rem;
+  min-height: 2.05rem;
+  padding: 0;
+  font-size: 1.45rem;
+  font-weight: 600;
+  line-height: 1;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  color: #fff;
+}
+
+.web-browser-pip .pip-close-btn:hover,
+.web-browser-pip .pip-close-btn:focus-visible,
+.web-browser-pip-fs-bar .pip-close-btn:hover,
+.web-browser-pip-fs-bar .pip-close-btn:focus-visible {
+  background: rgba(220, 60, 60, 0.9);
+  border-color: rgba(255, 255, 255, 0.5);
+  outline: none;
+}
+
+.web-pip-mute-btn {
+  min-width: 30px;
+  padding-inline: 0.3rem;
+  font-size: 0.85rem;
+}
+
+.web-pip-unmute-btn {
+  font-size: 0.85rem;
+  padding: 0 0.35rem;
+  min-width: 28px;
 }
 
 .web-player-tile-label {
@@ -3040,18 +3880,31 @@ select.url-input {
 
 .player-shell.chrome-hidden .player-meta,
 .player-shell.chrome-hidden .player-controls,
+.player-shell.chrome-hidden .player-bottom-bar,
 .player-shell.chrome-hidden .player-epg-strip,
 .player-shell.chrome-hidden .player-hotkeys {
   opacity: 0;
   pointer-events: none;
 }
 
-/* Keep Back + episode picker reachable even when the rest of the chrome auto-hides */
-.player-shell.chrome-hidden .player-back-btn,
-.player-shell.chrome-hidden .player-episode-block,
-.player-shell.chrome-hidden .player-episode-nav {
+/* display:contents on Android pulls these out of .player-meta — hide them too. */
+.player-shell.chrome-hidden .player-meta h2,
+.player-shell.chrome-hidden .player-meta-status,
+.player-shell.chrome-hidden .player-watch-next {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Keep Back reachable; episode picker follows chrome so it does not sit over the picture. */
+.player-shell.chrome-hidden .player-back-btn {
   opacity: 1;
   pointer-events: auto;
+}
+
+.player-shell.chrome-hidden .player-episode-block,
+.player-shell.chrome-hidden .player-episode-nav {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .player-shell.chrome-visible .player-chrome {
@@ -3380,7 +4233,7 @@ select.url-input {
 }
 
 .playback-loading {
-  --playback-logo-size: clamp(2.35rem, 5.5vw, 3.25rem);
+  --playback-logo-size: clamp(3rem, 16vw, 4.25rem);
   background: #050608;
   color: var(--muted);
   overflow: hidden;
@@ -3407,8 +4260,15 @@ select.url-input {
   width: var(--playback-logo-size);
   height: var(--playback-logo-size);
   transform: translateX(-50%);
-  object-fit: contain;
+  object-fit: cover;
   pointer-events: none;
+  border-radius: 22%;
+  background: #10141a;
+  box-shadow: 0 0 0 1px rgba(240, 180, 41, 0.4);
+}
+
+html.is-android .playback-loading-logo {
+  top: max(5.75rem, calc(env(safe-area-inset-top, 0px) + 4.5rem));
 }
 
 .playback-loading-center {
@@ -3520,6 +4380,164 @@ select.url-input {
   pointer-events: auto;
 }
 
+html.is-android .player-bar {
+  padding-top: max(3.15rem, calc(env(safe-area-inset-top, 0px) + 2.15rem));
+  padding-left: max(1rem, env(safe-area-inset-left, 0px));
+  padding-right: max(1rem, env(safe-area-inset-right, 0px));
+}
+
+/* Full Android player covers the nav rail — no Library strip beside the picture. */
+html.is-android .player-shell:not(.player-shell-pip):not(.player-shell-tile) {
+  left: 0 !important;
+  right: 0 !important;
+  top: 0 !important;
+  bottom: 0 !important;
+  z-index: 250000;
+}
+
+html.is-android body:has(.player-shell:not(.player-shell-pip):not(.player-shell-tile)) .sidebar.sidebar-android {
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
+
+/* Drop the verbose Playing/hls/Vol/Subs strip on phones — keep errors only. */
+html.is-android .player-shell:not(.player-shell-pip) .player-meta-status:not(.is-error) {
+  display: none !important;
+}
+
+/* Phone player chrome: status and episode chip sit in the button row.
+   A flex:1 meta column was squeezing them into a narrow stack over the video. */
+html.is-android .player-shell:not(.player-shell-pip) .player-bar {
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.45rem;
+  padding-bottom: 0.55rem;
+}
+
+html.is-android .player-shell:not(.player-shell-pip) .player-meta {
+  display: contents;
+}
+
+html.is-android .player-shell:not(.player-shell-pip) .player-back-btn {
+  order: 0;
+}
+
+html.is-android .player-shell:not(.player-shell-pip) .player-meta h2 {
+  order: 1;
+  flex: 1 1 8rem;
+  min-width: 0;
+}
+
+html.is-android .player-shell:not(.player-shell-pip) .player-meta-status,
+html.is-android .player-shell:not(.player-shell-pip) .player-episode-block,
+html.is-android .player-shell:not(.player-shell-pip) .player-watch-next {
+  order: 2;
+  margin: 0;
+  max-width: none;
+  flex: 0 0 auto;
+}
+
+html.is-android .player-shell:not(.player-shell-pip) .player-meta-status,
+html.is-android .player-shell:not(.player-shell-pip) .player-meta-status span,
+html.is-android .player-shell:not(.player-shell-pip) .player-episode-chip {
+  white-space: nowrap;
+}
+
+html.is-android .player-shell:not(.player-shell-pip) .player-controls {
+  order: 3;
+  margin-left: 0;
+  flex: 1 1 auto;
+  justify-content: flex-start;
+}
+
+/* PiP chrome is a 44px row. The full-player status inset clips Close / Expand. */
+html.is-android .player-shell-pip .player-bar {
+  padding: 0 0.4rem;
+}
+
+html.is-android .player-shell-pip {
+  --pip-w: min(16rem, calc(100vw - 1.5rem));
+  inset: auto max(0.75rem, env(safe-area-inset-right, 0px))
+    max(0.75rem, env(safe-area-inset-bottom, 0px)) auto;
+  width: var(--pip-w);
+  left: auto !important;
+}
+
+html.is-android .player-shell-pip .player-stage {
+  aspect-ratio: 16 / 9;
+}
+
+html.is-android .web-chrome {
+  padding-top: max(2.65rem, calc(env(safe-area-inset-top, 0px) + 1.75rem));
+  padding-left: max(0.5rem, env(safe-area-inset-left, 0px));
+  padding-right: max(0.5rem, env(safe-area-inset-right, 0px));
+}
+
+/* Embed playback: keep Back / Mute / Full on screen and the video below them. */
+html.is-android .main-stage:has(.web-browser-page.is-embed-player.is-watching) {
+  overflow: hidden;
+}
+
+html.is-android .web-browser-page.is-embed-player.is-watching {
+  height: 100%;
+  min-height: 0;
+  max-height: 100%;
+  overflow: hidden;
+  padding-bottom: 0;
+}
+
+html.is-android .web-browser-page.is-embed-player.is-watching .web-chrome {
+  position: relative;
+  top: auto;
+  flex: 0 0 auto;
+  padding-left: max(0.7rem, env(safe-area-inset-left, 0px));
+  padding-right: max(0.85rem, env(safe-area-inset-right, 0px));
+}
+
+html.is-android .web-browser-page.is-embed-player.is-watching .web-chrome-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+html.is-android .web-browser-page.is-embed-player.is-watching .web-chrome-meta {
+  flex: 1 1 6rem;
+  min-width: 0;
+}
+
+html.is-android .web-browser-page.is-embed-player.is-watching .web-chrome-actions {
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  min-width: 0;
+  justify-content: flex-end;
+}
+
+html.is-android .web-browser-page.is-embed-player.is-watching .web-chrome-actions .control-btn {
+  padding: 0.38rem 0.62rem;
+}
+
+html.is-android .web-browser-page.is-embed-player.is-watching .web-volume-control {
+  min-width: 4.4rem;
+}
+
+html.is-android .web-browser-page.is-embed-player.is-watching .web-volume-control input[type='range'] {
+  width: 4.4rem;
+}
+
+html.is-android .web-browser-page.is-embed-player.is-watching .web-player-tile,
+html.is-android .web-browser-page.is-embed-player.is-watching .web-frame {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: auto;
+  background: #000;
+}
+
+html.is-android .web-browser-page.is-embed-player.is-watching .web-player-tile {
+  /* Fill leftover Rivestream chrome height so the Gecko stage isn't a white strip. */
+  min-height: calc(100dvh - 4.75rem);
+}
+
 .player-controls {
   display: flex;
   align-items: center;
@@ -3528,6 +4546,77 @@ select.url-input {
   flex-wrap: wrap;
   justify-content: flex-end;
   padding-top: 0.15rem;
+}
+
+.player-controls-bottom {
+  margin-left: 0;
+  justify-content: flex-start;
+  flex: 0 0 auto;
+  width: 100%;
+  flex-wrap: wrap;
+  row-gap: 0.45rem;
+}
+
+.player-bottom-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.45rem;
+  padding: 1.15rem 1rem max(0.75rem, env(safe-area-inset-bottom, 0px));
+  background: linear-gradient(
+    to top,
+    rgba(8, 10, 13, 0.92) 0%,
+    rgba(8, 10, 13, 0.72) 55%,
+    transparent 100%
+  );
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 220ms ease;
+}
+
+.player-bottom-bar.is-visible,
+.player-shell.chrome-visible .player-bottom-bar {
+  opacity: 1;
+}
+
+.player-bottom-bar > * {
+  pointer-events: auto;
+}
+
+.player-clock-inline {
+  position: static;
+  margin-left: auto;
+  padding: 0.2rem 0.45rem;
+  background: transparent;
+  font-size: 0.84rem;
+  opacity: 0.92;
+}
+
+.player-seek {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  margin: 0;
+  padding: 0 0.1rem 0.15rem;
+}
+
+.player-seek input[type='range'] {
+  width: 100%;
+  height: 1.35rem;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+  touch-action: none;
+}
+
+.player-shell.chrome-hidden .player-bottom-bar {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .player-meta {
@@ -3568,8 +4657,29 @@ select.url-input {
 
 .volume-control input[type='range'] {
   width: 8.5rem;
+  height: 1.7rem;
+  margin: 0;
   accent-color: var(--accent);
   cursor: pointer;
+  touch-action: none;
+}
+
+.web-volume-control {
+  min-width: 6.5rem;
+}
+
+.web-volume-control input[type='range'] {
+  width: 6.5rem;
+}
+
+.web-pip-volume {
+  min-width: 3.25rem;
+  max-width: 3.5rem;
+  pointer-events: auto;
+}
+
+.web-pip-volume input[type='range'] {
+  width: 3.25rem;
 }
 
 .player-hint {
@@ -3720,7 +4830,16 @@ select.url-input {
   background: #000;
 }
 
-.player-video::-webkit-media-controls-fullscreen-button {
+/* The WebView video surface sits above the stage and swallows taps on the
+   ±10s buttons. Let those controls receive the touch. */
+html.is-android .player-video.is-remux {
+  pointer-events: none;
+}
+
+.player-video::-webkit-media-controls-fullscreen-button,
+.player-video::-webkit-media-controls-mute-button,
+.player-video::-webkit-media-controls-volume-slider-container,
+.player-video::-webkit-media-controls-volume-slider {
   display: none !important;
 }
 
@@ -3754,18 +4873,100 @@ select.url-input {
   opacity: 0.55;
 }
 
+.seek-skip-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 28;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 clamp(1.1rem, 7vw, 4.25rem);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 160ms ease;
+}
+
+.seek-skip-overlay.is-visible {
+  opacity: 1;
+}
+
+.seek-skip-btn {
+  position: relative;
+  pointer-events: auto;
+  width: 3.4rem;
+  height: 3.4rem;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(8, 10, 14, 0.88);
+  color: #f4f4f5;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+  transition: transform 140ms ease, background 140ms ease, border-color 140ms ease;
+}
+
+.seek-skip-btn:hover {
+  transform: scale(1.06);
+  background: rgba(16, 20, 26, 0.96);
+  border-color: rgba(240, 180, 41, 0.45);
+}
+
+.seek-skip-btn:active {
+  transform: scale(0.97);
+}
+
+.seek-skip-btn svg {
+  width: 1.45rem;
+  height: 1.45rem;
+  display: block;
+}
+
+.seek-skip-badge {
+  position: absolute;
+  bottom: 0.4rem;
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  opacity: 0.9;
+  pointer-events: none;
+}
+
+.player-shell.chrome-hidden .seek-skip-overlay {
+  opacity: 0;
+  pointer-events: none;
+}
+
 .player-shell-pip .player-clock {
   display: none;
 }
 
 .player-shell:fullscreen,
-.player-shell:-webkit-full-screen {
+.player-shell:-webkit-full-screen,
+.player-shell.is-os-fullscreen {
   left: 0 !important;
   right: 0 !important;
   top: 0 !important;
   bottom: 0 !important;
   width: 100% !important;
   height: 100% !important;
+}
+
+/* Android: CSS fullscreen (no Fullscreen API) — edge-to-edge over the top chrome. */
+html.is-android .player-shell.is-os-fullscreen {
+  position: fixed !important;
+  inset: 0 !important;
+  width: 100vw !important;
+  height: 100dvh !important;
+  max-width: 100vw !important;
+  max-height: 100dvh !important;
+  z-index: 250000 !important;
+  border-radius: 0 !important;
+}
+
+html.is-android.android-player-fs .sidebar.sidebar-android {
+  visibility: hidden !important;
+  pointer-events: none !important;
 }
 
 /* If PiP is entered while the Fullscreen API is still active, keep corner sizing */
@@ -3781,23 +4982,48 @@ select.url-input {
 }
 
 .player-shell:fullscreen .player-stage,
-.player-shell:-webkit-full-screen .player-stage {
+.player-shell:-webkit-full-screen .player-stage,
+.player-shell.is-os-fullscreen .player-stage {
   min-height: 0;
   height: 100%;
 }
 
 .player-shell:fullscreen .player-video,
-.player-shell:-webkit-full-screen .player-video {
+.player-shell:-webkit-full-screen .player-video,
+.player-shell.is-os-fullscreen .player-video {
   max-height: none;
   width: 100%;
   height: 100%;
+  object-fit: contain;
+  object-position: center center;
+}
+
+html.is-android .player-shell.is-os-fullscreen .player-stage {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+html.is-android .player-shell.is-os-fullscreen .player-video,
+html.is-android .player-shell:fullscreen .player-video,
+html.is-android .player-shell:-webkit-full-screen .player-video {
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain !important;
+  object-position: center center !important;
+  transform: none !important;
 }
 
 .player-subtitles {
   position: absolute;
   left: 50%;
   /* Sit above the hotkey strip / chrome so lines aren’t clipped */
-  bottom: clamp(4.75rem, 14vh, 8rem);
+  bottom: clamp(3.25rem, 10vh, 6rem);
   z-index: 20;
   display: grid;
   gap: 0.12rem;
@@ -3809,13 +5035,82 @@ select.url-input {
 }
 
 .player-shell:fullscreen .player-subtitles,
-.player-shell:-webkit-full-screen .player-subtitles {
-  bottom: clamp(5.5rem, 12vh, 8.5rem);
+.player-shell:-webkit-full-screen .player-subtitles,
+.player-shell.is-os-fullscreen .player-subtitles {
+  bottom: clamp(3.75rem, 9vh, 6.5rem);
   z-index: 40;
 }
 
+/* Fallback when picture size isn’t known yet — keep modest so portrait
+   letterbox doesn’t park cues mid–black-bar. Prefer .is-picture-anchored. */
+html.is-android .player-subtitles {
+  bottom: clamp(3rem, 7vh, 5rem);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+html.is-android .player-shell.is-os-fullscreen .player-subtitles,
+html.is-android .player-shell:fullscreen .player-subtitles,
+html.is-android .player-shell:-webkit-full-screen .player-subtitles {
+  bottom: clamp(3.25rem, 8vh, 5.5rem);
+}
+
+html.is-android .player-shell.chrome-hidden .player-subtitles {
+  bottom: clamp(1.75rem, 4.5vh, 3.25rem);
+}
+
+/*
+ * Picture-anchored: bottom of contain-fitted frame + small inset into the picture.
+ * Keep cues near the lower edge of the stream (user feedback: too high before).
+ */
+.player-subtitles.is-picture-anchored {
+  bottom: calc((100% - var(--picture-h)) / 2 + max(0.35rem, var(--picture-h) * 0.02));
+  padding-bottom: 0;
+}
+
+@media (orientation: landscape) {
+  .player-subtitles.is-picture-anchored {
+    bottom: calc((100% - var(--picture-h)) / 2 + max(0.15rem, var(--picture-h) * 0.012));
+  }
+}
+
+@media (orientation: portrait) {
+  .player-subtitles.is-picture-anchored {
+    bottom: calc((100% - var(--picture-h)) / 2 + max(0.55rem, var(--picture-h) * 0.035));
+  }
+}
+
+html.is-android .player-subtitles.is-picture-anchored,
+html.is-android .player-shell.is-os-fullscreen .player-subtitles.is-picture-anchored,
+html.is-android .player-shell:fullscreen .player-subtitles.is-picture-anchored,
+html.is-android .player-shell:-webkit-full-screen .player-subtitles.is-picture-anchored,
+html.is-android .player-shell.chrome-hidden .player-subtitles.is-picture-anchored {
+  bottom: calc((100% - var(--picture-h)) / 2 + max(0.35rem, var(--picture-h) * 0.02));
+  padding-bottom: 0;
+}
+
+@media (orientation: landscape) {
+  html.is-android .player-subtitles.is-picture-anchored,
+  html.is-android .player-shell.is-os-fullscreen .player-subtitles.is-picture-anchored,
+  html.is-android .player-shell:fullscreen .player-subtitles.is-picture-anchored,
+  html.is-android .player-shell:-webkit-full-screen .player-subtitles.is-picture-anchored,
+  html.is-android .player-shell.chrome-hidden .player-subtitles.is-picture-anchored {
+    bottom: calc((100% - var(--picture-h)) / 2 + max(0.15rem, var(--picture-h) * 0.012));
+  }
+}
+
+@media (orientation: portrait) {
+  html.is-android .player-subtitles.is-picture-anchored,
+  html.is-android .player-shell.is-os-fullscreen .player-subtitles.is-picture-anchored,
+  html.is-android .player-shell:fullscreen .player-subtitles.is-picture-anchored,
+  html.is-android .player-shell:-webkit-full-screen .player-subtitles.is-picture-anchored,
+  html.is-android .player-shell.chrome-hidden .player-subtitles.is-picture-anchored {
+    bottom: calc((100% - var(--picture-h)) / 2 + max(0.55rem, var(--picture-h) * 0.035));
+  }
+}
+
 .player-shell:fullscreen .player-subtitles span,
-.player-shell:-webkit-full-screen .player-subtitles span {
+.player-shell:-webkit-full-screen .player-subtitles span,
+.player-shell.is-os-fullscreen .player-subtitles span {
   font-size: clamp(1.2rem, 2.6vw, 1.7rem);
 }
 
@@ -3831,6 +5126,33 @@ select.url-input {
   line-height: 1.3;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
   white-space: pre-wrap;
+}
+
+/* Corner / in-app PiP — keep cues readable without covering the bar */
+.player-shell-pip .player-subtitles {
+  bottom: 0.4rem;
+  width: min(96%, 19rem);
+  gap: 0.06rem;
+}
+
+.player-shell-pip .player-subtitles span {
+  padding: 0.1rem 0.35rem;
+  font-size: clamp(0.62rem, 3.4vw, 0.78rem);
+  line-height: 1.25;
+  border-radius: 3px;
+}
+
+/* Android Home → system PiP: video fills the window; sit cues on the frame */
+html.is-system-pip .player-subtitles {
+  display: grid !important;
+  bottom: 0.45rem;
+  width: min(94%, 22rem);
+  z-index: 40;
+}
+
+html.is-system-pip .player-subtitles span {
+  padding: 0.12rem 0.4rem;
+  font-size: clamp(0.7rem, 3.2vw, 0.95rem);
 }
 
 .player-skip-intro {
@@ -4047,6 +5369,14 @@ select.url-input {
   margin: 0;
   color: var(--muted);
   max-width: 40rem;
+  line-height: 1.45;
+}
+
+.show-movie-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.65rem;
 }
 
 .show-play-next-btn {
@@ -4253,7 +5583,7 @@ select.url-input {
 
 @media (max-width: 860px) {
   :root {
-    --sidebar: 100%;
+    --sidebar: 0px;
   }
 
   .app-shell {
@@ -4265,30 +5595,71 @@ select.url-input {
     border-right: 0;
     border-bottom: 1px solid var(--line);
     overflow: visible;
+    padding: 0.65rem 0.7rem 0.55rem;
+    gap: 0.55rem;
   }
-
 
   .sidebar-glow {
     display: none;
   }
 
-  .side-nav {
-    flex-direction: row;
-    flex-wrap: wrap;
-    gap: 0.75rem 1rem;
-    overflow: visible;
+  .brand-tag,
+  .brand-copy .brand-tag {
+    display: none;
   }
 
-  .side-nav-group {
+  .brand-name {
+    font-size: 1.05rem;
+  }
+
+  .brand-logo-wrap,
+  .brand-logo {
+    width: 32px;
+    height: 32px;
+  }
+
+  .player-shell,
+  .player-dock,
+  .global-player-layer {
+    left: 0 !important;
+  }
+
+  .back-to-top {
+    left: auto;
+    right: 0.85rem;
+  }
+
+  .side-nav:not(.is-android-portal) {
     flex-direction: row;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+    gap: 0.4rem;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    padding-bottom: 0.15rem;
+  }
+
+  .side-nav:not(.is-android-portal)::-webkit-scrollbar {
+    display: none;
+  }
+
+  .side-nav:not(.is-android-portal) .side-nav-group {
+    flex-direction: row;
+    flex-wrap: nowrap;
     align-items: center;
     gap: 0.28rem;
+    flex: 0 0 auto;
   }
 
-  .side-nav-label {
-    width: 100%;
-    margin: 0 0 0.1rem 0.2rem;
+  .side-nav:not(.is-android-portal) .side-nav-label {
+    display: none;
+  }
+
+  .nav-link {
+    white-space: nowrap;
+    padding: 0.4rem 0.7rem;
+    font-size: 0.82rem;
   }
 
   .side-footer {
@@ -4296,15 +5667,48 @@ select.url-input {
   }
 
   .side-library {
-    width: 100%;
+    width: auto;
+    flex: 0 0 auto;
   }
 
   .section-tiles {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.65rem;
+  }
+
+  .section-tile {
+    min-height: 7.5rem;
+    padding: 0.85rem 0.75rem;
+  }
+
+  .catalog-grid {
+    grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+    gap: 0.65rem;
   }
 
   .page {
-    padding: 1.25rem;
+    padding: 1rem 0.9rem 2rem;
+  }
+
+  .hero {
+    grid-template-columns: 1fr;
+    gap: 0.85rem;
+    margin-bottom: 1.25rem;
+  }
+
+  .hero-panel {
+    max-width: 100%;
+    max-height: none;
+    width: min(100%, 16rem);
+  }
+
+  .hero-frame strong,
+  .hero h1 {
+    font-size: 1.65rem;
+  }
+
+  .page-header h1 {
+    font-size: 1.55rem;
   }
 
   .back-to-top {
@@ -4312,4 +5716,948 @@ select.url-input {
     bottom: 0.85rem;
     padding: 0.6rem 0.85rem;
   }
+}
+
+/* Phones / Capacitor Android — denser chrome, safe areas */
+@media (max-width: 640px) {
+  .catalog-grid {
+    grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+    gap: 0.55rem;
+  }
+
+  .section-tiles {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .media-card:hover {
+    transform: none;
+  }
+
+  .page {
+    padding: 0.85rem 0.75rem calc(1.5rem + env(safe-area-inset-bottom, 0px));
+  }
+
+  .sidebar {
+    padding-top: max(0.55rem, env(safe-area-inset-top, 0px));
+    padding-left: max(0.65rem, env(safe-area-inset-left, 0px));
+    padding-right: max(0.65rem, env(safe-area-inset-right, 0px));
+  }
+}
+
+/* Desktop: chrome wrapper is transparent so brand / nav / footer keep column layout */
+.sidebar-chrome {
+  display: contents;
+}
+
+html.is-android .app-shell,
+html.is-native .app-shell {
+  height: 100dvh;
+  max-height: 100dvh;
+}
+
+html.is-android .main-stage,
+html.is-native .main-stage {
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+
+html.is-android .sidebar,
+html.is-native .sidebar {
+  flex-shrink: 0;
+}
+
+/* Android: one compact top row; sections live in a small menu */
+html.is-android .sidebar.sidebar-android,
+.sidebar.sidebar-android {
+  position: relative;
+  /* Must not create a containing block — backdrop-filter/isolation trap
+     position:fixed menus inside the thin top bar (only Multiview visible). */
+  overflow: visible;
+  isolation: auto;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 0.4rem;
+  padding: max(0.45rem, env(safe-area-inset-top, 0px)) max(0.55rem, env(safe-area-inset-right, 0px))
+    0.45rem max(0.55rem, env(safe-area-inset-left, 0px));
+  z-index: 200;
+}
+
+html.is-android .sidebar-android .sidebar-chrome,
+.sidebar-android .sidebar-chrome {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex: 1 1 auto;
+  min-width: 0;
+  order: 1;
+}
+
+html.is-android .sidebar-android .sections-menu-wrap,
+.sidebar-android .sections-menu-wrap {
+  flex: 0 0 auto;
+  flex-shrink: 0;
+  z-index: 5;
+}
+
+html.is-android .sidebar-android .sections-menu-btn,
+.sidebar-android .sections-menu-btn {
+  flex-shrink: 0;
+  min-width: 2.6rem;
+}
+
+html.is-android .sidebar-android .brand-wrap,
+.sidebar-android .brand-wrap {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+html.is-android .sidebar-android .brand-btn,
+.sidebar-android .brand-btn {
+  padding: 0.35rem 0.45rem;
+  border-radius: 12px;
+  gap: 0.55rem;
+}
+
+html.is-android .sidebar-android .brand-logo-wrap,
+html.is-android .sidebar-android .brand-logo,
+.sidebar-android .brand-logo-wrap,
+.sidebar-android .brand-logo {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+}
+
+html.is-android .sidebar-android .brand-name,
+.sidebar-android .brand-name {
+  font-size: 0.98rem;
+  line-height: 1.1;
+}
+
+html.is-android .sidebar-android .brand-tag,
+.sidebar-android .brand-tag {
+  display: block;
+  font-size: 0.58rem;
+  letter-spacing: 0.04em;
+  opacity: 0.85;
+}
+
+html.is-android .android-exit-toast {
+  position: fixed;
+  left: 50%;
+  bottom: max(4.5rem, calc(env(safe-area-inset-bottom, 0px) + 3.5rem));
+  transform: translateX(-50%);
+  z-index: 400000;
+  margin: 0;
+  max-width: calc(100vw - 2rem);
+  pointer-events: none;
+}
+
+html.is-android .sidebar-android .side-footer,
+.sidebar-android .side-footer {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+  flex: 0 0 auto;
+  gap: 0;
+  order: 2;
+}
+
+html.is-android .sidebar-android .side-nav,
+.sidebar-android .side-nav {
+  order: 3;
+}
+
+html.is-android .sidebar-android .side-footer > :not(.side-library):not(.catalog-sync-bar),
+.sidebar-android .side-footer > :not(.side-library):not(.catalog-sync-bar) {
+  display: none;
+}
+
+/* Android: same size and corner as Back to top, on the opposite side. */
+html.is-android .catalog-sync-bar.is-android-float,
+.catalog-sync-bar.is-android-float {
+  display: inline-flex;
+  position: fixed;
+  left: max(0.85rem, env(safe-area-inset-left, 0px));
+  right: auto;
+  bottom: max(0.85rem, env(safe-area-inset-bottom, 0px));
+  z-index: 90000;
+  width: max-content;
+  max-width: calc(100vw - 7.5rem);
+  margin: 0;
+  padding: 0.6rem 0.85rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(16, 20, 26, 0.92);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+}
+
+html.is-android .catalog-sync-bar.is-android-float.is-transparent,
+.catalog-sync-bar.is-android-float.is-transparent {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+html.is-android .sidebar-android .side-library,
+.sidebar-android .side-library {
+  width: auto;
+  padding: 0.42rem 0.65rem;
+  border-radius: 10px;
+}
+
+html.is-android .sidebar-android .side-library-hint,
+.sidebar-android .side-library-hint {
+  display: none;
+}
+
+html.is-android .sidebar-android .side-library-label,
+.sidebar-android .side-library-label {
+  font-size: 0.78rem;
+}
+
+.sections-menu-wrap {
+  flex: 0 0 auto;
+  position: relative;
+}
+
+.sections-menu-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0.42rem 0.58rem;
+  border-radius: 10px;
+  border: 1px solid rgba(240, 180, 41, 0.28);
+  background:
+    linear-gradient(135deg, rgba(240, 180, 41, 0.14), rgba(255, 255, 255, 0.03) 60%),
+    rgba(255, 255, 255, 0.03);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  max-width: 7.5rem;
+}
+
+.sections-menu-update-dot {
+  position: absolute;
+  top: 0.28rem;
+  right: 0.28rem;
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 50%;
+  background: #f0b429;
+}
+
+.side-nav button.nav-link {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.android-update-status {
+  margin: 0 0.45rem 0.2rem;
+  color: #f0b429;
+  font-size: 0.75rem;
+  line-height: 1.35;
+}
+
+.sections-menu-btn[aria-expanded='true'] {
+  border-color: rgba(240, 180, 41, 0.5);
+  background:
+    linear-gradient(135deg, rgba(240, 180, 41, 0.22), rgba(255, 255, 255, 0.04) 60%),
+    rgba(255, 255, 255, 0.04);
+}
+
+.sections-menu-icon {
+  display: inline-flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+  width: 14px;
+  flex-shrink: 0;
+}
+
+.sections-menu-icon span {
+  display: block;
+  height: 1.5px;
+  width: 100%;
+  border-radius: 1px;
+  background: var(--accent, #f0b429);
+}
+
+.sections-menu-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+html.is-android .sidebar-android.sections-menu-open::before {
+  display: none;
+}
+
+.sections-menu-portal {
+  position: fixed;
+  inset: 0;
+  z-index: 100000;
+  pointer-events: none;
+}
+
+.sections-menu-backdrop {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: rgba(0, 0, 0, 0.58);
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+html.is-android .side-nav.is-android-portal,
+.side-nav.is-android-portal {
+  position: fixed !important;
+  top: var(--android-menu-top, 3.5rem) !important;
+  left: var(--android-menu-left, 0.45rem) !important;
+  right: auto !important;
+  bottom: auto !important;
+  width: var(--android-menu-width, 16.5rem) !important;
+  max-width: min(16.5rem, calc(100vw - 1rem)) !important;
+  max-height: min(70dvh, 28rem) !important;
+  z-index: 100001 !important;
+  pointer-events: auto;
+  display: flex !important;
+  flex-direction: column !important;
+  flex-wrap: nowrap !important;
+  align-items: stretch !important;
+  gap: 0.55rem !important;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+  -webkit-overflow-scrolling: touch;
+  padding: 0.55rem !important;
+  border-radius: 14px;
+  border: 1px solid rgba(240, 180, 41, 0.22);
+  background:
+    linear-gradient(180deg, rgba(20, 24, 32, 0.98), rgba(10, 12, 16, 0.98));
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.55);
+}
+
+html.is-android .side-nav.is-android-portal .side-nav-group,
+.side-nav.is-android-portal .side-nav-group {
+  display: flex !important;
+  flex-direction: column !important;
+  flex-wrap: nowrap !important;
+  align-items: stretch !important;
+  gap: 0.22rem !important;
+  flex: none !important;
+  width: 100% !important;
+}
+
+html.is-android .side-nav.is-android-portal .side-nav-label,
+.side-nav.is-android-portal .side-nav-label {
+  display: block !important;
+  margin: 0.15rem 0.45rem 0.25rem !important;
+}
+
+html.is-android .side-nav.is-android-portal .nav-link,
+.side-nav.is-android-portal .nav-link {
+  white-space: normal !important;
+  width: 100% !important;
+  padding: 0.55rem 0.75rem !important;
+  font-size: 0.9rem !important;
+}
+
+html.is-android .sidebar-android .side-nav,
+.sidebar-android .side-nav {
+  position: absolute;
+  top: calc(100% + 0.2rem);
+  left: max(0.45rem, env(safe-area-inset-left, 0px));
+  right: max(0.45rem, env(safe-area-inset-right, 0px));
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  flex-wrap: nowrap;
+  gap: 0.65rem;
+  flex: none;
+  max-height: min(70dvh, 26rem);
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 0.55rem;
+  border-radius: 14px;
+  border: 1px solid rgba(240, 180, 41, 0.22);
+  background:
+    linear-gradient(180deg, rgba(20, 24, 32, 0.98), rgba(10, 12, 16, 0.98));
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.55);
+}
+
+html.is-android .sidebar-android .side-nav[hidden],
+.sidebar-android .side-nav[hidden] {
+  display: none !important;
+}
+
+html.is-android .sidebar-android.sections-menu-open .side-nav:not(.is-android-portal) {
+  display: none !important;
+}
+
+html.is-android .sidebar-android .side-nav-group,
+.sidebar-android .side-nav-group {
+  flex-direction: column;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  gap: 0.22rem;
+  flex: none;
+  width: 100%;
+}
+
+html.is-android .sidebar-android .side-nav-label,
+.sidebar-android .side-nav-label {
+  display: block;
+  margin: 0.15rem 0.45rem 0.25rem;
+}
+
+html.is-android .sidebar-android .nav-link,
+.sidebar-android .nav-link {
+  white-space: normal;
+  width: 100%;
+  padding: 0.55rem 0.75rem;
+  font-size: 0.9rem;
+}
+
+/* Android landscape: left rail instead of a wrapping top chrome row. */
+@media (orientation: landscape) {
+  html.is-android .app-shell,
+  html.is-native .app-shell {
+    grid-template-columns: 4.75rem 1fr;
+    grid-template-rows: 1fr;
+  }
+
+  html.is-android .sidebar.sidebar-android,
+  .sidebar.sidebar-android {
+    flex-direction: column;
+    flex-wrap: nowrap;
+    align-items: stretch;
+    justify-content: flex-start;
+    gap: 0.45rem;
+    width: 4.75rem;
+    max-width: 4.75rem;
+    height: 100%;
+    min-height: 0;
+    padding: max(0.4rem, env(safe-area-inset-top, 0px)) 0.35rem
+      max(0.4rem, env(safe-area-inset-bottom, 0px));
+    border-right: 1px solid var(--line);
+    border-bottom: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+
+  html.is-android .sidebar-android .sidebar-chrome,
+  .sidebar-android .sidebar-chrome {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.35rem;
+    flex: 0 0 auto;
+    order: 1;
+  }
+
+  html.is-android .sidebar-android .brand-wrap,
+  .sidebar-android .brand-wrap {
+    flex: 0 0 auto;
+  }
+
+  html.is-android .sidebar-android .brand-btn,
+  .sidebar-android .brand-btn {
+    flex-direction: column;
+    justify-content: center;
+    padding: 0.4rem 0.2rem;
+    gap: 0.25rem;
+  }
+
+  html.is-android .sidebar-android .brand-copy,
+  .sidebar-android .brand-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    min-width: 0;
+  }
+
+  html.is-android .sidebar-android .brand-name,
+  .sidebar-android .brand-name {
+    display: none;
+  }
+
+  html.is-android .sidebar-android .brand-tag,
+  .sidebar-android .brand-tag {
+    display: block;
+    font-size: 0.52rem;
+    line-height: 1.1;
+  }
+
+  html.is-android .sidebar-android .sections-menu-wrap,
+  .sidebar-android .sections-menu-wrap {
+    width: 100%;
+  }
+
+  html.is-android .sidebar-android .sections-menu-btn,
+  .sidebar-android .sections-menu-btn {
+    width: 100%;
+    max-width: none;
+    justify-content: center;
+    padding: 0.45rem 0.3rem;
+  }
+
+  html.is-android .sidebar-android .sections-menu-label,
+  .sidebar-android .sections-menu-label {
+    display: none;
+  }
+
+  html.is-android .sidebar-android .side-footer,
+  .sidebar-android .side-footer {
+    order: 2;
+    margin-top: auto;
+    width: 100%;
+  }
+
+  html.is-android .sidebar-android .side-library,
+  .sidebar-android .side-library {
+    width: 100%;
+    justify-content: center;
+    padding: 0.5rem 0.25rem;
+    text-align: center;
+  }
+
+  html.is-android .sidebar-android .side-library-label,
+  .sidebar-android .side-library-label {
+    font-size: 0.68rem;
+    line-height: 1.15;
+  }
+
+  html.is-android .side-nav.is-android-portal,
+  .side-nav.is-android-portal {
+    top: max(0.4rem, env(safe-area-inset-top, 0px)) !important;
+    left: calc(4.75rem + 0.35rem) !important;
+    width: min(17rem, calc(100vw - 5.5rem)) !important;
+    max-width: min(17rem, calc(100vw - 5.5rem)) !important;
+    max-height: calc(100dvh - 0.8rem) !important;
+  }
+
+  html.is-android .player-dock,
+  html.is-android .global-player-layer {
+    left: 4.75rem !important;
+  }
+
+  /* Immersive full player edge-to-edge; PiP keeps a fixed corner size. */
+  html.is-android .player-shell:not(.player-shell-pip):not(.player-shell-tile) {
+    left: 0 !important;
+  }
+
+  html.is-android .player-shell-pip {
+    left: auto !important;
+    right: max(0.75rem, env(safe-area-inset-right, 0px)) !important;
+    bottom: max(0.75rem, env(safe-area-inset-bottom, 0px)) !important;
+    width: min(16rem, calc(100vw - 6.5rem)) !important;
+  }
+
+  html.is-android .player-bar {
+    padding-top: max(0.5rem, env(safe-area-inset-top, 0px));
+    padding-bottom: 0.45rem;
+  }
+
+  html.is-android .player-bottom-bar {
+    padding-left: max(1rem, env(safe-area-inset-left, 0px));
+    padding-right: max(1rem, env(safe-area-inset-right, 0px));
+    padding-bottom: max(0.45rem, env(safe-area-inset-bottom, 0px));
+  }
+
+  html.is-android .catalog-sync-bar.is-android-float,
+  .catalog-sync-bar.is-android-float {
+    left: calc(4.75rem + max(0.5rem, env(safe-area-inset-left, 0px)));
+  }
+
+  /* Status bar is short in landscape; the portrait inset was pushing this bar off. */
+  html.is-android .web-browser-page.is-embed-player.is-watching .web-chrome {
+    padding-top: max(0.45rem, env(safe-area-inset-top, 0px));
+    padding-bottom: 0.35rem;
+  }
+}
+
+/* Multi-view covers the app chrome. The Close all / Add stream bar stays until Full. */
+html.multiview-open .sidebar {
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
+
+html.multiview-open .multi-view-full {
+  left: 0 !important;
+  right: 0 !important;
+  top: 0 !important;
+  bottom: 0 !important;
+  width: 100vw;
+  height: 100dvh;
+  max-width: 100vw;
+  max-height: 100dvh;
+  z-index: 400;
+  border: 0;
+}
+
+/* Android: compact Total titles hero + denser section tiles */
+html.is-android .hero {
+  grid-template-columns: 1fr auto;
+  gap: 0.55rem;
+  margin-bottom: 0.85rem;
+  align-items: start;
+}
+
+html.is-android .hero .eyebrow {
+  margin-bottom: 0.25rem;
+  font-size: 0.62rem;
+  letter-spacing: 0.12em;
+}
+
+html.is-android .hero h1 {
+  font-size: 1.55rem;
+  line-height: 1;
+}
+
+html.is-android .hero .lede {
+  display: none;
+}
+
+html.is-android .home-search-wrap {
+  margin-top: 0.55rem;
+}
+
+html.is-android .hero-panel {
+  width: 6.75rem;
+  max-width: 6.75rem;
+  max-height: 5.5rem;
+  aspect-ratio: 5 / 4;
+  border-radius: 10px;
+  justify-self: end;
+  align-self: stretch;
+}
+
+html.is-android .hero-frame {
+  padding: 0.45rem 0.5rem 0.5rem;
+  gap: 0.05rem;
+  justify-content: flex-end;
+}
+
+html.is-android .hero-frame span {
+  font-size: 0.58rem;
+  letter-spacing: 0.06em;
+}
+
+html.is-android .hero-frame strong {
+  font-size: 1.15rem;
+  line-height: 1.05;
+}
+
+html.is-android .hero-frame em,
+html.is-android .hero-frame .growth-hit {
+  font-size: 0.62rem;
+  padding: 0;
+  margin: 0;
+}
+
+html.is-android .section-tiles {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.4rem;
+}
+
+html.is-android .section-tile {
+  min-height: 0;
+  padding: 0.55rem 0.5rem 0.5rem;
+  border-radius: 10px;
+}
+
+html.is-android .section-tile h3 {
+  font-size: 0.82rem;
+}
+
+html.is-android .section-tile p {
+  display: none;
+}
+
+html.is-android .media-card.is-sports .media-card-body h3 {
+  -webkit-line-clamp: 5;
+  font-size: 0.82rem;
+  line-height: 1.28;
+}
+
+html.is-android .media-card.is-sports .media-card-match-detail {
+  -webkit-line-clamp: 4;
+  font-size: 0.72rem;
+}
+
+html.is-android .media-card.is-sports .media-card-sport,
+html.is-android .media-card.is-sports .event-meta {
+  font-size: 0.7rem;
+}
+
+html.is-android .section-tile span {
+  font-size: 0.68rem;
+}
+
+/* Android: compact Library → Websites (source rows + chrome) */
+html.is-android .library-websites-panel {
+  margin-top: 0.55rem;
+  padding: 0.7rem 0.65rem;
+  gap: 0.55rem;
+  border-radius: 12px;
+}
+
+html.is-android .library-websites-panel .library-websites-header,
+html.is-android .library-websites .page-header {
+  margin-bottom: 0.45rem;
+  padding-bottom: 0.45rem;
+}
+
+html.is-android .library-websites-panel .library-websites-header h2,
+html.is-android .library-websites .page-header h2 {
+  font-size: 1.05rem;
+  margin: 0;
+}
+
+html.is-android .library-websites-panel .library-websites-header .lede,
+html.is-android .library-websites .page-header .lede {
+  display: none;
+}
+
+html.is-android .library-websites-panel .guide-toolbar,
+html.is-android .library-websites .guide-toolbar {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  gap: 0.4rem;
+  margin-bottom: 0.55rem;
+}
+
+html.is-android .library-websites-panel .guide-search,
+html.is-android .library-websites .guide-search {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: none;
+  min-height: 2.35rem;
+  padding: 0.45rem 0.7rem;
+  font-size: 0.88rem;
+  border-radius: 10px;
+}
+
+html.is-android .library-websites-panel .guide-toolbar-btn,
+html.is-android .library-websites .guide-toolbar-btn {
+  min-height: 2.35rem;
+  padding: 0 0.85rem;
+  border-radius: 10px;
+  font-size: 0.85rem;
+}
+
+html.is-android .library-websites .torrent-sources {
+  margin-bottom: 0.75rem;
+}
+
+html.is-android .library-websites .torrent-sources-head {
+  margin-bottom: 0.15rem;
+}
+
+html.is-android .library-websites .torrent-sources-head h2 {
+  margin: 0;
+  font-size: 0.92rem;
+}
+
+html.is-android .library-websites .torrent-source-list {
+  gap: 0.35rem;
+  margin-top: 0.35rem;
+}
+
+html.is-android .library-websites .torrent-source-list li {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.4rem;
+  padding: 0.5rem 0.6rem;
+  border-radius: 10px;
+}
+
+html.is-android .library-websites .torrent-source-list li strong {
+  font-size: 0.88rem;
+}
+
+html.is-android .library-websites .torrent-source-list li > div:first-child span:not(.torrent-source-badge) {
+  font-size: 0.68rem;
+  max-width: 100%;
+}
+
+html.is-android .library-websites .torrent-source-badge {
+  margin-left: 0.3rem;
+  padding: 0.02rem 0.35rem;
+  font-size: 0.58rem;
+}
+
+html.is-android .library-websites .torrent-source-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.3rem;
+  width: 100%;
+  flex-shrink: 1;
+}
+
+html.is-android .library-websites .torrent-source-actions .ghost-btn,
+html.is-android .library-websites .torrent-source-actions .control-btn,
+html.is-android .library-websites .torrent-source-actions .text-btn {
+  width: 100%;
+  margin: 0;
+  padding: 0.38rem 0.45rem;
+  font-size: 0.72rem;
+  border-radius: 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+html.is-android .library-websites .torrent-source-actions .torrent-source-badge {
+  grid-column: 1 / -1;
+  justify-self: start;
+  margin: 0.1rem 0 0;
+}
+
+html.is-android .page-header {
+  margin-bottom: 0.85rem;
+  padding-bottom: 0.65rem;
+}
+
+html.is-android .library-layout .page-header h1,
+html.is-android .page.library-page .page-header h1,
+html.is-android .page-header h1 {
+  font-size: 1.45rem;
+}
+
+html.is-android .library-layout .page-header .lede,
+html.is-android .page.library-page .page-header .lede {
+  font-size: 0.82rem;
+  margin-top: 0.35rem;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+html.is-android .panel {
+  padding: 0.85rem 0.75rem;
+  gap: 0.65rem;
+}
+
+@media (max-width: 860px) {
+  html.is-android .catalog-grid,
+  html.is-native .catalog-grid {
+    grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
+  }
+
+  html.is-android .nav-link,
+  html.is-native .nav-link {
+    font-size: 0.8rem;
+    padding: 0.38rem 0.62rem;
+  }
+
+  html.is-android .sidebar-android .nav-link,
+  .sidebar-android .nav-link {
+    font-size: 0.9rem;
+    padding: 0.55rem 0.75rem;
+  }
+
+  html.is-android .hero {
+    grid-template-columns: 1fr auto;
+  }
+
+  html.is-android .hero-panel {
+    width: 6.75rem;
+    max-width: 6.75rem;
+    max-height: 5.5rem;
+  }
+
+  html.is-android .hero-frame strong,
+  html.is-android .hero h1 {
+    font-size: 1.15rem;
+  }
+
+  html.is-android .hero h1 {
+    font-size: 1.55rem;
+  }
+
+  html.is-android .section-tiles {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  html.is-android .section-tile {
+    min-height: 0;
+    padding: 0.55rem 0.5rem 0.5rem;
+  }
+}
+
+/* Device Home → system picture-in-picture. Only the stream should remain. */
+html.is-system-pip .sidebar,
+html.is-system-pip .catalog-sync-bar,
+html.is-system-pip .back-to-top,
+html.is-system-pip .welcome-tour,
+html.is-system-pip .player-bar,
+html.is-system-pip .player-hotkeys,
+html.is-system-pip .player-episode-strip,
+html.is-system-pip .player-clock,
+html.is-system-pip .player-epg-strip,
+html.is-system-pip .seek-skip-overlay,
+html.is-system-pip .playback-loading,
+html.is-system-pip .pip-play-overlay,
+html.is-system-pip .web-chrome,
+html.is-system-pip .multiview-pick-bar,
+html.is-system-pip .web-browser-pip-bar,
+html.is-system-pip .web-browser-pip-fs-bar {
+  display: none !important;
+}
+
+html.is-system-pip .player-shell,
+html.is-system-pip .player-shell-pip,
+html.is-system-pip .web-browser-pip,
+html.is-system-pip .web-browser-page.is-embed-player {
+  position: fixed !important;
+  inset: 0 !important;
+  left: 0 !important;
+  top: 0 !important;
+  right: 0 !important;
+  bottom: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  max-width: none !important;
+  margin: 0 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  background: #000 !important;
+  z-index: 100000 !important;
+  pointer-events: none !important;
+}
+
+html.is-system-pip .player-stage,
+html.is-system-pip .player-shell .player-video,
+html.is-system-pip .web-frame {
+  position: absolute !important;
+  inset: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  max-width: none !important;
+  max-height: none !important;
+  object-fit: contain !important;
 }

@@ -71,7 +71,11 @@ export function isM2BoxUrl(pageUrl: string): boolean {
 export function isM2BoxCatalogItem(item: {
   url?: string
   detailUrl?: string
+  m2boxSubjectId?: string
+  torrentSourceId?: string
 }): boolean {
+  if (item.m2boxSubjectId) return true
+  if (item.torrentSourceId && /m2box/i.test(item.torrentSourceId)) return true
   if (item.url && isM2BoxUrl(item.url)) return true
   if (item.detailUrl && isM2BoxUrl(item.detailUrl)) return true
   return false
@@ -276,6 +280,32 @@ async function getM2BoxPlayJson(
     } catch {
       return { ok: false, data: null, error: 'Invalid M2Box play JSON' }
     }
+  }
+
+  try {
+    const { Capacitor } = await import('@capacitor/core')
+    if (Capacitor.isNativePlatform()) {
+      const { nativeFetchJson } = await import('./nativeHttp')
+      const result = await nativeFetchJson<{ code?: number; message?: string; data?: M2BoxPlayData }>(
+        apiUrl,
+        {
+          referer,
+          headers: {
+            Accept: 'application/json',
+            Origin: 'https://m2box.org',
+          },
+        },
+      )
+      if (!result.ok || !result.data) {
+        return { ok: false, data: null, error: result.error || 'M2Box play request failed' }
+      }
+      if (result.data.code !== 0 && result.data.code !== undefined) {
+        return { ok: false, data: null, error: result.data.message || 'M2Box play API error' }
+      }
+      return { ok: true, data: result.data.data ?? null, error: '' }
+    }
+  } catch {
+    /* fall through */
   }
 
   try {
@@ -651,29 +681,17 @@ async function postM2BoxFilter(
     }
   }
 
-  try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-        Origin: 'https://m2box.org',
-        Referer: referer,
-      },
-      body: JSON.stringify(body),
-    })
-    const text = await res.text()
-    if (!res.ok) {
-      return { ok: false, data: null, error: `M2Box API HTTP ${res.status}` }
-    }
-    return { ok: true, data: JSON.parse(text) as M2BoxFilterResponse, error: '' }
-  } catch (err) {
-    return {
-      ok: false,
-      data: null,
-      error: err instanceof Error ? err.message : 'M2Box API request failed',
-    }
+  const { nativeFetchJsonPost } = await import('./nativeHttp')
+  const result = await nativeFetchJsonPost<M2BoxFilterResponse>(url, body, {
+    referer,
+    headers: {
+      Origin: 'https://m2box.org',
+    },
+  })
+  if (!result.ok || !result.data) {
+    return { ok: false, data: null, error: result.error || 'M2Box API unavailable' }
   }
+  return { ok: true, data: result.data, error: '' }
 }
 
 function sleep(ms: number): Promise<void> {

@@ -11,12 +11,25 @@ node_modules
 dist
 dist-ssr
 release
+*.wgt
+
+# Copied web build inside the Tizen project. Sources in tizen/ stay tracked.
+tizen/*
+!tizen/config.xml
+!tizen/.project
+!tizen/.tproject
+!tizen/tizen.js
+!tizen/icon.png
 *.local
 
 # Secrets — never commit
 .env
 .env.*
 !.env.example
+
+# Local scratch / probe dumps
+.tmp-*
+.tmp*/
 
 # Editor directories and files
 .vscode/*
@@ -28,3 +41,10 @@ release
 *.njsproj
 *.sln
 *.sw?
+
+# Local runtime / catalogs dumps
+userData/
+reports/
+*.csv
+release-pack/
+

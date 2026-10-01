@@ -11,6 +11,7 @@ import {
 import { BUILTIN_CATALOG } from '../data/catalog'
 import { DEFAULT_PLAYLISTS } from '../data/defaultPlaylists'
 import { normalizeIptvPlaylistUrl } from '../lib/iptv'
+import { fetchRemotePlaylistContent } from '../lib/playlistFetch'
 import {
   getEnglishOnlyPref,
   isLikelyEnglish,
@@ -37,21 +38,49 @@ import {
   filterShelfVisibleItems,
   isEztvSource,
   isM2BoxUrl,
-  isNetMirrorUrl,
+  isCinetaroUrl,
   isSeriesWebCatalogItem,
   isSubsPleaseUrl,
+  isZenoxUrl,
   isYtsSource,
   loadTorrentSources,
   TORRENT_SOURCES_CHANGED,
 } from '../lib/torrents'
 import {
+  isTmdbAnimeFullFeedUrl,
+  isTmdbKidsShowsFeedUrl,
+  isTmdbTvFeedUrl,
+  TMDB_ANIME_SOURCE_ID,
+  TMDB_KIDS_SOURCE_ID,
+  TMDB_TV_SOURCE_ID,
+} from '../lib/tmdbTv'
+import { ZENOX_SOURCE_ID } from '../lib/zenox'
+import {
   TORRENT_SCRAPER_VERSION,
   syncAllTorrentSources,
   syncTorrentSource,
+  type TorrentSyncProgress,
 } from '../lib/torrentSync'
-import { getTorrentSyncControlState } from '../lib/torrentSyncControl'
+import {
+  enqueueTorrentSyncTask,
+  getTorrentSyncControlState,
+} from '../lib/torrentSyncControl'
+import {
+  bindBackgroundSyncResume,
+  clearSyncJob,
+  onCatalogSyncResumeRequested,
+  pendingSyncSourceIds,
+} from '../lib/backgroundSync'
 import { clearTorrentSyncStatus, setTorrentSyncMessage } from '../lib/torrentSyncStatus'
 import { isKidsModeEnabled, subscribeKidsMode } from '../lib/kidsMode'
+import {
+  fetchStreamedLiveMatches,
+  fetchStreamedSports,
+  mergeStreamedLiveCatalog,
+  type StreamedSport,
+} from '../lib/streamed'
+import { fetchPpvStLiveCatalog } from '../lib/ppvSt'
+import { fetchLivextvReplayCatalog, isLivextvReplayCatalogItem } from '../lib/livextvReplays'
 
 function setSyncProgressMessage(message: string, percent: number | null): void {
   // Keep the frozen "Paused · …" line — don't advance counts while parked.
@@ -92,31 +121,24 @@ interface CatalogContextValue {
   /** Crawl a torrent website into Movies / Series / Anime */
   syncTorrentWebsite: (sourceId: string) => Promise<{ added: number; error?: string }>
   syncAllTorrentWebsites: () => Promise<{ added: number; sources: number }>
+  /** Streamed.pk sport list from /api/sports (for Sports shelf filters) */
+  streamedSports: StreamedSport[]
 }
 
 const CatalogContext = createContext<CatalogContextValue | null>(null)
 
 async function fetchPlaylistContent(url: string): Promise<string> {
-  const trimmed = normalizeIptvPlaylistUrl(url.trim())
-  if (!/^https?:\/\//i.test(trimmed)) {
-    throw new Error('Playlist URL must start with http:// or https://')
-  }
-
-  if (window.signalDesktop?.fetchPlaylist) {
-    const result = await window.signalDesktop.fetchPlaylist(trimmed)
-    if (!result.ok) throw new Error(result.error || `Fetch failed (${result.status})`)
-    return preparePlaylistContent(trimmed, result.content)
-  }
-
-  const response = await fetch(trimmed, { redirect: 'follow' })
-  if (!response.ok) throw new Error(`Fetch failed (${response.status})`)
-  return preparePlaylistContent(trimmed, await response.text())
+  return fetchRemotePlaylistContent(url)
 }
 
 export function CatalogProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false)
   const [sources, setSources] = useState<PlaylistSource[]>([])
   const [torrentItems, setTorrentItems] = useState<StreamItem[]>([])
+  const [streamedItems, setStreamedItems] = useState<StreamItem[]>([])
+  const [ppvStItems, setPpvStItems] = useState<StreamItem[]>([])
+  const [livextvReplayItems, setLivextvReplayItems] = useState<StreamItem[]>([])
+  const [streamedSports, setStreamedSports] = useState<StreamedSport[]>([])
   const [englishOnly, setEnglishOnlyState] = useState(() => getEnglishOnlyPref())
   const [hideDuplicates, setHideDuplicatesState] = useState(() => getHideDuplicatesPref())
   const [kidsMode, setKidsMode] = useState(isKidsModeEnabled)
@@ -158,6 +180,25 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
+  /** Progress bar + first-time sync: paint shelves as batches land in IndexedDB. */
+  const applySyncProgress = useCallback((p: TorrentSyncProgress) => {
+    setSyncProgressMessage(maskActivityMessage(p.message), p.percent ?? null)
+    if (!p.flush) return
+    const batch = p.items
+    if (batch && batch.length > 0) {
+      startTransition(() => {
+        setTorrentItems((prev) => {
+          if (prev.length === 0) return batch
+          const byId = new Map(prev.map((item) => [item.id, item]))
+          for (const item of batch) byId.set(item.id, item)
+          return [...byId.values()]
+        })
+      })
+      return
+    }
+    void reloadTorrentCatalog()
+  }, [reloadTorrentCatalog])
+
   useEffect(() => {
     let cancelled = false
     ;(async () => {
@@ -192,7 +233,21 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
           )
           if (already) continue
           try {
-            const content = await fetchPlaylistContent(seed.url)
+            let content = ''
+            let lastErr: unknown
+            for (let attempt = 0; attempt < 2; attempt += 1) {
+              try {
+                content = await fetchPlaylistContent(seed.url)
+                lastErr = null
+                break
+              } catch (err) {
+                lastErr = err
+                if (attempt === 0) {
+                  await new Promise((r) => setTimeout(r, 1500))
+                }
+              }
+            }
+            if (lastErr) throw lastErr
             const itemCount = countM3UEntries(content)
             if (itemCount === 0) continue
             await putPlaylistSource({
@@ -258,23 +313,37 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
       sourceKind: item.sourceKind ?? ('builtin' as const),
       transport: item.transport ?? ('direct' as const),
     }))
-    const merged = [...builtins, ...torrentItems, ...imported]
+    const merged = [...builtins, ...streamedItems, ...ppvStItems, ...livextvReplayItems, ...torrentItems, ...imported]
     const deduped = hideDuplicates ? dedupeStreams(merged) : merged
     if (!kidsMode) return deduped
     return deduped.filter((item) => item.category === 'kids')
-  }, [imported, torrentItems, hideDuplicates, kidsMode])
+  }, [imported, torrentItems, streamedItems, ppvStItems, livextvReplayItems, hideDuplicates, kidsMode])
+
+  // Precompute TV Series shelf once — switching Movies → Series was re-filtering
+  // and re-sorting ~20k YMovies rows on every visit.
+  const seriesShelfItems = useMemo(() => {
+    void torrentSourceRevision
+    let base = items.filter((item) => item.category === 'series')
+    base = filterShelfVisibleItems(base)
+    return base.filter(isSeriesWebCatalogItem)
+  }, [items, torrentSourceRevision])
 
   const byCategory = useCallback(
     (id: CategoryId) => {
       void torrentSourceRevision
+      if (id === 'series') {
+        if (!englishOnly || !shouldApplyEnglishFilter(id)) return seriesShelfItems
+        return seriesShelfItems.filter(isLikelyEnglish)
+      }
       let base = items.filter((item) => item.category === id)
       base = filterShelfVisibleItems(base)
-      // TV Series shelf: M2Box + NetMirror web catalogs (no IPTV / EZTV / torrents).
-      if (id === 'series') base = base.filter(isSeriesWebCatalogItem)
       if (!englishOnly || !shouldApplyEnglishFilter(id)) return base
-      return base.filter(isLikelyEnglish)
+      // Match titles / leagues aren't "English streams" — don't hide LiveXTV Replay.
+      return base.filter(
+        (item) => isLivextvReplayCatalogItem(item) || isLikelyEnglish(item),
+      )
     },
-    [items, englishOnly, torrentSourceRevision],
+    [items, englishOnly, torrentSourceRevision, seriesShelfItems],
   )
 
   const getById = useCallback(
@@ -392,96 +461,107 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
 
   const syncTorrentWebsite = useCallback(
     async (sourceId: string) => {
-      const source = loadTorrentSources().find((s) => s.id === sourceId)
-      if (!source) return { added: 0, error: 'Website not found' }
-      setTorrentSyncMessage('Starting catalog update…', 1)
-      try {
-        const result = await syncTorrentSource(source, (p) => {
-          setSyncProgressMessage(maskActivityMessage(p.message), p.percent ?? null)
-        })
-        if (result.cancelled) {
-          setTorrentSyncMessage('Catalog sync cancelled', null)
-          appendActivity('sync', 'Catalog sync cancelled')
-          window.setTimeout(() => clearTorrentSyncStatus(), 2500)
+      const queued = await enqueueTorrentSyncTask(async () => {
+        const source = loadTorrentSources().find((s) => s.id === sourceId)
+        if (!source) return { added: 0, error: 'Website not found' }
+        setTorrentSyncMessage('Starting catalog update…', 1)
+        try {
+          const result = await syncTorrentSource(source, applySyncProgress)
+          if (result.superseded) {
+            return { added: 0 }
+          }
+          if (result.cancelled) {
+            setTorrentSyncMessage('Catalog sync cancelled', null)
+            appendActivity('sync', 'Catalog sync cancelled')
+            window.setTimeout(() => clearTorrentSyncStatus(), 2500)
+            if (isEztvSource(source.url, source.label)) {
+              void window.signalDesktop?.closeCfBrowser?.({
+                soon: true,
+                reason: 'eztv-sync-cancelled',
+              })
+            }
+            return { added: 0, error: 'Catalog sync cancelled' }
+          }
+          // Only reload shelves once at the end — mid-sync reloads froze TV Series.
+          if (result.added > 0 || result.error) {
+            await reloadTorrentCatalog()
+          }
+          const summary = result.error
+            ? maskActivityMessage(result.error)
+            : `Added ${result.added.toLocaleString()} titles to the catalog`
+          setTorrentSyncMessage(summary, result.error ? null : 100)
+          appendActivity(result.error ? 'error' : 'sync', summary)
+          window.setTimeout(() => clearTorrentSyncStatus(), result.error ? 6000 : 2500)
           if (isEztvSource(source.url, source.label)) {
             void window.signalDesktop?.closeCfBrowser?.({
               soon: true,
-              reason: 'eztv-sync-cancelled',
+              reason: 'eztv-sync-done',
             })
           }
-          return { added: 0, error: 'Catalog sync cancelled' }
+          return { added: result.added, error: result.error }
+        } catch (err) {
+          const message = maskActivityMessage(
+            err instanceof Error ? err.message : 'Catalog update failed',
+          )
+          setTorrentSyncMessage(message, null)
+          appendActivity('error', message)
+          window.setTimeout(() => clearTorrentSyncStatus(), 6000)
+          if (isEztvSource(source.url, source.label)) {
+            void window.signalDesktop?.closeCfBrowser?.({
+              soon: true,
+              reason: 'eztv-sync-error',
+            })
+          }
+          return { added: 0, error: message }
         }
-        // Only reload shelves once at the end — mid-sync reloads froze TV Series.
-        if (result.added > 0 || result.error) {
-          await reloadTorrentCatalog()
-        }
-        const summary = result.error
-          ? maskActivityMessage(result.error)
-          : `Added ${result.added.toLocaleString()} titles to the catalog`
-        setTorrentSyncMessage(summary, result.error ? null : 100)
-        appendActivity(result.error ? 'error' : 'sync', summary)
-        window.setTimeout(() => clearTorrentSyncStatus(), result.error ? 6000 : 2500)
-        if (isEztvSource(source.url, source.label)) {
-          void window.signalDesktop?.closeCfBrowser?.({
-            soon: true,
-            reason: 'eztv-sync-done',
-          })
-        }
-        return { added: result.added, error: result.error }
-      } catch (err) {
-        const message = maskActivityMessage(
-          err instanceof Error ? err.message : 'Catalog update failed',
-        )
-        setTorrentSyncMessage(message, null)
-        appendActivity('error', message)
-        window.setTimeout(() => clearTorrentSyncStatus(), 6000)
-        if (isEztvSource(source.url, source.label)) {
-          void window.signalDesktop?.closeCfBrowser?.({
-            soon: true,
-            reason: 'eztv-sync-error',
-          })
-        }
-        return { added: 0, error: message }
-      }
+      })
+      return queued ?? { added: 0 }
     },
-    [reloadTorrentCatalog],
+    [applySyncProgress, reloadTorrentCatalog],
   )
 
   const syncAllTorrentWebsites = useCallback(async () => {
-    const list = loadTorrentSources()
-    if (list.length === 0) return { added: 0, sources: 0 }
-    setTorrentSyncMessage('Starting catalog update…', 1)
-    const results = await syncAllTorrentSources(list, (p) => {
-      setSyncProgressMessage(maskActivityMessage(p.message), p.percent ?? null)
-    })
-    if (results.some((r) => r.cancelled)) {
+    const queued = await enqueueTorrentSyncTask(async () => {
+      const list = loadTorrentSources().filter((source) => !source.hiddenFromShelves)
+      if (list.length === 0) return { added: 0, sources: 0 }
+      setTorrentSyncMessage('Starting catalog update…', 1)
+      const results = await syncAllTorrentSources(list, applySyncProgress)
+      const userCancelled = results.some((r) => r.cancelled && !r.superseded)
+      const supersededOnly =
+        !userCancelled && results.some((r) => r.cancelled && r.superseded)
+      if (supersededOnly) {
+        return { added: 0, sources: list.length }
+      }
+      if (userCancelled) {
+        const added = results.reduce((sum, r) => sum + r.added, 0)
+        if (added > 0) await reloadTorrentCatalog()
+        setTorrentSyncMessage('Catalog sync cancelled', null)
+        appendActivity('sync', 'Catalog sync cancelled')
+        window.setTimeout(() => clearTorrentSyncStatus(), 2500)
+        if (list.some((source) => isEztvSource(source.url, source.label))) {
+          void window.signalDesktop?.closeCfBrowser?.({
+            soon: true,
+            reason: 'eztv-sync-all-cancelled',
+          })
+        }
+        return { added, sources: list.length }
+      }
       const added = results.reduce((sum, r) => sum + r.added, 0)
       if (added > 0) await reloadTorrentCatalog()
-      setTorrentSyncMessage('Catalog sync cancelled', null)
-      appendActivity('sync', 'Catalog sync cancelled')
+      const summary = `Synced ${added.toLocaleString()} titles to the catalog`
+      setTorrentSyncMessage(summary, 100)
+      appendActivity('sync', summary)
       window.setTimeout(() => clearTorrentSyncStatus(), 2500)
       if (list.some((source) => isEztvSource(source.url, source.label))) {
         void window.signalDesktop?.closeCfBrowser?.({
           soon: true,
-          reason: 'eztv-sync-all-cancelled',
+          reason: 'eztv-sync-all-done',
         })
       }
       return { added, sources: list.length }
-    }
-    const added = results.reduce((sum, r) => sum + r.added, 0)
-    if (added > 0) await reloadTorrentCatalog()
-    const summary = `Synced ${added.toLocaleString()} titles to the catalog`
-    setTorrentSyncMessage(summary, 100)
-    appendActivity('sync', summary)
-    window.setTimeout(() => clearTorrentSyncStatus(), 2500)
-    if (list.some((source) => isEztvSource(source.url, source.label))) {
-      void window.signalDesktop?.closeCfBrowser?.({
-        soon: true,
-        reason: 'eztv-sync-all-done',
-      })
-    }
-    return { added, sources: list.length }
-  }, [reloadTorrentCatalog])
+    })
+    return queued ?? { added: 0, sources: 0 }
+  }, [applySyncProgress, reloadTorrentCatalog])
 
   // Background sync once when ready if websites exist but the catalog is
   // empty, or if it was built by an older scraper (bad titles/posters).
@@ -489,40 +569,159 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
   // (e.g. YTS added while Cloudflare blocked HTML, after other sites synced).
   useEffect(() => {
     if (!ready) return
-    const websites = loadTorrentSources()
-    if (websites.length === 0) return
-    const meta = loadTorrentCatalogMeta()
-    const versionStale = meta.scraperVersion !== TORRENT_SCRAPER_VERSION
-    if (torrentItems.length === 0) {
-      void syncAllTorrentWebsites()
-      return
-    }
-    if (versionStale) {
-      // Scraper v38 — NetMirror full TV Series (146 pages); skip EZTV/YTS/etc.
-      const seriesWeb = websites.filter(
-        (source) => isM2BoxUrl(source.url) || isNetMirrorUrl(source.url),
-      )
-      if (seriesWeb.length > 0) {
-        void (async () => {
-          for (const source of seriesWeb) {
-            await syncTorrentWebsite(source.id)
-          }
-        })()
+    let alive = true
+    void (async () => {
+      // Let React Strict Mode's immediate cleanup win so we don't start two
+      // overlapping sync sessions that cancel each other.
+      await Promise.resolve()
+      if (!alive) return
+
+      const websites = loadTorrentSources()
+      if (websites.length === 0) return
+      if (pendingSyncSourceIds().length > 0) return
+      const meta = loadTorrentCatalogMeta()
+      const versionStale = meta.scraperVersion !== TORRENT_SCRAPER_VERSION
+      if (torrentItems.length === 0) {
+        void syncAllTorrentWebsites()
         return
       }
-      void syncAllTorrentWebsites()
-      return
-    }
-    const unsynced = websites.filter((source) => (meta.bySource[source.id]?.count ?? 0) === 0)
-    if (unsynced.length === 0) return
-    void (async () => {
-      for (const source of unsynced) {
-        await syncTorrentWebsite(source.id)
+      if (versionStale) {
+        // Scraper bumps re-sync web catalogs + TMDB anime (Ended / complete filter).
+        const seriesWeb = websites.filter(
+          (source) =>
+            isM2BoxUrl(source.url) ||
+            // YMovies skipped: ~20k titles already, and CF Verify is disruptive.
+            isCinetaroUrl(source.url) ||
+            source.id === TMDB_TV_SOURCE_ID ||
+            isTmdbTvFeedUrl(source.url) ||
+            source.id === TMDB_ANIME_SOURCE_ID ||
+            isTmdbAnimeFullFeedUrl(source.url) ||
+            source.id === TMDB_KIDS_SOURCE_ID ||
+            isTmdbKidsShowsFeedUrl(source.url) ||
+            source.id === ZENOX_SOURCE_ID ||
+            isZenoxUrl(source.url),
+        )
+        if (seriesWeb.length > 0) {
+          // One shared session for the whole batch (same as sync-all).
+          void enqueueTorrentSyncTask(async () => {
+            if (!alive) return
+            setTorrentSyncMessage('Starting catalog update…', 1)
+            const results = await syncAllTorrentSources(seriesWeb, applySyncProgress)
+            const userCancelled = results.some((r) => r.cancelled && !r.superseded)
+            if (userCancelled) {
+              const added = results.reduce((sum, r) => sum + r.added, 0)
+              if (added > 0) await reloadTorrentCatalog()
+              setTorrentSyncMessage('Catalog sync cancelled', null)
+              appendActivity('sync', 'Catalog sync cancelled')
+              window.setTimeout(() => clearTorrentSyncStatus(), 2500)
+              return
+            }
+            if (results.some((r) => r.superseded)) return
+            const added = results.reduce((sum, r) => sum + r.added, 0)
+            if (added > 0) await reloadTorrentCatalog()
+            const summary = `Synced ${added.toLocaleString()} titles to the catalog`
+            setTorrentSyncMessage(summary, 100)
+            appendActivity('sync', summary)
+            window.setTimeout(() => clearTorrentSyncStatus(), 2500)
+          })
+          return
+        }
+        void syncAllTorrentWebsites()
+        return
       }
+      const unsynced = websites.filter(
+        (source) =>
+          !source.hiddenFromShelves && (meta.bySource[source.id]?.count ?? 0) === 0,
+      )
+      // Series shelves truncated on older Android builds (Popular hardCap ~400).
+      // Re-pull when TMDB TV / Cinetaro look severely underfilled vs desktop.
+      const SERIES_MIN_COUNT: Record<string, number> = {
+        [TMDB_TV_SOURCE_ID]: 1500,
+        'builtin-cinetaro': 1500,
+      }
+      const underfilled = websites.filter((source) => {
+        if (source.hiddenFromShelves) return false
+        const min = SERIES_MIN_COUNT[source.id]
+        if (!min) return false
+        return (meta.bySource[source.id]?.count ?? 0) < min
+      })
+      const needSync = [...unsynced, ...underfilled].filter(
+        (source, index, all) => all.findIndex((s) => s.id === source.id) === index,
+      )
+      if (needSync.length === 0) return
+      void enqueueTorrentSyncTask(async () => {
+        if (!alive) return
+        setTorrentSyncMessage('Starting catalog update…', 1)
+        const results = await syncAllTorrentSources(needSync, applySyncProgress)
+        const userCancelled = results.some((r) => r.cancelled && !r.superseded)
+        if (userCancelled) {
+          const added = results.reduce((sum, r) => sum + r.added, 0)
+          if (added > 0) await reloadTorrentCatalog()
+          setTorrentSyncMessage('Catalog sync cancelled', null)
+          appendActivity('sync', 'Catalog sync cancelled')
+          window.setTimeout(() => clearTorrentSyncStatus(), 2500)
+          return
+        }
+        if (results.some((r) => r.superseded)) return
+        const added = results.reduce((sum, r) => sum + r.added, 0)
+        if (added > 0) await reloadTorrentCatalog()
+        const summary = `Synced ${added.toLocaleString()} titles to the catalog`
+        setTorrentSyncMessage(summary, 100)
+        appendActivity('sync', summary)
+        window.setTimeout(() => clearTorrentSyncStatus(), 2500)
+      })
     })()
+    return () => {
+      alive = false
+    }
     // Intentionally run once after initial load
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready])
+
+  // Finish a sync that was still going when Jiyu was closed or the process was killed.
+  useEffect(() => {
+    if (!ready) return
+    bindBackgroundSyncResume()
+    const resume = () => {
+      if (getTorrentSyncControlState().active) return
+      const ids = pendingSyncSourceIds()
+      if (ids.length === 0) return
+      const websites = loadTorrentSources()
+      const list = ids
+        .map((id) => websites.find((source) => source.id === id))
+        .filter((source): source is NonNullable<typeof source> => Boolean(source))
+      if (list.length === 0) {
+        clearSyncJob()
+        return
+      }
+      void enqueueTorrentSyncTask(async () => {
+        const stillPending = pendingSyncSourceIds()
+        const fresh = list.filter((source) => stillPending.includes(source.id))
+        if (fresh.length === 0 || getTorrentSyncControlState().active) return
+        setTorrentSyncMessage('Starting catalog update…', 1)
+        const results = await syncAllTorrentSources(fresh, applySyncProgress)
+        const userCancelled = results.some((r) => r.cancelled && !r.superseded)
+        if (userCancelled) {
+          const added = results.reduce((sum, r) => sum + r.added, 0)
+          if (added > 0) await reloadTorrentCatalog()
+          setTorrentSyncMessage('Catalog sync cancelled', null)
+          appendActivity('sync', 'Catalog sync cancelled')
+          window.setTimeout(() => clearTorrentSyncStatus(), 2500)
+          return
+        }
+        if (results.some((r) => r.superseded)) return
+        const added = results.reduce((sum, r) => sum + r.added, 0)
+        if (added > 0) await reloadTorrentCatalog()
+        const summary = `Synced ${added.toLocaleString()} titles to the catalog`
+        setTorrentSyncMessage(summary, 100)
+        appendActivity('sync', summary)
+        window.setTimeout(() => clearTorrentSyncStatus(), 2500)
+      })
+    }
+    const stop = onCatalogSyncResumeRequested(resume)
+    resume()
+    return stop
+  }, [ready, reloadTorrentCatalog])
 
   // SubsPlease publishes new anime throughout the day. Refresh its all-shows
   // catalog at startup when stale, then every six hours while Jiyu is open.
@@ -563,6 +762,147 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
     }
   }, [ready, syncTorrentWebsite])
 
+  // TMDB Series + Anime + Kids Shows — daily only (skip if synced within 24h).
+  useEffect(() => {
+    if (!ready) return
+    const DAY_MS = 24 * 60 * 60 * 1000
+    const isTmdbSource = (entry: { id: string; url: string }) =>
+      entry.id === TMDB_TV_SOURCE_ID ||
+      entry.id === TMDB_ANIME_SOURCE_ID ||
+      entry.id === TMDB_KIDS_SOURCE_ID ||
+      entry.id === ZENOX_SOURCE_ID ||
+      isTmdbTvFeedUrl(entry.url) ||
+      isZenoxUrl(entry.url)
+
+    const refreshTmdb = (opts?: { forceKidsIfEmpty?: boolean }) => {
+      const sources = loadTorrentSources().filter(isTmdbSource)
+      if (sources.length === 0) return
+      const meta = loadTorrentCatalogMeta()
+      const kidsShelfEmpty =
+        opts?.forceKidsIfEmpty &&
+        !torrentItems.some(
+          (item) =>
+            item.category === 'kids' &&
+            (item.torrentSourceId === TMDB_KIDS_SOURCE_ID ||
+              item.tags?.some((t) => t.toLowerCase() === 'kids-shows')),
+        )
+      void (async () => {
+        for (const source of sources) {
+          const isKids =
+            source.id === TMDB_KIDS_SOURCE_ID || isTmdbKidsShowsFeedUrl(source.url)
+          const syncedAt = meta.bySource[source.id]?.syncedAt ?? 0
+          if (isKids && kidsShelfEmpty) {
+            await syncTorrentWebsite(source.id)
+            continue
+          }
+          if (Date.now() - syncedAt < DAY_MS) continue
+          await syncTorrentWebsite(source.id)
+        }
+      })()
+    }
+    // Kids Shows empty → sync soon; other TMDB feeds wait so startup isn’t a pile-up.
+    const kidsStartup = window.setTimeout(() => refreshTmdb({ forceKidsIfEmpty: true }), 8_000)
+    const startup = window.setTimeout(() => refreshTmdb(), 150_000)
+    const timer = window.setInterval(() => refreshTmdb(), DAY_MS)
+    return () => {
+      window.clearTimeout(kidsStartup)
+      window.clearTimeout(startup)
+      window.clearInterval(timer)
+    }
+    // torrentItems only used for the one-shot empty Kids check at schedule time.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, syncTorrentWebsite])
+
+  // Streamed.pk + PPV.st — live sports catalogs; refresh as games start/end.
+  useEffect(() => {
+    if (!ready || kidsMode) return
+    let cancelled = false
+    let failStreak = 0
+    let retryTimer: number | undefined
+    const refresh = async () => {
+      const [sportsResult, liveResult, popularResult, ppvResult] = await Promise.all([
+        fetchStreamedSports(),
+        fetchStreamedLiveMatches(false),
+        fetchStreamedLiveMatches(true),
+        fetchPpvStLiveCatalog(),
+      ])
+      if (cancelled) return
+      const streamedOk = liveResult.ok || popularResult.ok
+      const ppvOk = ppvResult.ok
+      if (!streamedOk) {
+        console.warn(
+          'Streamed live matches unavailable:',
+          liveResult.ok ? popularResult.error : liveResult.error,
+        )
+      }
+      if (!ppvOk) {
+        console.warn('PPV.st streams unavailable:', ppvResult.error)
+      }
+      const live = liveResult.ok ? liveResult.matches : []
+      const popular = popularResult.ok ? popularResult.matches : []
+      startTransition(() => {
+        if (sportsResult.ok) setStreamedSports(sportsResult.sports)
+        if (streamedOk) setStreamedItems(mergeStreamedLiveCatalog(live, popular))
+        if (ppvOk) setPpvStItems(ppvResult.items)
+      })
+      // Startup / brief outages: retry soon instead of waiting for the 90s poll.
+      if (!streamedOk || !ppvOk) {
+        failStreak += 1
+        const delay = Math.min(30_000, 2_000 * failStreak)
+        window.clearTimeout(retryTimer)
+        retryTimer = window.setTimeout(() => {
+          void refresh()
+        }, delay)
+      } else {
+        failStreak = 0
+      }
+    }
+    void refresh()
+    const timer = window.setInterval(() => {
+      void refresh()
+    }, 90_000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+      window.clearTimeout(retryTimer)
+    }
+  }, [ready, kidsMode])
+
+  // LiveXTV full-match replays — heavier payload; refresh less often than live.
+  useEffect(() => {
+    if (!ready || kidsMode) return
+    let cancelled = false
+    let failStreak = 0
+    let retryTimer: number | undefined
+    const refresh = async () => {
+      const result = await fetchLivextvReplayCatalog()
+      if (cancelled) return
+      if (!result.ok) {
+        console.warn('LiveXTV replays unavailable:', result.error)
+        failStreak += 1
+        const delay = Math.min(45_000, 3_000 * failStreak)
+        window.clearTimeout(retryTimer)
+        retryTimer = window.setTimeout(() => {
+          void refresh()
+        }, delay)
+        return
+      }
+      failStreak = 0
+      startTransition(() => {
+        setLivextvReplayItems(result.items)
+      })
+    }
+    void refresh()
+    const timer = window.setInterval(() => {
+      void refresh()
+    }, 15 * 60_000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+      window.clearTimeout(retryTimer)
+    }
+  }, [ready, kidsMode])
+
   const value = useMemo(
     () => ({
       ready,
@@ -585,6 +925,7 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
       reloadTorrentCatalog,
       syncTorrentWebsite,
       syncAllTorrentWebsites,
+      streamedSports,
     }),
     [
       ready,
@@ -607,6 +948,7 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
       reloadTorrentCatalog,
       syncTorrentWebsite,
       syncAllTorrentWebsites,
+      streamedSports,
     ],
   )
 

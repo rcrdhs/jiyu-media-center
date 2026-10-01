@@ -9,6 +9,10 @@ import { Sidebar } from './components/Sidebar'
 import { KidsModeGate } from './components/KidsModeGate'
 import { GlobalPlayer } from './components/GlobalPlayer'
 import { WebBrowserPip } from './components/WebBrowserPip'
+import { NavigationPiPBridge } from './components/NavigationPiPBridge'
+import { MinimizeToPipBridge } from './components/MinimizeToPipBridge'
+import { AndroidBackBridge } from './components/AndroidBackBridge'
+import { SystemPipBridge } from './components/SystemPipBridge'
 import { BackToTop } from './components/BackToTop'
 import { HomePage } from './pages/HomePage'
 import { SectionPage } from './pages/SectionPage'
@@ -20,6 +24,8 @@ import { WebBrowserPage } from './pages/WebBrowserPage'
 import { MultiviewPage } from './pages/MultiviewPage'
 import { FORCE_SAVE_CONTINUE_EVENT } from './lib/continueWatching'
 import { ensurePerformanceProfile } from './lib/deviceProfile'
+import { FavoriteMatchAlerts } from './components/FavoriteMatchAlerts'
+import { WelcomeTour } from './components/WelcomeTour'
 
 function SectionRoute() {
   const { id } = useParams()
@@ -58,6 +64,10 @@ export default function App() {
           <PlaybackProvider>
             <HashRouter>
               <WebBrowserProvider>
+                <NavigationPiPBridge />
+                <MinimizeToPipBridge />
+                <AndroidBackBridge />
+                <SystemPipBridge />
                 <div className="app-shell">
                   <Sidebar />
                   <main className="main-stage">
@@ -82,6 +92,8 @@ export default function App() {
                   <WebBrowserPip />
                   <DesktopContinueSaveBridge />
                   <DevicePerformanceBridge />
+                  <FavoriteMatchAlerts />
+                  <WelcomeTour />
                 </div>
               </WebBrowserProvider>
             </HashRouter>

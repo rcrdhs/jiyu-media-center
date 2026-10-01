@@ -75,8 +75,12 @@ export const LOCAL_CHANNELS: StreamItem[] = [
     title: 'Nationwide',
     description: 'Nationwide News Network (90FM) — live on YouTube.',
     category: 'news',
-    url: 'https://www.youtube.com/@nationwidenewsnetwork/live',
-    poster: 'https://images.unsplash.com/photo-1504711435469-e1ffb926aa56?w=640&q=80',
+    url: 'https://www.youtube.com/@nnn-RADIOLIVE/live',
+    poster:
+      'data:image/svg+xml;charset=utf-8,' +
+      encodeURIComponent(
+        `<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360"><rect width="640" height="360" fill="#111827"/><text x="320" y="170" text-anchor="middle" fill="#f8fafc" font-family="Segoe UI,Arial,sans-serif" font-size="42" font-weight="700">Nationwide</text><text x="320" y="220" text-anchor="middle" fill="#94a3b8" font-family="Segoe UI,Arial,sans-serif" font-size="20">90FM · YouTube Live</text></svg>`,
+      ),
     tvgId: 'Jamaican.News.Network.jm',
     tags: ['local', 'jamaica', 'live', 'youtube'],
     source: 'Local channel',

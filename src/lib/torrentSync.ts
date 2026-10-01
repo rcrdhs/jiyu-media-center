@@ -7,10 +7,12 @@ import {
   upsertTorrentItems,
 } from './torrentCatalogStore'
 import { getPerformanceKnobs } from './deviceProfile'
+import { noteSyncSourceFinished, rememberSyncJob } from './backgroundSync'
 import {
   beginTorrentSyncSession,
   endTorrentSyncSession,
   isTorrentSyncCancelledError,
+  isTorrentSyncSupersededError,
   torrentSyncCheckpoint,
   TorrentSyncCancelledError,
 } from './torrentSyncControl'
@@ -33,6 +35,8 @@ import {
   YTS_POPULAR_MIN_TITLES,
   type TorrentSource,
 } from './torrents'
+import { isTmdbTvFeedUrl } from './tmdbTv'
+import { isZenoxAnimationFeedUrl } from './zenox'
 import {
   isKidsMovieItem,
   isKidsShowItem,
@@ -45,7 +49,7 @@ import type { StreamItem } from '../types'
  * Bump whenever a site adapter changes how titles/posters are extracted, so
  * already-synced shelves are rebuilt automatically on the next launch.
  */
-export const TORRENT_SCRAPER_VERSION = 38
+export const TORRENT_SCRAPER_VERSION = 46
 
 export interface TorrentSyncProgress {
   sourceId: string
@@ -57,6 +61,8 @@ export interface TorrentSyncProgress {
   percent?: number
   /** True when shelves should reload (use sparingly — large catalogs are expensive) */
   flush?: boolean
+  /** Titles just written on a first-time sync so shelves can paint without a full IDB reload. */
+  items?: StreamItem[]
 }
 
 export interface TorrentSyncResult {
@@ -65,6 +71,8 @@ export interface TorrentSyncResult {
   pages: number
   error?: string
   cancelled?: boolean
+  /** True when another sync took over — not a user Cancel. */
+  superseded?: boolean
 }
 
 function yieldToUi(ms: number): Promise<void> {
@@ -97,6 +105,37 @@ export async function syncTorrentSource(
   let lastError: string | undefined
   const eztvShowlist = isEztvSource(source.url, source.label)
   let lastProgressAt = 0
+  // First sync for this site: write titles as they arrive so shelves fill while
+  // the bar is still climbing. Later syncs still replace once at the end.
+  const coldStart = (loadTorrentCatalogMeta().bySource[source.id]?.count ?? 0) === 0
+  const flushedIds = new Set<string>()
+  let lastFlushAt = 0
+
+  const flushPartialToShelves = async (
+    percent: number,
+    message: string,
+    force = false,
+  ): Promise<void> => {
+    if (!coldStart) return
+    const pending = [...byId.values()].filter((item) => !flushedIds.has(item.id))
+    if (pending.length === 0) return
+    const now = Date.now()
+    // First batch: paint as soon as a page lands. Later: every ~24 titles or 2.5s.
+    if (!force && pending.length < 24 && now - lastFlushAt < 2_500) return
+    await upsertInBatches(pending)
+    for (const item of pending) flushedIds.add(item.id)
+    lastFlushAt = now
+    onProgress?.({
+      sourceId: source.id,
+      label: source.label,
+      page: pages,
+      added: byId.size,
+      percent,
+      flush: true,
+      items: pending,
+      message,
+    })
+  }
 
   try {
     const feedCount = Math.max(1, feeds.length)
@@ -200,6 +239,11 @@ export async function syncTorrentSource(
           percent: Math.min(97, Math.round(feedBase + feedSpan * 0.97)),
           message: `${shelfName} ready · ${outcome.links.length.toLocaleString()} titles`,
         })
+        await flushPartialToShelves(
+          Math.min(97, Math.round(feedBase + feedSpan * 0.97)),
+          `${shelfName} on shelves · ${byId.size.toLocaleString()} titles`,
+          true,
+        )
         continue
       }
 
@@ -224,11 +268,39 @@ export async function syncTorrentSource(
       lastProgressAt = Date.now()
 
       const ytsSource = isYtsSource(source.url, source.label)
+      const longCatalog =
+        isTmdbTvFeedUrl(feed.url) ||
+        isZenoxAnimationFeedUrl(feed.url) ||
+        /zenox\.lol/i.test(feed.url)
       while (url && page < feed.maxPages) {
         await torrentSyncCheckpoint(session)
         page += 1
         pages += 1
-        let outcome = await scrapePage(url, source.label)
+        let outcome = await scrapePage(
+          url,
+          source.label,
+          longCatalog
+            ? (done, total) => {
+                const within = total > 0 ? Math.min(0.99, done / total) : 0.05
+                const percent = Math.min(
+                  97,
+                  Math.round(feedBase + within * feedSpan * 0.97),
+                )
+                const now = Date.now()
+                if (done === total || done === 0 || now - lastProgressAt >= 600) {
+                  lastProgressAt = now
+                  onProgress?.({
+                    sourceId: source.id,
+                    label: source.label,
+                    page: pages,
+                    added: byId.size,
+                    percent,
+                    message: `${source.label}: loading titles… ${done.toLocaleString()}/${Math.max(total, 1).toLocaleString()}`,
+                  })
+                }
+              }
+            : undefined,
+        )
         // YTS: soft-retry a challenged/empty page instead of aborting the whole feed.
         if (
           ytsSource &&
@@ -253,12 +325,15 @@ export async function syncTorrentSource(
           if (ytsSource && page < feed.maxPages) {
             let nextUrl = outcome.nextPage
             if (!nextUrl) {
-              try {
-                const u = new URL(url)
-                u.searchParams.set('page', String(page + 1))
-                nextUrl = u.toString()
-              } catch {
-                nextUrl = null
+              const pageUrl = url
+              if (pageUrl) {
+                try {
+                  const parsed: URL = new URL(pageUrl)
+                  parsed.searchParams.set('page', String(page + 1))
+                  nextUrl = parsed.toString()
+                } catch {
+                  nextUrl = null
+                }
               }
             }
             if (nextUrl) {
@@ -336,6 +411,17 @@ export async function syncTorrentSource(
                       : `Updating catalog · ${feed.category} · ${pctLabel} · page ${page}`,
           })
         }
+
+        // First-time sync: write pages into IndexedDB so shelves fill while % climbs.
+        await flushPartialToShelves(
+          percent,
+          feed.shelfTag === 'popular-movies'
+            ? `Popular Movies on shelves · ${byId.size.toLocaleString()} titles`
+            : feed.shelfTag === 'new-movies'
+              ? `New Movies on shelves · ${byId.size.toLocaleString()} titles`
+              : `${source.label} on shelves · ${byId.size.toLocaleString()} titles`,
+          page === 1 || reachedEnd,
+        )
 
         url = outcome.nextPage
         // EZTV: longer yield so Chrome fetch + UI stay responsive.
@@ -476,6 +562,15 @@ export async function syncTorrentSource(
       error: items.length === 0 ? lastError : undefined,
     }
   } catch (err) {
+    if (isTorrentSyncSupersededError(err)) {
+      return {
+        sourceId: source.id,
+        added: 0,
+        pages,
+        cancelled: true,
+        superseded: true,
+      }
+    }
     if (isTorrentSyncCancelledError(err)) {
       onProgress?.({
         sourceId: source.id,
@@ -518,6 +613,7 @@ export async function syncAllTorrentSources(
   const session = beginTorrentSyncSession()
   const results: TorrentSyncResult[] = []
   const sourceCount = Math.max(1, ordered.length)
+  rememberSyncJob(ordered.map((source) => source.id))
   try {
     for (let i = 0; i < ordered.length; i += 1) {
       await torrentSyncCheckpoint(session)
@@ -534,11 +630,27 @@ export async function syncAllTorrentSources(
         { sessionId: session },
       )
       results.push(result)
+      if (!result.cancelled) noteSyncSourceFinished(source.id)
       if (result.cancelled) break
       await yieldToUi(getPerformanceKnobs().syncYieldMs)
     }
     return results
   } catch (err) {
+    if (isTorrentSyncSupersededError(err)) {
+      if (results.length === 0 || !results.some((r) => r.cancelled)) {
+        results.push({
+          sourceId: '',
+          added: 0,
+          pages: 0,
+          cancelled: true,
+          superseded: true,
+        })
+      } else {
+        const last = results[results.length - 1]
+        if (last) last.superseded = true
+      }
+      return results
+    }
     if (isTorrentSyncCancelledError(err)) {
       onProgress?.({
         sourceId: '',
@@ -555,4 +667,4 @@ export async function syncAllTorrentSources(
   }
 }
 
-export { TorrentSyncCancelledError, isTorrentSyncCancelledError }
+export { TorrentSyncCancelledError, isTorrentSyncCancelledError, isTorrentSyncSupersededError }

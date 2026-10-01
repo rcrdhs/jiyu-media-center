@@ -1,0 +1,567 @@
+{
+  "details": {
+    "id": 94664,
+    "mediaType": "tv",
+    "title": "Mushoku Tensei: Jobless Reincarnation",
+    "overview": "When a 34-year-old underachiever gets run over by a truck, his story doesn't end there. Reincarnated in a new world as an infant, Rudy will seize every opportunity to live the life he's always wanted. Armed with new friends, some freshly acquired magical abilities, and the courage to do the things he's always dreamed of, he's embarking on an epic adventure—with all of his past experience intact!",
+    "posterPath": "/gLKOYIMyKlUHW0SVdskhgf9C0yy.jpg",
+    "backdropPath": "/j9fRIimor0AMFJR9kjZubXcABzZ.jpg",
+    "releaseDate": "2021-01-11",
+    "voteAverage": 8.413,
+    "genreIds": [
+      10759,
+      16,
+      10765
+    ],
+    "popularity": 194.5554,
+    "imdbId": "tt13293588",
+    "logoPath": "/8GxsDBWNSH7yMbXMWTq9HtTGORO.png",
+    "streamingBrand": {
+      "id": "hulu",
+      "name": "Hulu",
+      "bannerUrl": "/brands/hulu.png"
+    },
+    "tagline": null,
+    "runtime": 24,
+    "genres": [
+      {
+        "id": 10759,
+        "name": "Action & Adventure"
+      },
+      {
+        "id": 16,
+        "name": "Animation"
+      },
+      {
+        "id": 10765,
+        "name": "Sci-Fi & Fantasy"
+      }
+    ],
+    "status": "Returning Series",
+    "originalLanguage": "ja",
+    "trailerKey": "k5VxfJpzy1Q",
+    "cast": [
+      {
+        "id": 1321070,
+        "name": "Yumi Uchiyama",
+        "character": "Rudeus Greyrat (voice)",
+        "profilePath": "/JvavoF3YOLCf4LHfl4XvYobANE.jpg"
+      },
+      {
+        "id": 144655,
+        "name": "Tomokazu Sugita",
+        "character": "Rudeus Greyrat's Former Self (voice)",
+        "profilePath": "/cv5zuPZySNsHXu24pjKLYCRzJ2J.jpg"
+      },
+      {
+        "id": 1324646,
+        "name": "Ai Kakuma",
+        "character": "Eris Boreas Greyrat (voice)",
+        "profilePath": "/o3tQSeeJAeafJNvQs2IKvpKY7av.jpg"
+      },
+      {
+        "id": 1254671,
+        "name": "Ai Kayano",
+        "character": "Sylphiette (voice)",
+        "profilePath": "/l8ywp387rfdAS7mOExe3cEZnsk0.jpg"
+      },
+      {
+        "id": 1820616,
+        "name": "Konomi Kohara",
+        "character": "Roxy Migurdia (voice)",
+        "profilePath": "/3wjTzpJpBiTkLexdMmo9a3wfgRT.jpg"
+      }
+    ],
+    "seasons": [
+      {
+        "id": 134338,
+        "seasonNumber": 1,
+        "name": "Season 1",
+        "episodeCount": 23,
+        "posterPath": "/4vEel9ztoC3PtQFOkthVPtdlWQr.jpg",
+        "airDate": "2021-01-11"
+      },
+      {
+        "id": 334394,
+        "seasonNumber": 2,
+        "name": "Season 2",
+        "episodeCount": 24,
+        "posterPath": "/kVHnRfj5c7rzetzMPlRQXEZRzkH.jpg",
+        "airDate": "2023-07-10"
+      },
+      {
+        "id": 400493,
+        "seasonNumber": 3,
+        "name": "Season 3",
+        "episodeCount": 14,
+        "posterPath": "/tO5Fwg59DZkTB2VrC2UEIS2VrEk.jpg",
+        "airDate": "2026-07-04"
+      }
+    ],
+    "numberOfSeasons": 3,
+    "numberOfEpisodes": 61,
+    "related": [
+      {
+        "id": 113808,
+        "mediaType": "tv",
+        "title": "Seirei Gensouki: Spirit Chronicles",
+        "overview": "His past life and current life are intersecting--a boy with memories of two lives faces his destiny! After his mother was killed at an early age, the orphaned Rio fought his hardest to survive in the slums. One day, he awakens to the memories of Haruto Amakwa, who died in an accident while dreaming of being reunited with his childhood friend, and Rio realizing he has reincarnated in a world of swords and sorcery.",
+        "posterPath": "/dNki26bfC3ad6mRQZOxY8ysosrb.jpg",
+        "backdropPath": "/7XloWeuHmw94BFzPf4oF59rvPZH.jpg",
+        "releaseDate": "2021-07-06",
+        "voteAverage": 8.209,
+        "genreIds": [
+          16,
+          18,
+          10759,
+          10765
+        ],
+        "popularity": 16.5794
+      },
+      {
+        "id": 123525,
+        "mediaType": "tv",
+        "title": "The Faraway Paladin",
+        "overview": "In a city of the dead, long since ruined and far from human civilization, lives a single human child. His name is Will, and he's being raised by three undead: the hearty skeletal warrior, Blood; the graceful mummified priestess, Mary; and the crotchety spectral sorcerer, Gus. The three pour love into the boy, and teach him all they know. But one day, Will starts to wonder: \"Who am I?\" Will must unravel the mysteries of this faraway dead man's land, and unearth the secret pasts of the undead. He must learn the love and mercy of the good gods, and the bigotry and madness of the bad. And when he knows it all, the boy will take his first step on the path to becoming a Paladin.",
+        "posterPath": "/rzrtmcYoz1A3LtcvZXSI0mTtXzJ.jpg",
+        "backdropPath": "/hABdMmk7ujczjxrRkCPCgWDt4ES.jpg",
+        "releaseDate": "2021-10-09",
+        "voteAverage": 7.024,
+        "genreIds": [
+          16,
+          10759,
+          10765
+        ],
+        "popularity": 9.564
+      },
+      {
+        "id": 111819,
+        "mediaType": "tv",
+        "title": "TSUKIMICHI -Moonlit Fantasy-",
+        "overview": "Makoto Misumi is just an ordinary high school student living a regular life, but all of a sudden gets summoned to the other world to become a \"hero.\" The goddess of the other world, however, insults him for being different and strips his \"hero\" title, before casting him off to the wilderness at the edge of the world. As he wanders the wilderness, Makoto encounters dragons, spiders, orcs, dwarves, and all sorts of non-human tribes. Because Makoto comes from a different world, he is able to unleash unimaginable magical powers and combat skills. But just how will he handle his encounters with various species and survive in his new environment. In this fantasy, Makoto tries to transform the other world into a better place despite the humans and gods having turned their backs on him.",
+        "posterPath": "/7XQ2dMEARAdUZQscnIJFPI54q3r.jpg",
+        "backdropPath": "/ciPDoPMqd3icCBHsIlhIb3UyOd2.jpg",
+        "releaseDate": "2021-07-07",
+        "voteAverage": 8.394,
+        "genreIds": [
+          16,
+          10765,
+          10759,
+          35
+        ],
+        "popularity": 13.7232
+      },
+      {
+        "id": 213830,
+        "mediaType": "tv",
+        "title": "I Was Reincarnated as the 7th Prince so I Can Take My Time Perfecting My Magical Ability",
+        "overview": "Prince Lloyd wasn't always a prince...in fact, his previous life is one he remembers perfectly: he was a sorcerer, of sorts. So when he was forced to reincarnate, he decided to continue his studies, prince of the realm or no! But his new life has its own sets of challenges...including being a 10-year-old! What's the 7th prince/sorcerer to do?!",
+        "posterPath": "/ruLkQB8i1yazHgO0QCWpyJRRTs9.jpg",
+        "backdropPath": "/ed9Mgo1gBO9Za0zAyNIpTvtjTDU.jpg",
+        "releaseDate": "2024-04-02",
+        "voteAverage": 7.716,
+        "genreIds": [
+          16,
+          10765
+        ],
+        "popularity": 14.6105
+      },
+      {
+        "id": 199920,
+        "mediaType": "tv",
+        "title": "KamiKatsu: Working for God in a Godless World",
+        "overview": "Yukito, the son of a questionable cult leader, lost his life due to the cult's ridiculous training practices. Now to his surprise, he was reincarnated into another world! It was an ideal world for him without the concept of \"God\" or \"religion\" BUT...! A unique \"reincarnating in other world\" adventure begins: creating a \"religion\" in a world without God?!",
+        "posterPath": "/d82CH1EMSoC2VvYSTxCZHPboJYq.jpg",
+        "backdropPath": "/lCsYvxiYjS2CcusGjHnNdEm9SG1.jpg",
+        "releaseDate": "2023-04-06",
+        "voteAverage": 6.4,
+        "genreIds": [
+          16,
+          35,
+          9648,
+          10765
+        ],
+        "popularity": 9.1006
+      },
+      {
+        "id": 119495,
+        "mediaType": "tv",
+        "title": "The Eminence in Shadow",
+        "overview": "Shadowbrokers are those who go unnoticed, posing as unremarkable people, when in truth, they control everything from behind the scenes. Sid wants to be someone just like that more than anything, and something as insignificant as boring reality isn’t going to get in his way! He trains in secret every single night, preparing for his eventual rise to power—only to be denied his destiny by a run-of-the-mill (yet deadly) traffic accident. But when he wakes up in a another world and suddenly finds himself at the head of an actual secret organization doing battle with evil in the shadows, he’ll finally get a chance to act out all of his delusional fantasies!",
+        "posterPath": "/7JKYmtLydAwo9ZsEmAknZiO4U8g.jpg",
+        "backdropPath": "/htD5SJpPOvkmAowU80KrWnN59WO.jpg",
+        "releaseDate": "2022-10-05",
+        "voteAverage": 8.073,
+        "genreIds": [
+          16,
+          35,
+          10765,
+          10759
+        ],
+        "popularity": 35.0144
+      },
+      {
+        "id": 207493,
+        "mediaType": "tv",
+        "title": "The Aristocrat's Otherworldly Adventure: Serving Gods Who Go Too Far",
+        "overview": "After dying in the act of stopping a crime in modern Japan, our hero is reincarnated as Cain von Silford, third son of a noble family in a world of swords and sorcery. In his new life, all children receive a blessing from the gods...but Cain is unexpectedly blessed with an absolutely enormous, over-the-top cornucopia of magical powers. If his dream of traveling the world as a free spirit is to come true, he can't reveal too much of his potential to the wrong people. A light-hearted, escapist adventure in another world begins!",
+        "posterPath": "/aH3EKIPW9XRaIJQeF7EYlOe7SEK.jpg",
+        "backdropPath": "/k3V9eGCWmiOTKSQTBjG48pJhDHd.jpg",
+        "releaseDate": "2023-04-03",
+        "voteAverage": 7.1,
+        "genreIds": [
+          16,
+          35,
+          10759,
+          10765
+        ],
+        "popularity": 7.1006
+      },
+      {
+        "id": 120155,
+        "mediaType": "tv",
+        "title": "The Greatest Demon Lord Is Reborn as a Typical Nobody",
+        "overview": "In his past life, he was known as Demon Lord Varvatos, an all-powerful magic user and ruler. But he was lonely after the loss of his friends and loved ones during his rise to power, so in his dying moments, Varvatos cast a reincarnation spell so that he'd get a second chance at just being a normal guy. At first it looks like that's going to work – he's reborn thousands of years later as villager Ard. Unfortunately for him, his memories are still intact and he's not aware just how much has been lost over the time he spent not existing, and it looks like that's going to cost him his normal life.",
+        "posterPath": "/dtULGP3qRi932NzYGsp7u6q6zAS.jpg",
+        "backdropPath": "/7PqkW8dr5WV6VcU3UeWOlx0cQP8.jpg",
+        "releaseDate": "2022-04-06",
+        "voteAverage": 7.163,
+        "genreIds": [
+          16,
+          10759,
+          10765
+        ],
+        "popularity": 9.3867
+      },
+      {
+        "id": 114477,
+        "mediaType": "tv",
+        "title": "Harem in the Labyrinth of Another World",
+        "overview": "High school student Michio Kaga was wandering aimlessly through life and the Internet, when he finds himself transported from a shady website to a fantasy world — reborn as a strong man who can use \"cheat\" powers. He uses his powers to become an adventurer, earn money, and get the right to claim girls that have idol-level beauty to form his very own harem.",
+        "posterPath": "/drAnsk5w2PX5x3ooPv7I2xr3ksq.jpg",
+        "backdropPath": "/k4jj6KGcxQzo26PSjfAdQguUTfN.jpg",
+        "releaseDate": "2022-07-06",
+        "voteAverage": 7.392,
+        "genreIds": [
+          16,
+          10759,
+          10765
+        ],
+        "popularity": 16.7261
+      },
+      {
+        "id": 214540,
+        "mediaType": "tv",
+        "title": "Dead Mount Death Play",
+        "overview": "As a legendary hero nears victory against a necromancer known as The Corpse God, things take an unexpected turn with the dark sorcerer’s final gambit—reincarnation magic. This last-ditch effort catches the brave fighter off guard, and now he’s a boy named Polka Shinoyama in a whole new world! The showdown between good and evil just got epic.",
+        "posterPath": "/oOlg3bPWOKBgy5kgOTVe8pJz4HI.jpg",
+        "backdropPath": "/tNiN29L1IaLK5uQIGMgtQvUKQVt.jpg",
+        "releaseDate": "2023-04-11",
+        "voteAverage": 6.871,
+        "genreIds": [
+          16,
+          10759,
+          10765
+        ],
+        "popularity": 8.5465
+      },
+      {
+        "id": 99071,
+        "mediaType": "tv",
+        "title": "Redo of Healer",
+        "overview": "In a world of monsters, adventurers and magic, some of the most gifted healers are subjugated to brute force. Keyaru gains the ability to rewind time and turns the tables on those who’ve exploited him in this dark fantasy tale of vengeance and fury.",
+        "posterPath": "/9T7TT0w92RbeRP5QSnNq81HHxde.jpg",
+        "backdropPath": "/e30T3teKp6VZlIXhI0AhTDksvoy.jpg",
+        "releaseDate": "2021-01-13",
+        "voteAverage": 8.287,
+        "genreIds": [
+          16,
+          10759,
+          10765,
+          18,
+          80
+        ],
+        "popularity": 36.1696
+      },
+      {
+        "id": 155942,
+        "mediaType": "tv",
+        "title": "Handyman Saitou in Another World",
+        "overview": "Handyman Saito has never been anyone special. All his life, he’s had average grades, ordinary athletic skill, a commonplace job… But his unremarkable path takes a turn when he wakes up in another world. Here, warriors, wizards, and elves accompany him on quests delving deep into dungeons, and Saito realizes for the first time what it’s like to be needed. After all, who other than the handyman could be trusted to open locked treasure chests or repair his allies’ equipment? Beginning with a simple “thank you,” this is the story of an ordinary person’s fulfilling life.",
+        "posterPath": "/xp404PMU2cGsODMTIkkUizbYhcm.jpg",
+        "backdropPath": "/6c1tMSLoWmy0rPic1j0cihExfmP.jpg",
+        "releaseDate": "2023-01-08",
+        "voteAverage": 7.1,
+        "genreIds": [
+          16,
+          35,
+          10765
+        ],
+        "popularity": 6.9574
+      }
+    ]
+  },
+  "initialSeason": {
+    "id": 134338,
+    "seasonNumber": 1,
+    "name": "Season 1",
+    "episodeCount": 23,
+    "posterPath": "/4vEel9ztoC3PtQFOkthVPtdlWQr.jpg",
+    "airDate": "2021-01-11",
+    "episodes": [
+      {
+        "id": 1956859,
+        "episodeNumber": 1,
+        "seasonNumber": 1,
+        "name": "Jobless Reincarnation",
+        "overview": "A 34-year-old unemployed recluse get hit by a truck... and wakes up as a newborn baby in a fantasy world! With loving parents, a lifetime of regrets, and a beginner’s magic textbook, he sets out to make the most of his second chance at life.",
+        "stillPath": "/sS93JaHkWvhecsmgSdg5MFel3y5.jpg",
+        "runtime": 24,
+        "airDate": "2021-01-11",
+        "voteAverage": 5.4
+      },
+      {
+        "id": 2602034,
+        "episodeNumber": 2,
+        "seasonNumber": 1,
+        "name": "Master",
+        "overview": "Rudy begins training with his new magic tutor and learning swordsmanship from his father. He makes rapid progress, but traumatic memories from his past life leave him too afraid to go outside. Is his second chance already doomed to failure?",
+        "stillPath": "/gjktze6OF0wESkbHU4h3dxcWNoe.jpg",
+        "runtime": 24,
+        "airDate": "2021-01-18",
+        "voteAverage": 5
+      },
+      {
+        "id": 2602035,
+        "episodeNumber": 3,
+        "seasonNumber": 1,
+        "name": "A Friend",
+        "overview": "Rudy begins to explore the village and rescues a green-haired child from a group of bullies. The two grow close practicing magic, but is there more to Rudy’s new friend than he thinks?",
+        "stillPath": "/d29kiiic7xbvsxCnJ4syiO3JxYy.jpg",
+        "runtime": 24,
+        "airDate": "2021-01-25",
+        "voteAverage": 4.9
+      },
+      {
+        "id": 2673976,
+        "episodeNumber": 4,
+        "seasonNumber": 1,
+        "name": "Emergency Family Meeting",
+        "overview": "The Greyrat family is overjoyed when Zenith announces that she’s pregnant with a second child, but the mood takes a dour turn when Lilia reveals that she is also pregnant and Paul is the father. Will this be the end of Rudy’s happy family?",
+        "stillPath": "/uVN34pxWO1N1eFchpHdPXFMrMx0.jpg",
+        "runtime": 24,
+        "airDate": "2021-02-01",
+        "voteAverage": 4.7
+      },
+      {
+        "id": 2696386,
+        "episodeNumber": 5,
+        "seasonNumber": 1,
+        "name": "A Young Lady and Violence",
+        "overview": "Rudy arrives in the city of Roa, where he’s supposed to spend the next five years tutoring the daughter of the local lord. His student, however, is more than he bargained for, and he’ll have to fight to start his first ever job, let alone keep it.",
+        "stillPath": "/2oiW3SSj752soSVpj8LST72d4Ib.jpg",
+        "runtime": 24,
+        "airDate": "2021-02-08",
+        "voteAverage": 4.9
+      },
+      {
+        "id": 2696387,
+        "episodeNumber": 6,
+        "seasonNumber": 1,
+        "name": "A Day Off in Roa",
+        "overview": "Rudy is officially Eris’s tutor, but she doesn’t want to learn anything but magic. As Rudy struggles to get her interested in other subjects, he realizes that non-stop lessons are causing her stress and proposes a day off in the city.",
+        "stillPath": "/tSBi3Ob8qWKMlpG6pMeukJUhT25.jpg",
+        "runtime": 24,
+        "airDate": "2021-02-15",
+        "voteAverage": 4.6
+      },
+      {
+        "id": 2696389,
+        "episodeNumber": 7,
+        "seasonNumber": 1,
+        "name": "What Lies Beyond Effort",
+        "overview": "Eris’s 10th birthday is fast approaching, and her grandfather has invited nobles from across the kingdom to a dance party to celebrate. There’s just one problem: Eris can’t dance, and she’s quickly losing patience with her lessons.",
+        "stillPath": "/rrEKdSZXOT0cEX1fSEmty0Q6lD1.jpg",
+        "runtime": 24,
+        "airDate": "2021-02-22",
+        "voteAverage": 4.8
+      },
+      {
+        "id": 2696390,
+        "episodeNumber": 8,
+        "seasonNumber": 1,
+        "name": "Turning Point 1",
+        "overview": "Rudy reaches his 10th birthday, and Eris and her family plan a surprise party for him. Meanwhile, the strange orb hovering over the city remains a mystery as powerful entities across the world begin to take note of it.",
+        "stillPath": "/A68qEBAuk5ubUWdt6zTqiT2NiAB.jpg",
+        "runtime": 24,
+        "airDate": "2021-03-01",
+        "voteAverage": 5.2
+      },
+      {
+        "id": 2696391,
+        "episodeNumber": 9,
+        "seasonNumber": 1,
+        "name": "A Chance Encounter",
+        "overview": "Rudy and Eris find themselves stranded in the wilds of the Demon Continent. Their only chance to survive seems to lie in Ruijerd, a warrior of the infamous Superd tribe of demons, but can he be trusted?",
+        "stillPath": "/v4PQNKhosqXAHi9sq03UUDBkI7q.jpg",
+        "runtime": 24,
+        "airDate": "2021-03-08",
+        "voteAverage": 4.8
+      },
+      {
+        "id": 2696393,
+        "episodeNumber": 10,
+        "seasonNumber": 1,
+        "name": "The Value of a Life and the First Job",
+        "overview": "Rudeus, Eris, and Ruijerd make it to a city. They need to earn money for their journey, and decide to register as adventurers, but Superd like Ruijerd aren’t allowed inside. Rudeus has a plan, but how well will it hold up in practice?",
+        "stillPath": "/wbJbzAKDloQ2ReMo8QcAYOQahAE.jpg",
+        "runtime": 24,
+        "airDate": "2021-03-15",
+        "voteAverage": 4.9
+      },
+      {
+        "id": 2696394,
+        "episodeNumber": 11,
+        "seasonNumber": 1,
+        "name": "Children and Warriors",
+        "overview": "With their new money-making scheme in place, Dead End head out to track down a mysterious monster. Unfortunately, the job doesn’t go as smoothly as they hope, and Rudy’s plans may turn out to be a lot less safe than he thought.",
+        "stillPath": "/3Wx5JiTG3pj0ShBiW84QLam3gyx.jpg",
+        "runtime": 24,
+        "airDate": "2021-03-22",
+        "voteAverage": 5
+      },
+      {
+        "id": 3133431,
+        "episodeNumber": 12,
+        "seasonNumber": 1,
+        "name": "The Woman with the Demon Eyes",
+        "overview": "Dead End discovers that Ruijerd will have to pay a fortune in fees to leave the Demon Continent. As they struggle to find a way around this unexpected roadblock, Rudeus receives another vision.",
+        "stillPath": "/m30WM42H36PsnmHTmX9bhJDeBRA.jpg",
+        "runtime": 24,
+        "airDate": "2021-10-04",
+        "voteAverage": 4.9
+      },
+      {
+        "id": 3257429,
+        "episodeNumber": 13,
+        "seasonNumber": 1,
+        "name": "Missed Connections",
+        "overview": "Roxy arrives on the Demon Continent to begin her search for Paul's missing family. Meanwhile, Rudeus strikes a deal with smugglers to transport Ruijerd across the ocean.",
+        "stillPath": "/ql4HhRdHbHhskgkz3LnghlVE9PT.jpg",
+        "runtime": 24,
+        "airDate": "2021-10-11",
+        "voteAverage": 5.1
+      },
+      {
+        "id": 3257430,
+        "episodeNumber": 14,
+        "seasonNumber": 1,
+        "name": "No Such Thing as a Free Lunch",
+        "overview": "Rudeus finds himself imprisoned by the beast people in Doldia Village. Will Ruijerd and Eris arrive to clear his name before he loses patience and tries to fight his way to freedom?",
+        "stillPath": "/cx0Kk2gVD0ddq3PAdxPKs91C5qp.jpg",
+        "runtime": 24,
+        "airDate": "2021-10-18",
+        "voteAverage": 4.9
+      },
+      {
+        "id": 3257431,
+        "episodeNumber": 15,
+        "seasonNumber": 1,
+        "name": "Slow Life in the Doldia Village",
+        "overview": "Dead End decide to wait out the rainy season in the Doldia village. Eris befriends the chieftain's granddaughter, but her fondness for Ghislaine leads to unexpected conflict.",
+        "stillPath": "/g09JoU3CJLSvQWkcjdEKShdodMq.jpg",
+        "runtime": 24,
+        "airDate": "2021-10-25",
+        "voteAverage": 4.8
+      },
+      {
+        "id": 3257432,
+        "episodeNumber": 16,
+        "seasonNumber": 1,
+        "name": "Family Squabble",
+        "overview": "Rudeus, Eris, and Ruijerd arrive in the Holy Country of Millis, where Rudeus's thoughts turn to home. When the three split up for a day off, a chance encounter in an alley leads Rudeus to a shocking reunion.",
+        "stillPath": "/f6h730Wa66eYDEaXPPQKCZwrM8X.jpg",
+        "runtime": 24,
+        "airDate": "2021-11-01",
+        "voteAverage": 5.1
+      },
+      {
+        "id": 3257433,
+        "episodeNumber": 17,
+        "seasonNumber": 1,
+        "name": "Reunion",
+        "overview": "In the aftermath of their disastrous reunion, Paul and Rudeus reflect on their actions and look for a way forward.",
+        "stillPath": "/1lHIF2yab9NQPVUFHdjmjfClfTI.jpg",
+        "runtime": 24,
+        "airDate": "2021-11-08",
+        "voteAverage": 5.1
+      },
+      {
+        "id": 3308230,
+        "episodeNumber": 18,
+        "seasonNumber": 1,
+        "name": "Separate Journeys",
+        "overview": "After setting out from Millishion, Rudeus, Eris, and Ruijerd board a ship back to the Central Continent. Meanwhile, Roxy arrives in Rikarisu, where she encounters some familiar faces.",
+        "stillPath": "/k4UNFqOhrnlOaNc718ardTSM2Kz.jpg",
+        "runtime": 24,
+        "airDate": "2021-11-15",
+        "voteAverage": 5.1
+      },
+      {
+        "id": 3308231,
+        "episodeNumber": 19,
+        "seasonNumber": 1,
+        "name": "Route Selection",
+        "overview": "Dead End finally arrives in the Shirone Kingdom on the Central Continent. Rudeus is anxious for a reunion with Roxy, but an unexpected vision from the Man-God means he may be in for more than he bargained for.",
+        "stillPath": "/2bDtXehgL6TxDfbAB2lj88uggPo.jpg",
+        "runtime": 24,
+        "airDate": "2021-11-22",
+        "voteAverage": 4.9
+      },
+      {
+        "id": 3308232,
+        "episodeNumber": 20,
+        "seasonNumber": 1,
+        "name": "The Birth of My Little Sister, the Maid",
+        "overview": "Rudeus is in desperate straits, imprisoned in a magic-proof dungeon by a despotic prince. But just when all seems hopeless, an unexpected visitor appears with a strange request. Will Rudeus be able to talk his way out of this one?",
+        "stillPath": "/69yWIHRVl8QPzxqYg7rB6zY8hMu.jpg",
+        "runtime": 24,
+        "airDate": "2021-11-29",
+        "voteAverage": 5
+      },
+      {
+        "id": 3308233,
+        "episodeNumber": 21,
+        "seasonNumber": 1,
+        "name": "Turning Point 2",
+        "overview": "Rudeus, Eris, and Ruijerd are nearing the end of their journey, but a chance encounter in a snowy mountain pass threatens to put a premature end to their adventures.",
+        "stillPath": "/s5oDEM3hfvVMdkWuOshxe5YcGU7.jpg",
+        "runtime": 24,
+        "airDate": "2021-12-06",
+        "voteAverage": 5.4
+      },
+      {
+        "id": 3348336,
+        "episodeNumber": 22,
+        "seasonNumber": 1,
+        "name": "Dreams and Reality",
+        "overview": "Rudeus and Eris finally return to Fittoa, but sudden goodbyes and unpleasant news make their homecoming bittersweet.",
+        "stillPath": "/4EApeJZhmxtbzrbUv9LT906t1pT.jpg",
+        "runtime": 24,
+        "airDate": "2021-12-13",
+        "voteAverage": 4.9
+      },
+      {
+        "id": 3348337,
+        "episodeNumber": 23,
+        "seasonNumber": 1,
+        "name": "Wake Up and Take a Step",
+        "overview": "Rudeus sinks into depression following Eris's departure. As he struggles to get back on his feet, the many people he's met continue their own journeys.",
+        "stillPath": "/2Wen3Widg6xKNbZOqSME2Y5NBKr.jpg",
+        "runtime": 24,
+        "airDate": "2021-12-20",
+        "voteAverage": 4.9
+      }
+    ]
+  }
+}

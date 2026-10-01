@@ -90,7 +90,10 @@ export function isKidsMovieItem(item: StreamItem): boolean {
 }
 
 export function isKidsShowItem(item: StreamItem): boolean {
-  return item.category === 'kids' && hasShelfTag(item, KIDS_SHELF_SHOWS)
+  if (item.category !== 'kids') return false
+  if (hasShelfTag(item, KIDS_SHELF_SHOWS)) return true
+  // TMDB Kids catalog rows always belong on Shows.
+  return item.torrentSourceId === 'builtin-tmdb-kids'
 }
 
 export function isKidsLiveItem(item: StreamItem): boolean {

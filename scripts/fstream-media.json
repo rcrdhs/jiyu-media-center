@@ -1,0 +1,98 @@
+[
+  {
+    "type": "req",
+    "url": "https://fstream365.com/embed/movie/52586a3176563141725757713963622b706f2b3472747a4d672f43356e48575437684f615272777a50763035795a5274534a7074796a4f724548474b476e6a6a307563344873316c776a58746a5a36514f6765586a33376344765638626470754467432f5776713774486f782f345a54717335677178344e4f6e4c7835615439/exmovie?srv=6"
+  },
+  {
+    "type": "req",
+    "url": "https://fstream365.com/assets/js/jquery-1.9.1.min.js"
+  },
+  {
+    "type": "req",
+    "url": "https://fstream365.com/assets/js/player/player.min.js?v1.0.68"
+  },
+  {
+    "type": "req",
+    "url": "https://fstream365.com/assets/js/player/react.js?v1.0.68"
+  },
+  {
+    "type": "req",
+    "url": "https://fstream365.com/assets/js/player/hls.js?v1.0.68"
+  },
+  {
+    "type": "req",
+    "url": "https://fstream365.com/assets/js/player/player.css?v1.0.68"
+  },
+  {
+    "type": "req",
+    "url": "https://fstream365.com/assets/js/player/script.min.js?v1.0.68"
+  },
+  {
+    "type": "req",
+    "url": "https://fstream365.com/assets/js/player/apd.min.js?v1.0.68"
+  },
+  {
+    "type": "req",
+    "url": "https://fstream365.com/assets/js/player/react.js"
+  },
+  {
+    "type": "req",
+    "url": "https://fstream365.com/assets/js/player/hls.js"
+  },
+  {
+    "type": "req",
+    "url": "https://fstream365.com/cdn-cgi/rum?"
+  },
+  {
+    "type": "req",
+    "url": "https://fstream365.com/cdn-cgi/rum?"
+  },
+  {
+    "type": "req",
+    "url": "https://fstream365.com/ajax/getSources/?id=4159703350446f726e6c6c55384836423672547934316b686a726969476b6e4e752b576e682f72542b354e5a522f526c754966636d534335474b61414178303945587251677a444b76773842574a6452344a58754b5546686d53657735746472777951587856734d65776579633267503777504b756772376b635661474e74644578414168533838476e486d306f692b7263385269546b6b614c74557832797665783271572f396d49612b746c4b6136774b4c736461434a6f4c6473794935386b6f6173395461345759414855356d34625566453971306d5373544a456167446f7046584b63426b39474a506d6c6232336b7a417a795666687154564a393270506f32386c4c624c3771377868446b525133567069413d3d&h=584c6e4a6b4c4e6546306b4446376f416d3564546d32554470673268524d437879386375445072326f46553d&a=c60b0a51f189249092d17777bfda5423&t=a4b1ad339307e99f"
+  },
+  {
+    "type": "req",
+    "url": "https://fstream365.com/ajax/getSources?id=52586a3176563141725757713963622b706f2b3472747a4d672f43356e48575437684f615272777a5076304b6456344738396b6944346857377356442b334f5770724442464e6d5848336439384d52724a68544870513d3d"
+  },
+  {
+    "type": "res",
+    "status": 200,
+    "url": "https://fstream365.com/ajax/getSources/?id=4159703350446f726e6c6c55384836423672547934316b686a726969476b6e4e752b576e682f72542b354e5a522f526c754966636d534335474b61414178303945587251677a444b76773842574a6452344a58754b5546686d53657735746472777951587856734d65776579633267503777504b756772376b635661474e74644578414168533838476e486d306f692b7263385269546b6b614c74557832797665783271572f396d49612b746c4b6136774b4c736461434a6f4c6473794935386b6f6173395461345759414855356d34625566453971306d5373544a456167446f7046584b63426b39474a506d6c6232336b7a417a795666687154564a393270506f32386c4c624c3771377868446b525133567069413d3d&h=584c6e4a6b4c4e6546306b4446376f416d3564546d32554470673268524d437879386375445072326f46553d&a=c60b0a51f189249092d17777bfda5423&t=a4b1ad339307e99f",
+    "body": "{\"sources\":\"eyJjdCI6IitGVVY1ekpwTVdVRHhndDFtZU4yYjZnczlWbUJqN21tVGdcL2tJUGtnRFkxVm9NOW5VK3lRWFwvdDc2NU01R0xzMjRlUEpOUm5PM29lVWh0NzZxQlwvTEUxRG9NNnVTSmsrMUVYSXpGQ0U5bWp0UGdhYndCUWJseDBScnEreVpTd1FOaGlVc3FvT3pGSUFQWmxGaDFqd0hxa1dLXC9uWUtER0hXOEl0cjMxamR5bURDem5sM2RqUDZET2kwaXpyaXJHaWNlOXZmUmRcLzlSTDh0WEhcL3pZQUFUQVlPTUxsVFFaNWp2RHlwVmRQdklvZzNvOUE5UnJXYzZMMXFvZnVHTG82XC81bldxdjN0b2VMc0pLMUpCZElhNDNMaVNkZlY0VVFnT0h5TDFGTVwvNXhrXC9vY1kwQTFTeTR5Y1NQSGp6QkxJV1NZSEdOelc0RkJTdG1qNllKVFhOMlpZUkZcL2J0QkJjRkFmRWJLQ0J1bDhhNlBOcWpHZ01VV0FIMHVRWGFnU1Bybm9EeG1zbDdrVVIzYVl4ZEFEZzF4cVloenE1V1wvRTFadnNJcVNyMVwv"
+  },
+  {
+    "type": "req",
+    "url": "https://fstream365.com/ajax/getSources?id=52586a3176563141725757713963622b706f2b3472747a4d672f43356e48575437684f615272777a5076304b6456344738396b6944346857377356442b334f5770724442464e6d5848336439384d52724a68544870513d3d&hash=XLnJkLNeF0kDF7oAm5dTm2UDpg2hRMCxy8cuDPr2oFU%3D"
+  },
+  {
+    "type": "req",
+    "url": "https://fstream365.com/cdn-cgi/rum?"
+  },
+  {
+    "type": "res",
+    "status": 200,
+    "url": "https://fstream365.com/ajax/getSources?id=52586a3176563141725757713963622b706f2b3472747a4d672f43356e48575437684f615272777a5076304b6456344738396b6944346857377356442b334f5770724442464e6d5848336439384d52724a68544870513d3d",
+    "body": ""
+  },
+  {
+    "type": "req",
+    "url": "https://fstream365.com/favicon.ico"
+  },
+  {
+    "type": "req",
+    "url": "https://fstream365.com/ajax/getSources?id=dl8zMTM0MDZAMUAx"
+  },
+  {
+    "type": "res",
+    "status": 200,
+    "url": "https://fstream365.com/ajax/getSources?id=52586a3176563141725757713963622b706f2b3472747a4d672f43356e48575437684f615272777a5076304b6456344738396b6944346857377356442b334f5770724442464e6d5848336439384d52724a68544870513d3d&hash=XLnJkLNeF0kDF7oAm5dTm2UDpg2hRMCxy8cuDPr2oFU%3D",
+    "body": ""
+  },
+  {
+    "type": "res",
+    "status": 200,
+    "url": "https://fstream365.com/ajax/getSources?id=dl8zMTM0MDZAMUAx",
+    "body": ""
+  }
+]

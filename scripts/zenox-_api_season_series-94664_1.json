@@ -1,0 +1,100 @@
+{
+  "season": {
+    "id": 950001,
+    "seasonNumber": 1,
+    "name": "Season 1",
+    "episodeCount": 8,
+    "posterPath": null,
+    "airDate": "2025-01-03",
+    "episodes": [
+      {
+        "id": 9500010,
+        "episodeNumber": 1,
+        "seasonNumber": 1,
+        "name": "Episode 1",
+        "overview": "Placeholder episode synopsis served from the offline catalog. Connect a TMDB API key to load real episode metadata.",
+        "stillPath": null,
+        "runtime": 42,
+        "airDate": "2025-01-03",
+        "voteAverage": 7
+      },
+      {
+        "id": 9500011,
+        "episodeNumber": 2,
+        "seasonNumber": 1,
+        "name": "Episode 2",
+        "overview": "Placeholder episode synopsis served from the offline catalog. Connect a TMDB API key to load real episode metadata.",
+        "stillPath": null,
+        "runtime": 49,
+        "airDate": "2025-01-06",
+        "voteAverage": 7.3
+      },
+      {
+        "id": 9500012,
+        "episodeNumber": 3,
+        "seasonNumber": 1,
+        "name": "Episode 3",
+        "overview": "Placeholder episode synopsis served from the offline catalog. Connect a TMDB API key to load real episode metadata.",
+        "stillPath": null,
+        "runtime": 56,
+        "airDate": "2025-01-09",
+        "voteAverage": 7.6
+      },
+      {
+        "id": 9500013,
+        "episodeNumber": 4,
+        "seasonNumber": 1,
+        "name": "Episode 4",
+        "overview": "Placeholder episode synopsis served from the offline catalog. Connect a TMDB API key to load real episode metadata.",
+        "stillPath": null,
+        "runtime": 46,
+        "airDate": "2025-01-12",
+        "voteAverage": 7.9
+      },
+      {
+        "id": 9500014,
+        "episodeNumber": 5,
+        "seasonNumber": 1,
+        "name": "Episode 5",
+        "overview": "Placeholder episode synopsis served from the offline catalog. Connect a TMDB API key to load real episode metadata.",
+        "stillPath": null,
+        "runtime": 53,
+        "airDate": "2025-01-15",
+        "voteAverage": 8.2
+      },
+      {
+        "id": 9500015,
+        "episodeNumber": 6,
+        "seasonNumber": 1,
+        "name": "Episode 6",
+        "overview": "Placeholder episode synopsis served from the offline catalog. Connect a TMDB API key to load real episode metadata.",
+        "stillPath": null,
+        "runtime": 43,
+        "airDate": "2025-01-18",
+        "voteAverage": 8.5
+      },
+      {
+        "id": 9500016,
+        "episodeNumber": 7,
+        "seasonNumber": 1,
+        "name": "Episode 7",
+        "overview": "Placeholder episode synopsis served from the offline catalog. Connect a TMDB API key to load real episode metadata.",
+        "stillPath": null,
+        "runtime": 50,
+        "airDate": "2025-01-21",
+        "voteAverage": 8.8
+      },
+      {
+        "id": 9500017,
+        "episodeNumber": 8,
+        "seasonNumber": 1,
+        "name": "Episode 8",
+        "overview": "Placeholder episode synopsis served from the offline catalog. Connect a TMDB API key to load real episode metadata.",
+        "stillPath": null,
+        "runtime": 57,
+        "airDate": "2025-01-24",
+        "voteAverage": 7.1
+      }
+    ]
+  }
+}

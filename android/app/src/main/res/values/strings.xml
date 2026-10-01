@@ -1,0 +1,8 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Jiyu</string>
+    <string name="title_activity_main">Jiyu</string>
+    <string name="package_name">app.jiyu.mediacenter</string>
+    <string name="custom_url_scheme">app.jiyu.mediacenter</string>
+    <string name="media_route_menu_title">Cast</string>
+</resources>

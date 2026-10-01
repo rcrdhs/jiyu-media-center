@@ -10,6 +10,7 @@
 
 import { cleanPosterSearchTitle } from './posterFallback'
 import { normalizeShowKey, parseEpisodeKey } from './torrents'
+import { getLearnedSkipInterval } from './skipLearning'
 
 /** Minimum OP start time to treat the prologue as a cold open (auto-skip OP). */
 export const COLD_OPEN_MIN_SECONDS = 10
@@ -32,7 +33,7 @@ export interface AnimeSkipInterval {
   startTime: number
   endTime: number
   skipType: 'op' | 'ed' | 'recap' | string
-  source: 'aniskip' | 'default'
+  source: 'aniskip' | 'learned' | 'default'
 }
 
 function loadJsonMap(key: string): Record<string, unknown> {
@@ -154,14 +155,15 @@ async function fetchAniSkipIntervals(
         const start = Number(row.interval?.startTime)
         const end = Number(row.interval?.endTime)
         if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start + 3) return null
-        return {
+        const interval: AnimeSkipInterval = {
           startTime: start,
           endTime: end,
           skipType: row.skipType || 'op',
-          source: 'aniskip' as const,
+          source: 'aniskip',
         }
+        return interval
       })
-      .filter((row): row is AnimeSkipInterval => Boolean(row))
+      .filter((row): row is AnimeSkipInterval => row != null)
       .sort((a, b) => a.startTime - b.startTime)
 
     if (intervals.length > 0) {
@@ -226,6 +228,12 @@ export async function resolveAnimeSkipIntervals(options: {
     }
   }
 
+  // Check if user has established a learned intro skip for this show
+  const learned = getLearnedSkipInterval(search)
+  if (learned) {
+    return [learned]
+  }
+
   return [defaultOpeningInterval()]
 }
 
@@ -249,6 +257,7 @@ export function activeSkipInterval(
 export function skipButtonLabel(interval: AnimeSkipInterval): string {
   if (interval.skipType === 'ed') return 'Skip Ending'
   if (interval.skipType === 'recap') return 'Skip Recap'
+  if (interval.source === 'learned') return 'Skip Intro (Learned)'
   return 'Skip Intro'
 }
 

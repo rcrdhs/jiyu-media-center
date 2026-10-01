@@ -1,0 +1,39 @@
+<!DOCTYPE html><html lang="en"><head><meta charSet="utf-8"/><meta name="description" content="Your Personal Streaming Oasis"/><meta name="keywords" content="movie, streaming, tv, rive, stream. movie app, tv shows, movie download"/><meta name="google-site-verification" content="J0QUeScQSxufPJqGTaszgnI35U2jN98vVWSOkVR4HrI"/><link rel="manifest" href="manifest.json"/><meta name="viewport" content="width=device-width, initial-scale=1"/><meta name="apple-mobile-web-app-capable" content="yes"/><meta name="apple-mobile-web-app-status-bar-style" content="default"/><meta name="apple-mobile-web-app-title" content="Rive"/><link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192x192.png"/><link rel="apple-touch-icon" href="/icons/icon-192x192.png"/><meta name="mobile-web-app-capable" content="yes"/><meta name="msapplication-tap-highlight" content="no"/><link rel="shortcut icon" href="/images/logo512.png"/><link rel="apple-touch-startup-image" href="/images/logo512.svg"/><meta property="og:title" content="Rive"/><meta property="og:description" content="Your Personal Streaming Oasis"/><meta property="og:image" content="https://www.rivestream.app/images/MetaImage.jpg"/><meta property="og:url" content="https://www.rivestream.app"/><meta property="og:type" content="website"/><meta property="og:site_name" content="Rive"/><meta name="twitter:card" content="https://www.rivestream.app/images/MetaImage.jpg"/><meta property="twitter:domain" content="rivestream.app"/><meta property="twitter:url" content="https://www.rivestream.app"/><meta name="twitter:title" content="Rive"/><meta name="twitter:description" content="Your Personal Streaming Oasis"/><meta name="twitter:image" content="https://www.rivestream.app/images/MetaImage.jpg"/><meta name="theme-color" content="undefined"/><meta name="msapplication-TileColor" content="undefined"/><title>Rive | Watch<!-- --> <!-- --> </title><meta name="next-head-count" content="30"/><script>
+              (function() {
+                try {
+                  var themes = [
+                    "dark", "light", "charcoal", "evergreen", "midnight", 
+                    "oyster", "aurora", "obsidian-luxury", "arctic-dawn", 
+                    "nordic-frost", "slate-corporate", "royal-amethyst", 
+                    "warm-terracotta", "monochrome-pro", "enterprise-light"
+                  ];
+                  var settingsStr = localStorage.getItem("RiveStreamSettings");
+                  var activeTheme = "dark";
+                  if (settingsStr) {
+                    var settings = JSON.parse(settingsStr);
+                    if (settings && settings.mode) {
+                      if (settings.mode === "system") {
+                        var isDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+                        activeTheme = isDark ? "dark" : "light";
+                      } else {
+                        activeTheme = settings.mode;
+                      }
+                    }
+                  } else {
+                    var isDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+                    activeTheme = isDark ? "dark" : "light";
+                  }
+                  
+                  var docEl = document.documentElement;
+                  themes.forEach(function(t) {
+                    if (t === activeTheme) {
+                      docEl.classList.add(t);
+                    } else {
+                      docEl.classList.remove(t);
+                    }
+                  });
+                } catch (e) {
+                  console.error("Theme script error:", e);
+                }
+              })();
+            </script><link rel="preload" href="/_next/static/css/e47fe734adeade36.css" as="style"/><link rel="stylesheet" href="/_next/static/css/e47fe734adeade36.css" data-n-g=""/><link rel="preload" href="/_next/static/css/046ca342ecc41cf5.css" as="style"/><link rel="stylesheet" href="/_next/static/css/046ca342ecc41cf5.css" data-n-p=""/><link rel="preload" href="/_next/static/css/5ac4c7a48f1ad32a.css" as="style"/><link rel="stylesheet" href="/_next/static/css/5ac4c7a48f1ad32a.css" data-n-p=""/><link rel="preload" href="/_next/static/css/a75b1e8d13fd3f1c.css" as="style"/><link rel="stylesheet" href="/_next/static/css/a75b1e8d13fd3f1c.css" data-n-p=""/><noscript data-n-css=""></noscript><script defer="" nomodule="" src="/_next/static/chunks/polyfills-42372ed130431b0a.js"></script><script src="/_next/static/chunks/webpack-18dc309a063420a4.js" defer=""></script><script src="/_next/static/chunks/framework-945b357d4a851f4b.js" defer=""></script><script src="/_next/static/chunks/main-39e50773f699b0d5.js" defer=""></script><script src="/_next/static/chunks/pages/_app-6dae48d5f2f56a36.js" defer=""></script><script src="/_next/static/chunks/3a17f596-6fe8ea4c98328343.js" defer=""></script><script src="/_next/static/chunks/2e3a845b-4202a7c39dffe10c.js" defer=""></script><script src="/_next/static/chunks/d9

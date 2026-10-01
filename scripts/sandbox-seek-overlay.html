@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Jiyu seek overlay sandbox</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: Manrope, Segoe UI, system-ui, sans-serif;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: #0b0d10;
+        color: #f2f4f7;
+        display: grid;
+        place-items: center;
+        padding: 1.5rem;
+      }
+      .wrap {
+        width: min(960px, 100%);
+        display: grid;
+        gap: 0.85rem;
+      }
+      h1 {
+        margin: 0;
+        font-size: 1.15rem;
+        font-weight: 700;
+      }
+      p {
+        margin: 0;
+        color: #9aa3ad;
+        font-size: 0.92rem;
+      }
+      .stage {
+        position: relative;
+        aspect-ratio: 16 / 9;
+        background: #000;
+        border-radius: 14px;
+        overflow: hidden;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+      }
+      video {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        background: #000;
+        display: block;
+      }
+      .seek-skip-overlay {
+        position: absolute;
+        inset: 0;
+        z-index: 5;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 clamp(1.25rem, 8%, 4.5rem);
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity 160ms ease;
+      }
+      .stage:hover .seek-skip-overlay,
+      .seek-skip-overlay.is-visible {
+        opacity: 1;
+      }
+      .seek-skip-btn {
+        pointer-events: auto;
+        width: 3.4rem;
+        height: 3.4rem;
+        border-radius: 999px;
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        background: rgba(8, 10, 14, 0.88);
+        color: #f4f4f5;
+        display: grid;
+        place-items: center;
+        cursor: pointer;
+        box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+        transition: transform 140ms ease, background 140ms ease, border-color 140ms ease;
+      }
+      .seek-skip-btn:hover {
+        transform: scale(1.06);
+        background: rgba(16, 20, 26, 0.96);
+        border-color: rgba(240, 180, 41, 0.45);
+      }
+      .seek-skip-btn:active {
+        transform: scale(0.97);
+      }
+      .seek-skip-btn svg {
+        width: 1.45rem;
+        height: 1.45rem;
+        display: block;
+      }
+      .seek-skip-btn .badge {
+        position: absolute;
+        font-size: 0.58rem;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        opacity: 0.9;
+      }
+      .seek-skip-btn {
+        position: relative;
+      }
+      .seek-skip-btn .badge {
+        bottom: 0.42rem;
+      }
+      .clock {
+        position: absolute;
+        right: 0.85rem;
+        bottom: 0.55rem;
+        z-index: 4;
+        padding: 0.28rem 0.55rem;
+        border-radius: 0.4rem;
+        background: rgba(0, 0, 0, 0.72);
+        font-variant-numeric: tabular-nums;
+        font-size: 0.92rem;
+        pointer-events: none;
+      }
+      .log {
+        min-height: 1.4rem;
+        color: #f0b429;
+        font-size: 0.88rem;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>Seek overlay sandbox</h1>
+      <p>Hover the stage — opaque undo/redo buttons seek ±10s. Click them to verify.</p>
+      <div class="stage" id="stage">
+        <video
+          id="video"
+          src="https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
+          muted
+          playsinline
+          autoplay
+        ></video>
+        <div class="seek-skip-overlay" id="overlay" aria-hidden="true">
+          <button type="button" class="seek-skip-btn" id="back" aria-label="Rewind 10 seconds" title="−10s">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path
+                d="M9.5 7.5H5.5V3.5"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+              <path
+                d="M5.7 7.6A8 8 0 1 1 5 12"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+              />
+            </svg>
+            <span class="badge">10</span>
+          </button>
+          <button type="button" class="seek-skip-btn" id="fwd" aria-label="Forward 10 seconds" title="+10s">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path
+                d="M14.5 7.5H18.5V3.5"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+              <path
+                d="M18.3 7.6A8 8 0 1 0 19 12"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+              />
+            </svg>
+            <span class="badge">10</span>
+          </button>
+        </div>
+        <div class="clock" id="clock">0:00 / 0:00</div>
+      </div>
+      <div class="log" id="log">Waiting for hover / click…</div>
+    </div>
+    <script>
+      const video = document.getElementById('video')
+      const clock = document.getElementById('clock')
+      const log = document.getElementById('log')
+      const overlay = document.getElementById('overlay')
+
+      function fmt(sec) {
+        const s = Math.max(0, Math.floor(sec || 0))
+        const m = Math.floor(s / 60)
+        const r = s % 60
+        return m + ':' + String(r).padStart(2, '0')
+      }
+
+      function tick() {
+        clock.textContent = fmt(video.currentTime) + ' / ' + fmt(video.duration)
+      }
+
+      function seekBy(delta) {
+        if (!Number.isFinite(video.duration) || video.duration === Infinity) {
+          log.textContent = 'Live — seek unavailable'
+          return
+        }
+        const before = video.currentTime
+        video.currentTime = Math.min(video.duration, Math.max(0, before + delta))
+        log.textContent =
+          (delta < 0 ? 'Rewound' : 'Skipped') +
+          ' 10s · ' +
+          fmt(before) +
+          ' → ' +
+          fmt(video.currentTime)
+        tick()
+      }
+
+      document.getElementById('back').addEventListener('click', (e) => {
+        e.stopPropagation()
+        seekBy(-10)
+      })
+      document.getElementById('fwd').addEventListener('click', (e) => {
+        e.stopPropagation()
+        seekBy(10)
+      })
+      video.addEventListener('timeupdate', tick)
+      video.addEventListener('loadedmetadata', tick)
+
+      // Expose for automated checks
+      window.__seekSandbox = {
+        seekBy,
+        getTime: () => video.currentTime,
+        getOverlayOpacity: () => getComputedStyle(overlay).opacity,
+      }
+    </script>
+  </body>
+</html>

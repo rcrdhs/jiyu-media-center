@@ -17,6 +17,17 @@ function isTorrentItem(item: StreamItem): boolean {
   return item.transport === 'torrent' || item.sourceKind === 'torrent'
 }
 
+/** Torrent + website catalog rows keep stable ids — never title-merge them. */
+function isStableCatalogItem(item: StreamItem): boolean {
+  return (
+    isTorrentItem(item) ||
+    Boolean(item.torrentSourceId) ||
+    Boolean(item.streamedMatchId) ||
+    item.id.startsWith('streamed-') ||
+    item.id.startsWith('ppvst-')
+  )
+}
+
 function normalizeUrlKey(url: string): string {
   // Magnet links have no hostname/pathname — key them by infohash so
   // thousands of torrent entries don't collapse into one "duplicate".
@@ -64,8 +75,8 @@ function scoreItem(item: StreamItem): number {
 export function dedupeStreams(items: StreamItem[]): StreamItem[] {
   const byUrl = new Map<string, StreamItem>()
   for (const item of items) {
-    // Torrent catalog ids are already unique per listing; don't URL-collapse them.
-    const uk = isTorrentItem(item) ? `id:${item.id}` : normalizeUrlKey(item.url)
+    // Catalog ids are already unique per listing; don't URL-collapse them.
+    const uk = isStableCatalogItem(item) ? `id:${item.id}` : normalizeUrlKey(item.url)
     const prev = byUrl.get(uk)
     if (!prev || scoreItem(item) > scoreItem(prev)) byUrl.set(uk, item)
   }
@@ -73,7 +84,7 @@ export function dedupeStreams(items: StreamItem[]): StreamItem[] {
   const byTitle = new Map<string, StreamItem>()
   for (const item of byUrl.values()) {
     const titleKey = normalizeTitleKey(item.title) || normalizeUrlKey(item.url)
-    const tk = isTorrentItem(item) ? `torrent:${titleKey}` : `stream:${titleKey}`
+    const tk = isStableCatalogItem(item) ? `catalog:${item.id}` : `stream:${titleKey}`
     const prev = byTitle.get(tk)
     if (!prev || scoreItem(item) > scoreItem(prev)) byTitle.set(tk, item)
   }

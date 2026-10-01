@@ -1,4 +1,10 @@
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore, type FormEvent } from 'react'
+import {
+  isWebsiteAdminUnlocked,
+  lockWebsiteAdmin,
+  subscribeWebsiteAdmin,
+  unlockWebsiteAdmin,
+} from '../lib/websiteLock'
 import { useCatalog } from '../context/CatalogContext'
 import { usePlayback } from '../context/PlaybackContext'
 import {
@@ -14,6 +20,7 @@ import {
   buildSearchUrl,
   formatSize,
   getConnectionDownlinkMbps,
+  isShippedTorrentSource,
   isTorrentInput,
   labelQuality,
   loadTorrentSources,
@@ -31,6 +38,12 @@ import {
 } from '../lib/torrents'
 import { guessVodCategory } from '../lib/continueWatching'
 import { getViewingQuality, resolveRequestedQuality } from '../lib/viewingQuality'
+import {
+  isTorrentPlaybackAvailable,
+  torrentStatus,
+  torrentStop,
+  torrentStream,
+} from '../lib/torrentBridge'
 import type { StreamItem, StreamPlaylistItem, TorrentInfo } from '../types'
 
 type TorrentsPageProps = {
@@ -41,16 +54,21 @@ type TorrentsPageProps = {
 export function TorrentsPage({ embedded = false }: TorrentsPageProps) {
   const { play } = usePlayback()
   const { syncTorrentWebsite, reloadTorrentCatalog, torrentCount } = useCatalog()
+  const compactChrome =
+    typeof document !== 'undefined' && document.documentElement.classList.contains('is-android')
   const torrentSyncStatus = useSyncExternalStore(
     subscribeTorrentSyncMessage,
     getTorrentSyncStatus,
     getTorrentSyncStatus,
   )
   const torrentSyncMessage = torrentSyncStatus.message
-  const desktop = Boolean(window.signalDesktop?.torrentStream)
+  const torrentReady = isTorrentPlaybackAvailable()
   const returnTo = embedded ? '/library' : '/torrents'
 
   const [sources, setSources] = useState<TorrentSource[]>(loadTorrentSources)
+  const [websitesUnlocked, setWebsitesUnlocked] = useState(isWebsiteAdminUnlocked)
+  const [passphrase, setPassphrase] = useState('')
+  const [passphraseError, setPassphraseError] = useState<string | null>(null)
   const [draftUrl, setDraftUrl] = useState('')
   const [syncingId, setSyncingId] = useState<string | null>(null)
 
@@ -63,6 +81,18 @@ export function TorrentsPage({ embedded = false }: TorrentsPageProps) {
       cancelled = true
     }
   }, [])
+
+  useEffect(() => subscribeWebsiteAdmin(() => setWebsitesUnlocked(isWebsiteAdminUnlocked())), [])
+
+  function onUnlockWebsites(event: FormEvent) {
+    event.preventDefault()
+    if (unlockWebsiteAdmin(passphrase)) {
+      setPassphrase('')
+      setPassphraseError(null)
+      return
+    }
+    setPassphraseError('Wrong passphrase')
+  }
 
   const [browsingId, setBrowsingId] = useState<string | null>(null)
   const [activeSourceId, setActiveSourceId] = useState<string | null>(null)
@@ -201,7 +231,7 @@ export function TorrentsPage({ embedded = false }: TorrentsPageProps) {
       return
     }
     const outcome = await browsePage(link.url, source)
-    if (!outcome || !window.signalDesktop?.torrentStream) return
+    if (!outcome || !torrentReady) return
     const preference = getViewingQuality()
     const downlink = getConnectionDownlinkMbps()
     const requestedQuality = resolveRequestedQuality(preference, downlink)
@@ -233,10 +263,10 @@ export function TorrentsPage({ embedded = false }: TorrentsPageProps) {
   }
 
   const refreshActive = useCallback(async () => {
-    if (!window.signalDesktop?.torrentStatus) return
-    const status = await window.signalDesktop.torrentStatus()
+    if (!torrentReady) return
+    const status = await torrentStatus()
     if (status.ok) setActive(status.torrents)
-  }, [])
+  }, [torrentReady])
 
   useEffect(() => {
     void refreshActive()
@@ -249,12 +279,12 @@ export function TorrentsPage({ embedded = false }: TorrentsPageProps) {
     title: string,
     options?: { episodePlaylist?: StreamPlaylistItem[]; startIndex?: number },
   ) {
-    if (!window.signalDesktop?.torrentStream || preparing) return
+    if (!torrentReady || preparing) return
     setStreamError(null)
     setPreparing(uri)
     try {
-      await window.signalDesktop.torrentStop?.()
-      const result = await window.signalDesktop.torrentStream(uri)
+      await torrentStop()
+      const result = await torrentStream(uri)
       if (!result.ok || !result.url) {
         setStreamError(result.error || 'Could not start playback')
         return
@@ -329,7 +359,7 @@ export function TorrentsPage({ embedded = false }: TorrentsPageProps) {
   }
 
   async function stopAll() {
-    await window.signalDesktop?.torrentStop?.()
+    await torrentStop()
     void refreshActive()
   }
 
@@ -352,28 +382,39 @@ export function TorrentsPage({ embedded = false }: TorrentsPageProps) {
     <>
       {embedded ? (
         <header className="page-header library-websites-header" id="websites">
-          <h2>Websites</h2>
-          <p className="lede">
-            Add catalog sites to browse and fill Movies, TV Series, and Anime. Only use sites and
-            content you have the right to access.
-            {torrentCount > 0 && (
-              <>
-                {' '}
-                <span className="count-chip">
-                  {torrentCount.toLocaleString()} title{torrentCount === 1 ? '' : 's'} in catalog
-                </span>
-              </>
+          <h2>
+            Websites
+            {websitesUnlocked && torrentCount > 0 && (
+              <span className="count-chip" style={{ marginLeft: '0.45rem' }}>
+                {torrentCount.toLocaleString()}
+              </span>
             )}
-          </p>
+          </h2>
+          {!compactChrome && (
+            <p className="lede">
+              {websitesUnlocked
+                ? 'Add catalog sites to browse and fill Movies, TV Series, and Anime. Only use sites and content you have the right to access.'
+                : 'Website list and updates are locked. IPTV links stay on this page.'}
+              {websitesUnlocked && torrentCount > 0 && (
+                <>
+                  {' '}
+                  <span className="count-chip">
+                    {torrentCount.toLocaleString()} title{torrentCount === 1 ? '' : 's'} in catalog
+                  </span>
+                </>
+              )}
+            </p>
+          )}
         </header>
       ) : (
         <header className="page-header">
           <p className="eyebrow">Sources</p>
           <h1>Websites</h1>
           <p className="lede">
-            Add catalog sites to browse and fill Movies, TV Series, and Anime. Only use sites and
-            content you have the right to access.
-            {torrentCount > 0 && (
+            {websitesUnlocked
+              ? 'Add catalog sites to browse and fill Movies, TV Series, and Anime. Only use sites and content you have the right to access.'
+              : 'Website list and updates are locked.'}
+            {websitesUnlocked && torrentCount > 0 && (
               <>
                 {' '}
                 <span className="count-chip">
@@ -387,14 +428,46 @@ export function TorrentsPage({ embedded = false }: TorrentsPageProps) {
     </>
   )
 
+  if (!websitesUnlocked) {
+    return (
+      <div className={embedded ? 'library-websites torrents-page' : 'page torrents-page'}>
+        {heading}
+        <form className="guide-toolbar" onSubmit={onUnlockWebsites}>
+          <input
+            className="search-input guide-search"
+            type="password"
+            placeholder="Passphrase"
+            value={passphrase}
+            onChange={(e) => {
+              setPassphrase(e.target.value)
+              if (passphraseError) setPassphraseError(null)
+            }}
+            aria-label="Website passphrase"
+            autoComplete="off"
+            spellCheck={false}
+          />
+          <button type="submit" className="primary-btn guide-toolbar-btn" disabled={!passphrase.trim()}>
+            Unlock
+          </button>
+        </form>
+        {passphraseError && <p className="toast toast-error">{passphraseError}</p>}
+      </div>
+    )
+  }
+
   return (
     <div className={embedded ? 'library-websites torrents-page' : 'page torrents-page'}>
       {heading}
 
-      {!desktop && (
+      <div className="guide-toolbar" style={{ marginBottom: '0.75rem' }}>
+        <button type="button" className="ghost-btn guide-toolbar-btn" onClick={() => lockWebsiteAdmin()}>
+          Lock websites
+        </button>
+      </div>
+
+      {!torrentReady && (
         <p className="toast toast-error">
-          Website playback needs the desktop app — quit and relaunch Jiyu with{' '}
-          <code>npm run dev:desktop</code>.
+          Torrent playback needs the Jiyu desktop app or the Android torrent engine.
         </p>
       )}
 
@@ -450,7 +523,7 @@ export function TorrentsPage({ embedded = false }: TorrentsPageProps) {
                     disabled={browsingId === s.id}
                     onClick={() => void browseSource(s)}
                   >
-                    {browsingId === s.id ? 'Loading…' : 'Browse'}
+                    {browsingId === s.id ? '…' : 'Browse'}
                   </button>
                   <button
                     type="button"
@@ -461,32 +534,44 @@ export function TorrentsPage({ embedded = false }: TorrentsPageProps) {
                       void syncTorrentWebsite(s.id).finally(() => setSyncingId(null))
                     }}
                   >
-                    {syncingId === s.id ? 'Syncing…' : 'Sync to shelves'}
+                    {syncingId === s.id ? '…' : compactChrome ? 'Sync' : 'Sync to shelves'}
                   </button>
                   <button
                     type="button"
                     className="ghost-btn control-btn"
                     onClick={() => toggleSourceShelfVisibility(s.id)}
                   >
-                    {s.hiddenFromShelves ? 'Show on shelves' : 'Hide from shelves'}
+                    {s.hiddenFromShelves
+                      ? compactChrome
+                        ? 'Show'
+                        : 'Show on shelves'
+                      : compactChrome
+                        ? 'Hide'
+                        : 'Hide from shelves'}
                   </button>
-                  <button
-                    type="button"
-                    className="text-btn"
-                    onClick={() => {
-                      persistSources(sources.filter((x) => x.id !== s.id))
-                      void deleteTorrentItemsForSource(s.id).then(() => reloadTorrentCatalog())
-                      if (activeSourceId === s.id) {
-                        setActiveSourceId(null)
-                        setResults([])
-                        setPageLinks([])
-                        setPageHistory([])
-                        setScrapeError(null)
-                      }
-                    }}
-                  >
-                    Remove
-                  </button>
+                  {isShippedTorrentSource(s) ? (
+                    <span className="torrent-source-badge" title="Included with Jiyu">
+                      Built-in
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      className="text-btn"
+                      onClick={() => {
+                        persistSources(sources.filter((x) => x.id !== s.id))
+                        void deleteTorrentItemsForSource(s.id).then(() => reloadTorrentCatalog())
+                        if (activeSourceId === s.id) {
+                          setActiveSourceId(null)
+                          setResults([])
+                          setPageLinks([])
+                          setPageHistory([])
+                          setScrapeError(null)
+                        }
+                      }}
+                    >
+                      Remove
+                    </button>
+                  )}
                 </div>
               </li>
             ))}
@@ -500,7 +585,7 @@ export function TorrentsPage({ embedded = false }: TorrentsPageProps) {
       {autoInfo && <p className="fine-print">{autoInfo}</p>}
       {preparing && (
         <p className="fine-print">
-          Connecting to peers and fetching metadata — this can take up to a minute…
+          Fetching sources…
         </p>
       )}
 
@@ -569,7 +654,7 @@ export function TorrentsPage({ embedded = false }: TorrentsPageProps) {
                 <button
                   type="button"
                   className="primary-btn"
-                  disabled={!desktop || Boolean(preparing)}
+                  disabled={!torrentReady || Boolean(preparing)}
                   onClick={() => {
                     setAutoInfo(null)
                     const preference = getViewingQuality()
@@ -675,7 +760,7 @@ export function TorrentsPage({ embedded = false }: TorrentsPageProps) {
           <button
             type="submit"
             className="primary-btn guide-toolbar-btn"
-            disabled={!desktop || Boolean(preparing) || !torrentDraft.trim()}
+            disabled={!torrentReady || Boolean(preparing) || !torrentDraft.trim()}
           >
             {isTorrentInput(torrentDraft.trim()) ? 'Play' : 'Open page'}
           </button>

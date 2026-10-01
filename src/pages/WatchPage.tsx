@@ -20,6 +20,9 @@ import {
   isShowBrowseItem,
   isM2BoxCatalogItem,
   isNetMirrorCatalogItem,
+  isYmoviesCatalogItem,
+  isCinetaroCatalogItem,
+  isTmdbTvCatalogItem,
   parseEpisodeKey,
   pickBestEpisodeIndex,
   pickBestStream,
@@ -28,12 +31,85 @@ import {
   torrentUrisForEpisodeWithTorrentio,
   type EpisodeChoice,
 } from '../lib/torrents'
+import { cinetaroCinextreamMovieEmbedUrl } from '../lib/cinetaro'
 import { resolveM2BoxPlay } from '../lib/m2box'
 import { TORRENTIO_TV_TRIAL } from '../lib/torrentio'
 import { getViewingQuality, resolveRequestedQuality } from '../lib/viewingQuality'
-import { isWebBrowserOnlyUrl } from '../lib/webBrowser'
+import { isStreamedCatalogItem, resolveStreamedPlay } from '../lib/streamed'
+import {
+  isLivextvReplayCatalogItem,
+  resolveLivextvReplayPlay,
+} from '../lib/livextvReplays'
+import { isWebBrowserOnlyUrl, isYouTubeUrl } from '../lib/webBrowser'
 import { isVimeoLiveEventUrl, resolveVimeoLiveHls } from '../lib/vimeoLive'
+import { resolveYouTubeLivePlay } from '../lib/youtubeLive'
+import {
+  isTorrentPlaybackAvailable,
+  torrentStream,
+} from '../lib/torrentBridge'
+import {
+  androidBrowserHide,
+  androidBrowserMultiHideAll,
+  isAndroidInAppBrowser,
+} from '../lib/androidBrowser'
 import type { StreamItem, StreamPlaylistItem, TorrentStreamResult } from '../types'
+
+function clearWebSurfacesForWatch() {
+  void window.signalDesktop?.browserMultiHideAll?.({ blank: true })
+  void window.signalDesktop?.browserAdDockClose?.()
+  void window.signalDesktop?.browserHide?.({ blank: true })
+  if (isAndroidInAppBrowser()) {
+    void androidBrowserMultiHideAll({ blank: true })
+    void androidBrowserHide({ blank: true, pause: true })
+  }
+  window.dispatchEvent(new Event('jiyu:clear-web-surfaces'))
+}
+
+/** Series / anime / show-shelf kids — attach a multi-episode playlist on continue. */
+function wantsShowEpisodePlaylist(item: StreamItem): boolean {
+  if (isShowBrowseItem(item)) return true
+  if (item.category === 'series' || item.category === 'anime') return true
+  if (item.category === 'kids') {
+    return Boolean(
+      item.tags?.some((t) => /full-shows|kids-shows|kids.?show/i.test(t)),
+    )
+  }
+  return false
+}
+
+function isTorrentPlaybackItem(item: StreamItem): boolean {
+  if (item.transport === 'torrent' || item.sourceKind === 'torrent') return true
+  if (item.torrentUri && isTorrentInput(item.torrentUri)) return true
+  return false
+}
+
+/** Build player playlist rows; activeIndex gets the live stream URL when known. */
+function episodePlaylistFromChoices(
+  episodes: EpisodeChoice[],
+  activeIndex: number,
+  active?: { url?: string; torrentUri?: string; subtitleUrl?: string; subtitleKind?: 'file' | 'embedded'; fileName?: string },
+): StreamPlaylistItem[] {
+  return episodes.map((ep, i) =>
+    i === activeIndex
+      ? {
+          title: ep.title,
+          url: active?.url || '',
+          torrentUri: active?.torrentUri || ep.torrentUri,
+          torrentAlternates: ep.alternates,
+          episodeKey: ep.key,
+          subtitleUrl: active?.subtitleUrl,
+          subtitleKind: active?.subtitleKind,
+          fileName: active?.fileName,
+        }
+      : {
+          title: ep.title,
+          url: '',
+          torrentUri: ep.torrentUri,
+          torrentAlternates: ep.alternates,
+          episodeKey: ep.key,
+        },
+  )
+}
 
 /** Prefer the saved continue episode over “first episode” / URI heuristics. */
 function resolveContinueEpisodeIndex(
@@ -61,6 +137,13 @@ function resolveContinueEpisodeIndex(
   if (saved.torrentUri) {
     const byUri = episodes.findIndex((ep) => ep.torrentUri === saved.torrentUri)
     if (byUri >= 0) return byUri
+  }
+
+  // Title on the continue card is often "Show · S01E02".
+  const titleKey = parseEpisodeKey(saved.title)
+  if (titleKey) {
+    const byKey = episodes.findIndex((ep) => ep.key === titleKey)
+    if (byKey >= 0) return byKey
   }
 
   return Math.min(Math.max(0, saved.playlistIndex), max)
@@ -111,6 +194,10 @@ export function WatchPage() {
   // Multi-view or Back→PiP re-runs start() and forceFull undoes both.
   const multiviewGuardRef = useRef({ awaitingAdd, slotsLen: slots.length, mode })
   multiviewGuardRef.current = { awaitingAdd, slotsLen: slots.length, mode }
+  // Catalog sync replaces `items` often. Restarting start() cancels the torrent
+  // before play() and leaves this screen on "Getting episode ready…".
+  const itemsRef = useRef(items)
+  itemsRef.current = items
   const playingIdRef = useRef(playing?.id)
   playingIdRef.current = playing?.id
 
@@ -122,10 +209,101 @@ export function WatchPage() {
     async function start() {
       setError(null)
 
-      // Already owning this title (full / PiP / multi) — do not call play() again.
-      if (playingIdRef.current === item!.id) return
+      // Cinetaro TV catalog pages are a Cloudflare wall — episode play uses ShowPage.
+      // Cinetaro *movies* (shelf search fallback) go straight to the cinextream embed.
+      if (isCinetaroCatalogItem(item!) && item!.category === 'movies') {
+        const tmdbId = String(item!.cinetaroTmdbId || '').trim()
+        const playUrl =
+          (item!.url && /cinextream\.cc/i.test(item!.url) ? item!.url : '') ||
+          (tmdbId ? cinetaroCinextreamMovieEmbedUrl(tmdbId) : '') ||
+          item!.url
+        if (!playUrl) {
+          setError('No Cinetaro stream for this movie.')
+          return
+        }
+        clearWebSurfacesForWatch()
+        navigate(`/web?url=${encodeURIComponent(playUrl)}`, {
+          replace: true,
+          state: {
+            from: returnTo || '/section/movies',
+            playerMode: 'embed',
+            pipOnBack: true,
+            continueWatch: {
+              id: item!.id,
+              title: item!.title,
+              poster: item!.poster,
+              category: item!.category,
+              playlistIndex: 0,
+              detailUrl: item!.detailUrl || item!.url,
+              playUrl,
+              transport: item!.transport,
+              sourceKind: item!.sourceKind,
+              source: item!.source,
+            },
+          },
+        })
+        return
+      }
+      if (isCinetaroCatalogItem(item!)) {
+        navigate(`/show/${item!.id}`, { replace: true, state: { from: returnTo } })
+        return
+      }
 
-      // M2Box: episode list first; resume continues native play. Browser only if resolve fails.
+      // Already owning this title — for native players, skip. For web embeds,
+      // still reopen /web (multi-view recovery / same-card re-click).
+      // LiveXTV / Streamed need resolve — don't reopen the raw catalog URL.
+      if (playingIdRef.current === item!.id) {
+        const guard = multiviewGuardRef.current
+        if (guard.mode === 'multi' || guard.awaitingAdd) return
+        if (
+          isLivextvReplayCatalogItem(item!) ||
+          isStreamedCatalogItem(item!) ||
+          (isYouTubeUrl(item!.url) &&
+            (item!.tags?.includes('local') || item!.id?.startsWith('local-')))
+        ) {
+          // Fall through to resolve below.
+        } else if (isWebBrowserOnlyUrl(item!.url)) {
+          clearWebSurfacesForWatch()
+          const playUrl = item!.url
+          const activeUrl =
+            playing?.url && isWebBrowserOnlyUrl(playing.url) ? playing.url : playUrl
+          navigate(`/web?url=${encodeURIComponent(activeUrl)}`, {
+            replace: true,
+            state: {
+              from: returnTo || '/section/sports',
+              playerMode: 'embed',
+              pipOnBack: true,
+              continueWatch: {
+                id: item!.id,
+                title: item!.title,
+                poster: item!.poster,
+                category: item!.category,
+                playlistIndex: 0,
+                detailUrl: item!.detailUrl || item!.url,
+                playUrl: activeUrl,
+                transport: item!.transport,
+                sourceKind: item!.sourceKind,
+                source: item!.source,
+              },
+            },
+          })
+          return
+        } else {
+          return
+        }
+      }
+
+      // Tear down leftover multi-view web tiles before a fresh single watch —
+      // never while adding to an existing multi-view session.
+      {
+        const guard = multiviewGuardRef.current
+        const keepOthers =
+          guard.awaitingAdd || guard.slotsLen > 1 || guard.mode === 'multi'
+        if (!keepOthers) clearWebSurfacesForWatch()
+      }
+
+      // Series / anime / M2Box: episode list first; resume continues with full playlist
+      // so Next / Previous / Episodes still work (same as ShowPage play).
       if (isM2BoxCatalogItem(item!)) {
         const saved = getContinueEntry(item!.id)
         const resuming = Boolean(saved && saved.currentTime >= 5)
@@ -134,16 +312,31 @@ export function WatchPage() {
           return
         }
         if (!window.signalDesktop?.fetchJsonGet && !window.signalDesktop?.fetchHtml) {
-          navigate(`/web?url=${encodeURIComponent(item!.detailUrl || item!.url)}`, { replace: true })
-          return
+          try {
+            const { isNativeHttpPlatform } = await import('../lib/nativeHttp')
+            if (!isNativeHttpPlatform()) {
+              navigate(`/web?url=${encodeURIComponent(item!.detailUrl || item!.url)}`, {
+                replace: true,
+              })
+              return
+            }
+          } catch {
+            navigate(`/web?url=${encodeURIComponent(item!.detailUrl || item!.url)}`, {
+              replace: true,
+            })
+            return
+          }
         }
         const resumeTitle = saved?.episodeTitle || saved?.title || item!.title
         const { season, episode } = m2boxSeasonEpisode(resumeTitle)
-        const resolved = await resolveM2BoxPlay(item!.detailUrl || item!.url, {
-          subjectId: item!.m2boxSubjectId,
-          season,
-          episode,
-        })
+        const [resolved, episodeList] = await Promise.all([
+          resolveM2BoxPlay(item!.detailUrl || item!.url, {
+            subjectId: item!.m2boxSubjectId,
+            season,
+            episode,
+          }),
+          resolveShowEpisodes(item!, itemsRef.current),
+        ])
         if (cancelled) return
         if (!resolved.ok) {
           navigate(`/show/${item!.id}`, { replace: true, state: { from: returnTo } })
@@ -157,30 +350,284 @@ export function WatchPage() {
         }
         const showName = cleanShowDisplayTitle(item!.title) || item!.title
         const epLabel = `S${String(resolved.season).padStart(2, '0')}E${String(resolved.episode).padStart(2, '0')}`
+        const episodes = episodeList.episodes
+        const resumeKey = epLabel
+        const resumeIndex = Math.max(
+          0,
+          episodes.findIndex((ep) => ep.key === resumeKey),
+        )
+        const playlist: StreamPlaylistItem[] =
+          episodes.length > 0
+            ? episodes.map((ep, i) =>
+                i === resumeIndex
+                  ? {
+                      title: ep.title,
+                      url: resolved.url,
+                      episodeKey: ep.key,
+                    }
+                  : {
+                      title: ep.title,
+                      url: '',
+                      episodeKey: ep.key,
+                    },
+              )
+            : [{ title: epLabel, url: resolved.url, episodeKey: resumeKey }]
         play(
           {
             ...item!,
             title: `${showName} · ${epLabel}`,
             url: resolved.url,
             httpReferrer: resolved.referer,
+            playlist,
             transport: 'direct',
             tags: [...new Set([...(item!.tags ?? []), 'm2box', resolved.format])],
             runtimeSeconds: resolved.durationSeconds ?? item!.runtimeSeconds,
             m2boxSubjectId: resolved.subjectId || item!.m2boxSubjectId,
           },
-          { forceFull: true, returnTo },
+          { forceFull: true, returnTo: returnTo ?? `/show/${item!.id}` },
         )
         return
       }
 
-      // NetMirror: episode list first; play opens Web Browser per episode.
-      if (isNetMirrorCatalogItem(item!)) {
+      // NetMirror / YMovies / TMDB: episode list first; play opens Web Browser or native HLS.
+      if (
+        isNetMirrorCatalogItem(item!) ||
+        isYmoviesCatalogItem(item!) ||
+        isTmdbTvCatalogItem(item!)
+      ) {
         navigate(`/show/${item!.id}`, { replace: true, state: { from: returnTo } })
         return
       }
 
+      // Streamed.pk live sports → resolve embed.st URL, play in Web Browser (PiP on Back).
+      if (isStreamedCatalogItem(item!)) {
+        const resolved = await resolveStreamedPlay(item!)
+        if (cancelled) return
+        if (!resolved.ok) {
+          setError(resolved.error || 'Could not load Streamed match')
+          return
+        }
+        const webItem = {
+          ...item!,
+          url: resolved.url,
+          tags: [...new Set([...(item!.tags ?? []), 'web-embed', 'live'])],
+        }
+        const guard = multiviewGuardRef.current
+        const keepOthers =
+          guard.awaitingAdd || guard.slotsLen > 1 || guard.mode === 'multi'
+        if (!keepOthers) clearWebSurfacesForWatch()
+        play(webItem, {
+          forceFull: true,
+          replace: !keepOthers,
+          returnTo: returnTo || '/section/sports',
+        })
+        if (keepOthers) {
+          navigate('/multiview', { replace: true })
+          return
+        }
+        navigate(`/web?url=${encodeURIComponent(resolved.url)}`, {
+          replace: true,
+          state: {
+            from: returnTo || '/section/sports',
+            playerMode: 'embed',
+            pipOnBack: true,
+            continueWatch: {
+              id: item!.id,
+              title: item!.title,
+              poster: item!.poster,
+              category: item!.category,
+              playlistIndex: 0,
+              detailUrl: item!.detailUrl || item!.url,
+              playUrl: resolved.url,
+              transport: item!.transport,
+              sourceKind: item!.sourceKind,
+              source: item!.source,
+            },
+          },
+        })
+        return
+      }
+
+      // LiveXTV replays → unwrap soccerfull (native HLS when available, else embed).
+      if (isLivextvReplayCatalogItem(item!)) {
+        const resolved = await resolveLivextvReplayPlay(item!)
+        if (cancelled) return
+        if (!resolved.ok) {
+          setError(resolved.error || 'Could not load replay')
+          return
+        }
+        const guard = multiviewGuardRef.current
+        const keepOthers =
+          guard.awaitingAdd || guard.slotsLen > 1 || guard.mode === 'multi'
+        if (!keepOthers) clearWebSurfacesForWatch()
+        if (resolved.mode === 'hls') {
+          if (window.signalDesktop?.setPlaybackHeaders) {
+            void window.signalDesktop.setPlaybackHeaders({
+              url: resolved.url,
+              referrer: resolved.referer,
+            })
+          }
+          play(
+            {
+              ...item!,
+              url: resolved.url,
+              httpReferrer: resolved.referer,
+              tags: [...new Set([...(item!.tags ?? []), 'hls', 'replay'])].filter(
+                (t) => t !== 'web-embed',
+              ),
+              transport: 'direct',
+            },
+            {
+              forceFull: true,
+              replace: !keepOthers,
+              returnTo: returnTo || '/section/sports',
+            },
+          )
+          return
+        }
+        const webItem = {
+          ...item!,
+          url: resolved.url,
+          tags: [...new Set([...(item!.tags ?? []), 'web-embed', 'replay'])],
+        }
+        play(webItem, {
+          forceFull: true,
+          replace: !keepOthers,
+          returnTo: returnTo || '/section/sports',
+        })
+        if (keepOthers) {
+          navigate('/multiview', { replace: true })
+          return
+        }
+        navigate(`/web?url=${encodeURIComponent(resolved.url)}`, {
+          replace: true,
+          state: {
+            from: returnTo || '/section/sports',
+            playerMode: 'embed',
+            pipOnBack: true,
+            continueWatch: {
+              id: item!.id,
+              title: item!.title,
+              poster: item!.poster,
+              category: item!.category,
+              playlistIndex: 0,
+              detailUrl: item!.detailUrl || item!.url,
+              playUrl: resolved.url,
+              transport: item!.transport,
+              sourceKind: item!.sourceKind,
+              source: item!.source,
+            },
+          },
+        })
+        return
+      }
+
+      // Local YouTube channels (Nationwide): resolve live video → embed player + PiP.
+      if (
+        isYouTubeUrl(item!.url) &&
+        (item!.tags?.includes('local') || item!.id?.startsWith('local-'))
+      ) {
+        const resolved = await resolveYouTubeLivePlay(item!.url)
+        if (cancelled) return
+        if (!resolved.ok) {
+          setError(resolved.error || 'Channel is not live right now')
+          return
+        }
+        const playUrl =
+          // Prefer the watch page in WebContentsView — /embed needs an HTTP
+          // Referer (Error 153) and is meant for iframes, not top-level guests.
+          resolved.watchUrl || resolved.embedUrl
+        const webItem = {
+          ...item!,
+          url: playUrl,
+          tags: [...new Set([...(item!.tags ?? []), 'web-embed', 'live', 'youtube'])],
+        }
+        const guard = multiviewGuardRef.current
+        const keepOthers =
+          guard.awaitingAdd || guard.slotsLen > 1 || guard.mode === 'multi'
+        if (!keepOthers) clearWebSurfacesForWatch()
+        play(webItem, {
+          forceFull: true,
+          replace: !keepOthers,
+          returnTo: returnTo || '/',
+        })
+        if (keepOthers) {
+          navigate('/multiview', { replace: true })
+          return
+        }
+        navigate(`/web?url=${encodeURIComponent(playUrl)}`, {
+          replace: true,
+          state: {
+            from: returnTo || '/',
+            playerMode: 'embed' as const,
+            pipOnBack: true,
+            continueWatch: {
+              id: item!.id,
+              title: item!.title,
+              poster: item!.poster,
+              category: item!.category,
+              playlistIndex: 0,
+              detailUrl: item!.detailUrl || item!.url,
+              playUrl,
+              transport: item!.transport,
+              sourceKind: item!.sourceKind,
+              source: item!.source,
+            },
+          },
+        })
+        return
+      }
+
       if (isWebBrowserOnlyUrl(item!.url)) {
-        navigate(`/web?url=${encodeURIComponent(item!.url)}`, { replace: true })
+        const webItem = {
+          ...item!,
+          tags: [...new Set([...(item!.tags ?? []), 'web-embed'])],
+        }
+        const guard = multiviewGuardRef.current
+        const keepOthers =
+          guard.awaitingAdd || guard.slotsLen > 1 || guard.mode === 'multi'
+        if (!keepOthers) clearWebSurfacesForWatch()
+        const webState =
+          item!.category === 'sports' ||
+          item!.tags?.includes('247-series') ||
+          item!.tags?.includes('kids-live')
+            ? {
+                from:
+                  returnTo ||
+                  (item!.category === 'kids'
+                    ? '/section/kids'
+                    : item!.category === 'series'
+                      ? '/section/series'
+                      : '/section/sports'),
+                playerMode: 'embed' as const,
+                pipOnBack: true,
+                continueWatch: {
+                  id: item!.id,
+                  title: item!.title,
+                  poster: item!.poster,
+                  category: item!.category,
+                  playlistIndex: 0,
+                  detailUrl: item!.detailUrl || item!.url,
+                  playUrl: item!.url,
+                  transport: item!.transport,
+                  sourceKind: item!.sourceKind,
+                  source: item!.source,
+                },
+              }
+            : undefined
+        play(webItem, {
+          forceFull: true,
+          replace: !keepOthers,
+          returnTo: returnTo || undefined,
+        })
+        if (keepOthers) {
+          navigate('/multiview', { replace: true })
+          return
+        }
+        navigate(`/web?url=${encodeURIComponent(item!.url)}`, {
+          replace: true,
+          state: webState,
+        })
         return
       }
 
@@ -205,10 +652,10 @@ export function WatchPage() {
       }
 
       // Torrent catalog entries store a detail page / magnet — resolve at play time.
-      // Anime / TV Series show cards: episode picker (unless resuming).
-      if (item!.transport === 'torrent' || item!.sourceKind === 'torrent') {
-        if (!window.signalDesktop?.torrentStream) {
-          setError('Torrent playback needs the Jiyu desktop app.')
+      // Series / anime / show cards: always rebuild the full episode playlist on continue.
+      if (isTorrentPlaybackItem(item!)) {
+        if (!isTorrentPlaybackAvailable()) {
+          setError('Torrent playback needs the Jiyu desktop app or Android torrent engine.')
           return
         }
         try {
@@ -219,12 +666,9 @@ export function WatchPage() {
           let episodeAlternates: EpisodeChoice | null = null
           const preference = getViewingQuality()
           const downlink = getConnectionDownlinkMbps()
-          const isShowShelf =
-            item!.category === 'series' ||
-            item!.category === 'anime' ||
-            (item!.category === 'kids' && isShowBrowseItem(item!))
+          const isShowShelf = wantsShowEpisodePlaylist(item!)
 
-          if (isShowShelf && isShowBrowseItem(item!)) {
+          if (isShowShelf) {
             const saved = getContinueEntry(item!.id)
             const resuming = Boolean(saved && saved.currentTime >= 5)
             // Fresh show-card clicks belong on the episode list — auto-playing
@@ -236,7 +680,7 @@ export function WatchPage() {
           }
 
           if (isShowShelf) {
-            const resolved = await resolveShowEpisodes(item!, items)
+            const resolved = await resolveShowEpisodes(item!, itemsRef.current)
             if (cancelled) return
             const episodes = resolved.episodes
             if (episodes.length === 0) {
@@ -262,13 +706,7 @@ export function WatchPage() {
             episodeAlternates = chosen
             uri = chosen.torrentUri
             title = chosen.title || title
-            episodePlaylist = episodes.map((ep) => ({
-              title: ep.title,
-              url: '',
-              torrentUri: ep.torrentUri,
-              torrentAlternates: ep.alternates,
-              episodeKey: ep.key,
-            }))
+            episodePlaylist = episodePlaylistFromChoices(episodes, startEpisodeIndex)
           } else if (!uri || !isTorrentInput(uri)) {
             const detail = item!.detailUrl || item!.url
             const outcome = await scrapePage(detail, item!.source || 'torrent')
@@ -288,13 +726,7 @@ export function WatchPage() {
               episodeAlternates = chosen
               uri = chosen.torrentUri
               title = chosen.title || title
-              episodePlaylist = episodes.map((ep) => ({
-                title: ep.title,
-                url: '',
-                torrentUri: ep.torrentUri,
-                torrentAlternates: ep.alternates,
-                episodeKey: ep.key,
-              }))
+              episodePlaylist = episodePlaylistFromChoices(episodes, startEpisodeIndex)
             } else {
               const pick = pickBestStream(outcome.results, downlink, requestedQuality)
               if (!pick) {
@@ -340,9 +772,9 @@ export function WatchPage() {
               break
             }
             if (candidates.length > 1) {
-              setError(`Connecting to peers (${i + 1}/${candidates.length})…`)
+              setError('Fetching sources…')
             }
-            const attempt = await window.signalDesktop.torrentStream(candidate, {
+            const attempt = await torrentStream(candidate, {
               keepOthers,
             })
             if (cancelled) return
@@ -355,7 +787,7 @@ export function WatchPage() {
               deadCount += 1
               if (i < candidates.length - 1) {
                 setError(
-                  `No peers — trying another release (${i + 2}/${candidates.length})…`,
+                  'Fetching sources…',
                 )
               }
               continue
@@ -375,17 +807,22 @@ export function WatchPage() {
 
           let playlist = episodePlaylist
           if (playlist && playlist.length > 0) {
-            playlist = playlist.map((entry, index) =>
-              index === startEpisodeIndex
-                ? {
-                    ...entry,
-                    url: result.url!,
-                    torrentUri: usedUri,
-                    subtitleUrl: result.subtitleUrl ?? result.playlist?.[0]?.subtitleUrl,
-                    subtitleKind: result.subtitleKind ?? result.playlist?.[0]?.subtitleKind,
-                    fileName: result.fileName,
-                  }
-                : entry,
+            playlist = episodePlaylistFromChoices(
+              playlist.map((entry) => ({
+                key: entry.episodeKey || '',
+                title: entry.title,
+                torrentUri: entry.torrentUri || '',
+                quality: 0,
+                alternates: entry.torrentAlternates,
+              })),
+              startEpisodeIndex,
+              {
+                url: result.url!,
+                torrentUri: usedUri,
+                subtitleUrl: result.subtitleUrl ?? result.playlist?.[0]?.subtitleUrl,
+                subtitleKind: result.subtitleKind ?? result.playlist?.[0]?.subtitleKind,
+                fileName: result.fileName,
+              },
             )
           } else if (result.playlist && result.playlist.length > 1) {
             playlist = result.playlist
@@ -406,6 +843,8 @@ export function WatchPage() {
             playlist,
             torrentUri: uri,
             transport: 'direct',
+            // Keep torrent identity so Continue → resume rebuilds the episode list.
+            sourceKind: item!.sourceKind || 'torrent',
             runtimeSeconds: mergeRuntimeSeconds(
               result.runtimeSeconds,
               item!.runtimeSeconds,
@@ -414,7 +853,7 @@ export function WatchPage() {
           }
           play(playable, {
             forceFull: true,
-            returnTo: returnTo ?? `/section/${item!.category}`,
+            returnTo: returnTo ?? (wantsShowEpisodePlaylist(item!) ? `/show/${item!.id}` : `/section/${item!.category}`),
           })
           return
         } catch (err) {
@@ -422,6 +861,28 @@ export function WatchPage() {
             setError(err instanceof Error ? err.message : 'Torrent playback failed')
           }
           return
+        }
+      }
+
+      // Direct series/anime continue without a torrent path — still attach episodes.
+      if (wantsShowEpisodePlaylist(item!)) {
+        const saved = getContinueEntry(item!.id)
+        if (saved && saved.currentTime >= 5) {
+          const episodeList = await resolveShowEpisodes(item!, itemsRef.current)
+          if (cancelled) return
+          if (episodeList.episodes.length > 1) {
+            const resumeIndex = resolveContinueEpisodeIndex(episodeList.episodes, saved) ?? 0
+            play(
+              {
+                ...item!,
+                playlist: episodePlaylistFromChoices(episodeList.episodes, resumeIndex, {
+                  url: item!.url,
+                }),
+              },
+              { forceFull: true, returnTo: returnTo ?? `/show/${item!.id}` },
+            )
+            return
+          }
         }
       }
 
@@ -438,7 +899,6 @@ export function WatchPage() {
     item?.torrentUri,
     item?.detailUrl,
     item?.category,
-    items,
     play,
     navigate,
     returnTo,
@@ -485,7 +945,7 @@ export function WatchPage() {
       ) : streamReady ? null : (
         <PlaybackLoadingScreen
           title={cleanShowDisplayTitle(display.title) || display.title}
-          status="Getting episode ready…"
+          status="Fetching sources…"
           variant="page"
         />
       )}

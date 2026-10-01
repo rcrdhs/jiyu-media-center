@@ -1,7 +1,9 @@
 import type { StreamItem, StreamProbeResult } from '../types'
 import { getPerformanceKnobs } from './deviceProfile'
+import { isStreamedCatalogItem } from './streamed'
 import { isYouTubeUrl } from './webBrowser'
 import { isYouTubeLiveNow } from './youtubeLive'
+import { recordStreamProbeResult } from './streamLearning'
 
 /** Fast fail — unresponsive streams shouldn't stall the whole shelf */
 export const DEFAULT_TIMEOUT_MS = 2500
@@ -81,11 +83,16 @@ export async function probeStreamUrl(
   url: string,
   timeoutMs = DEFAULT_TIMEOUT_MS,
 ): Promise<StreamProbeResult> {
-  if (isYouTubeUrl(url)) return probeYouTubeLive(url)
-  if (window.signalDesktop?.probeStream) {
-    return window.signalDesktop.probeStream(url, timeoutMs)
+  let res: StreamProbeResult
+  if (isYouTubeUrl(url)) {
+    res = await probeYouTubeLive(url)
+  } else if (window.signalDesktop?.probeStream) {
+    res = await window.signalDesktop.probeStream(url, timeoutMs)
+  } else {
+    res = await probeInBrowser(url, timeoutMs)
   }
-  return probeInBrowser(url, timeoutMs)
+  recordStreamProbeResult(url, res.ok, res.latencyMs)
+  return res
 }
 
 export type ProbeProgress = { id: string } & StreamProbeResult
@@ -109,13 +116,28 @@ export async function probeStreamItems(
     const entries = slice.map((item) => ({ id: item.id, url: item.url }))
 
     const chunk = await mapPool(entries, options?.concurrency ?? probeConcurrency(), async (entry) => {
+      const item = slice.find((row) => row.id === entry.id)
+      // Live Streamed embeds — treat as online (homepage URL is not an HLS probe).
+      if (item && isStreamedCatalogItem(item)) {
+        return {
+          id: entry.id,
+          ok: true,
+          state: 'online' as const,
+          status: 200,
+          latencyMs: 0,
+          error: '',
+        }
+      }
+      let probeRes: StreamProbeResult
       if (isYouTubeUrl(entry.url)) {
-        return { id: entry.id, ...(await probeYouTubeLive(entry.url)) }
+        probeRes = await probeYouTubeLive(entry.url)
+      } else if (window.signalDesktop?.probeStream) {
+        probeRes = await window.signalDesktop.probeStream(entry.url, timeoutMs)
+      } else {
+        probeRes = await probeInBrowser(entry.url, timeoutMs)
       }
-      if (window.signalDesktop?.probeStream) {
-        return { id: entry.id, ...(await window.signalDesktop.probeStream(entry.url, timeoutMs)) }
-      }
-      return { id: entry.id, ...(await probeInBrowser(entry.url, timeoutMs)) }
+      recordStreamProbeResult(entry.url, probeRes.ok, probeRes.latencyMs)
+      return { id: entry.id, ...probeRes }
     })
 
     all.push(...chunk)

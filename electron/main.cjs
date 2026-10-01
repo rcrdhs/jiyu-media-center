@@ -8,6 +8,9 @@ const http = require('http')
 const { spawn } = require('child_process')
 const { promisify } = require('util')
 
+/** electron-updater — only active in packaged builds (see setupAutoUpdater). */
+let autoUpdaterRef = null
+
 /** Tunables pushed from the renderer device profile (defaults = balanced). */
 let performanceKnobs = {
   torrentMaxConns: 64,
@@ -43,8 +46,100 @@ function loadDotEnvFile(filePath) {
   }
 }
 
-loadDotEnvFile(path.join(__dirname, '..', '.env'))
+function loadJiyuDotEnv() {
+  // Dev: repo root. Packaged: next to the exe / resources, then userData.
+  const candidates = [
+    path.join(__dirname, '..', '.env'),
+    path.join(process.resourcesPath || '', '.env'),
+    path.join(path.dirname(process.execPath || ''), '.env'),
+  ]
+  try {
+    if (app?.isPackaged) {
+      candidates.push(path.join(path.dirname(process.execPath || ''), 'resources', '.env'))
+    }
+  } catch {
+    /* ignore */
+  }
+  for (const file of candidates) {
+    if (file) loadDotEnvFile(file)
+  }
+}
+
+loadJiyuDotEnv()
+
+/**
+ * Desktop downloads, profile, and temp live on F:\Jiyu when that drive is
+ * present, so torrent pieces and Chromium caches do not fill C:.
+ * JIYU_DATA_ROOT overrides the location.
+ */
+function jiyuDataRoot() {
+  const fromEnv = process.env.JIYU_DATA_ROOT
+  if (fromEnv && String(fromEnv).trim()) return path.resolve(String(fromEnv).trim())
+  if (process.platform === 'win32') {
+    try {
+      if (fs.existsSync('F:\\')) return 'F:\\Jiyu'
+    } catch {
+      /* ignore */
+    }
+  }
+  return null
+}
+
+function ensureJiyuDataPaths() {
+  const root = jiyuDataRoot()
+  if (!root) return null
+  // Dev test builds must not share Chromium profile with the installed release —
+  // concurrent locks corrupt QuotaManager and IndexedDB ("UnknownError: Internal error").
+  let isDev = true
+  try {
+    isDev = !app.isPackaged
+  } catch {
+    isDev = true
+  }
+  const userData = path.join(root, isDev ? 'user-data-dev' : 'user-data')
+  const releaseUserData = path.join(root, 'user-data')
+  const temp = path.join(root, isDev ? 'temp-dev' : 'temp')
+  const torrents = path.join(root, 'webtorrent')
+  fs.mkdirSync(userData, { recursive: true })
+  fs.mkdirSync(temp, { recursive: true })
+  fs.mkdirSync(torrents, { recursive: true })
+  // First-run seed: copy light config from the release profile (not caches/IDB).
+  if (isDev && userData !== releaseUserData) {
+    for (const name of ['playlist-sources.json', 'torrent-sources.json', '.env', 'torrent-partials.json']) {
+      const dest = path.join(userData, name)
+      const src = path.join(releaseUserData, name)
+      try {
+        if (!fs.existsSync(dest) && fs.existsSync(src)) fs.copyFileSync(src, dest)
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  app.setPath('userData', userData)
+  app.setPath('sessionData', userData)
+  app.setPath('temp', temp)
+  process.env.TEMP = temp
+  process.env.TMP = temp
+  if (isDev) {
+    console.log('[jiyu] desktop test profile:', userData)
+  }
+  return { root, userData, temp, torrents }
+}
+
+let jiyuDataPaths = null
 try {
+  jiyuDataPaths = ensureJiyuDataPaths()
+} catch (err) {
+  console.warn('[jiyu] could not use data root', err?.message || err)
+}
+
+function torrentDownloadRoot() {
+  if (jiyuDataPaths?.torrents) return jiyuDataPaths.torrents
+  return path.join(os.tmpdir(), 'webtorrent')
+}
+
+try {
+  loadJiyuDotEnv()
   loadDotEnvFile(path.join(app.getPath('userData'), '.env'))
 } catch {
   /* app not ready yet — userData path may still work after ready; re-load below */
@@ -59,6 +154,8 @@ try {
   app.commandLine.appendSwitch('ignore-gpu-blocklist')
   app.commandLine.appendSwitch('enable-webgl')
   app.commandLine.appendSwitch('enable-accelerated-2d-canvas')
+  // Sports embeds (embed.st) need muted autoplay without a prior gesture.
+  app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
 } catch {
   /* ignore */
 }
@@ -151,11 +248,22 @@ const STREAM_UA = BROWSER_UA
 
 /** Per-host UA / Referer overrides from M3U http-user-agent / EXTVLCOPT. */
 const playbackHeaderOverrides = new Map()
+/** Last Referer from setPlaybackHeaders — also applied to CDN hosts (HLS segments). */
+let activePlaybackReferrer = ''
 
 function isIptvMediaUrl(url) {
   const u = String(url || '')
   if (!u) return false
   if (/vimeocdn\.com|player\.vimeo\.com/i.test(u)) return true
+  // Movy / Atlantic / Cinecat CDNs (Aphrodite uses /cdn-m3u8?payload= — no .m3u8).
+  if (
+    /totallyacdn\.|cdn\.hls\.lol|stream\.hls\.lol|transcode\.cfd|zenoak|paleoak|wecollege\.net/i.test(
+      u,
+    ) ||
+    /\/cdn-m3u8(?:\?|$)/i.test(u)
+  ) {
+    return true
+  }
   if (/\.(m3u8?|ts|m4s|mpd|aac|mp4|mp3)(\?|#|$)/i.test(u)) return true
   // Common IPTV panel / CDN path shapes without a file extension
   return /\/(?:live|play|hls|stream|playlist|manifest)\b/i.test(u)
@@ -205,6 +313,2066 @@ let mainWindow = null
 let webBrowserView = null
 let webBrowserAttached = false
 let webBrowserVisible = false
+/** Last native browser tile bounds — used for synthetic embed clicks. */
+let webBrowserLastBounds = null
+/** Shared embed volume 0–1 for scroll-wheel control across frames. */
+let webBrowserVolume = 1
+/** Isolated dock for embed popups / interstitial ads (keeps main player clean). */
+let adDockView = null
+let adDockAttached = false
+let adDockVisible = false
+let adDockLastUrl = ''
+let adDockLastShownAt = 0
+/** @type {ReturnType<typeof setInterval> | null} */
+let adDockMuteTimer = null
+/** Extra WebContentsViews for multi-view web embeds (id → view). */
+const multiWebViews = new Map()
+const multiWebAttached = new Set()
+/** Which multi tile should have hearable audio (id). */
+let multiWebAudioPrimary = ''
+/** Ignore focus/click audio switches while we programmatically nudge play. */
+let multiWebIgnoreFocusUntil = 0
+
+/** @type {boolean} */
+let jiyuWantOsFullScreen = false
+/** Prefer OS minimize → PiP when the renderer says a stream can demote. */
+let jiyuMinimizeToPipEnabled = true
+let jiyuMinimizeToPipArmed = false
+/** Don't re-pin OS fullscreen while a minimize is being turned into PiP. */
+let jiyuSuppressFullscreenReassert = false
+/** True while the OS window is being dragged (including onto another monitor). */
+let windowMoveActive = false
+let windowMoveTimer = null
+
+function beginWindowMove() {
+  if (!windowMoveActive) {
+    windowMoveActive = true
+    try {
+      if (webBrowserView && webBrowserVisible) webBrowserView.setVisible(false)
+    } catch {
+      /* ignore */
+    }
+  }
+  if (windowMoveTimer) clearTimeout(windowMoveTimer)
+  windowMoveTimer = setTimeout(endWindowMove, 180)
+}
+
+function endWindowMove() {
+  if (windowMoveTimer) {
+    clearTimeout(windowMoveTimer)
+    windowMoveTimer = null
+  }
+  windowMoveActive = false
+  try {
+    if (webBrowserView && webBrowserVisible && webBrowserLastBounds) {
+      webBrowserView.setBounds(webBrowserLastBounds)
+      webBrowserView.setVisible(true)
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+function exitAppFullscreenSurfaces() {
+  jiyuWantOsFullScreen = false
+  try {
+    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isFullScreen()) {
+      mainWindow.setFullScreen(false)
+    }
+  } catch {
+    /* ignore */
+  }
+  // If the single browser was laid out full-bleed, pull it under the chrome strip.
+  if (
+    webBrowserView &&
+    !webBrowserView.webContents.isDestroyed() &&
+    webBrowserVisible &&
+    webBrowserLastBounds &&
+    webBrowserLastBounds.y < 8
+  ) {
+    const top = 48
+    let width = 1280
+    let height = 720
+    try {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        const size = mainWindow.getContentSize()
+        width = size[0]
+        height = size[1]
+      }
+    } catch {
+      /* ignore */
+    }
+    applyBounds(webBrowserView, {
+      x: 0,
+      y: top,
+      width: Math.max(1, Math.round(width)),
+      height: Math.max(1, Math.round(height - top)),
+    })
+  }
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('browser:force-exit-fullscreen')
+  }
+}
+
+function installEscapeExitsFullscreen(contents) {
+  if (!contents || contents.isDestroyed()) return
+  contents.on('before-input-event', (_event, input) => {
+    if (!input || input.type !== 'keyDown') return
+    const key = String(input.key || '')
+    if (key !== 'Escape' && key !== 'Esc') return
+    // Only tear down when something is actually fullscreen — Esc in a guest
+    // page must not force-exit and fight a pending Full enter.
+    const osFs = Boolean(
+      jiyuWantOsFullScreen ||
+        (mainWindow && !mainWindow.isDestroyed() && mainWindow.isFullScreen()),
+    )
+    if (!osFs) return
+    exitAppFullscreenSurfaces()
+  })
+}
+
+/** Seed + guard embed volume so buffer/resume can't jump players back to 100%. */
+const BROWSER_WHEEL_VOLUME_SCRIPT = `(() => {
+  try {
+    if (typeof window.__jiyuVolLevel !== 'number' || !Number.isFinite(window.__jiyuVolLevel)) {
+      window.__jiyuVolLevel = 1;
+    }
+    const applyLevel = () => {
+      try {
+        const level =
+          typeof window.__jiyuVolLevel === 'number' && Number.isFinite(window.__jiyuVolLevel)
+            ? Math.max(0, Math.min(1, window.__jiyuVolLevel))
+            : 1;
+        document.querySelectorAll('video,audio').forEach((m) => {
+          try {
+            m.volume = level;
+            m.muted = level <= 0.001;
+          } catch (_) {}
+        });
+        try {
+          if (typeof jwplayer === 'function') {
+            const players =
+              typeof jwplayer.getPlayers === 'function' ? jwplayer.getPlayers() || [] : [];
+            for (const p of players) {
+              try {
+                p.setVolume?.(Math.round(level * 100));
+                p.setMute?.(level <= 0.001);
+              } catch (_) {}
+            }
+            try {
+              jwplayer().setVolume?.(Math.round(level * 100));
+              jwplayer().setMute?.(level <= 0.001);
+            } catch (_) {}
+          }
+        } catch (_) {}
+      } catch (_) {}
+    };
+    if (!window.__jiyuVolGuard) {
+      window.__jiyuVolGuard = true;
+      document.addEventListener('play', applyLevel, true);
+      document.addEventListener('playing', applyLevel, true);
+      // Embeds often remount <video> after a stall — re-assert after a tick.
+      document.addEventListener(
+        'waiting',
+        () => {
+          try {
+            setTimeout(applyLevel, 50);
+            setTimeout(applyLevel, 250);
+          } catch (_) {}
+        },
+        true,
+      );
+    }
+    return 'ok';
+  } catch (_) {
+    return 'error';
+  }
+})();`
+
+/** Hover ±10s undo/redo seek buttons over embed players (BrowserView sits above React). */
+const BROWSER_SEEK_OVERLAY_SCRIPT = `(() => {
+  try {
+    if (window.__jiyuSeekOverlayBound) return 'bound';
+    window.__jiyuSeekOverlayBound = true;
+
+    const STYLE_ID = 'jiyu-seek-overlay-style';
+    const ROOT_ID = 'jiyu-seek-overlay';
+    if (!document.getElementById(STYLE_ID)) {
+      const style = document.createElement('style');
+      style.id = STYLE_ID;
+      style.textContent = \`
+        #\${ROOT_ID} {
+          position: fixed;
+          inset: 0;
+          z-index: 2147483646;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 0 clamp(1.1rem, 7vw, 4.25rem);
+          pointer-events: none;
+          opacity: 0;
+          transition: opacity 160ms ease;
+        }
+        #\${ROOT_ID}.is-visible { opacity: 1; }
+        #\${ROOT_ID} button {
+          pointer-events: auto;
+          position: relative;
+          width: 3.4rem;
+          height: 3.4rem;
+          border-radius: 999px;
+          border: 1px solid rgba(255,255,255,0.18);
+          background: rgba(8,10,14,0.88);
+          color: #f4f4f5;
+          display: grid;
+          place-items: center;
+          cursor: pointer;
+          box-shadow: 0 10px 28px rgba(0,0,0,0.45);
+        }
+        #\${ROOT_ID} button:hover {
+          background: rgba(16,20,26,0.96);
+          border-color: rgba(240,180,41,0.45);
+          transform: scale(1.06);
+        }
+        #\${ROOT_ID} svg { width: 1.45rem; height: 1.45rem; display: block; }
+        #\${ROOT_ID} .jiyu-seek-badge {
+          position: absolute;
+          bottom: 0.4rem;
+          font: 700 0.58rem/1 system-ui, sans-serif;
+          letter-spacing: 0.02em;
+          opacity: 0.9;
+        }
+      \`;
+      (document.head || document.documentElement).appendChild(style);
+    }
+
+    const pickVideo = () => {
+      const media = Array.from(document.querySelectorAll('video')).filter((m) => {
+        try {
+          const r = m.getBoundingClientRect();
+          return r.width > 64 && r.height > 64;
+        } catch (_) {
+          return false;
+        }
+      });
+      if (!media.length) return null;
+      return (
+        media.find((m) => !m.paused && !m.ended) ||
+        media.sort((a, b) => {
+          const ar = a.getBoundingClientRect();
+          const br = b.getBoundingClientRect();
+          return br.width * br.height - ar.width * ar.height;
+        })[0]
+      );
+    };
+
+    const seekBy = (delta) => {
+      const v = pickVideo();
+      if (!v) return false;
+      if (!Number.isFinite(v.duration) || v.duration === Infinity) return false;
+      v.currentTime = Math.min(v.duration, Math.max(0, (Number(v.currentTime) || 0) + delta));
+      try { v.play().catch(() => {}); } catch (_) {}
+      return true;
+    };
+
+    let root = document.getElementById(ROOT_ID);
+    if (!root) {
+      root = document.createElement('div');
+      root.id = ROOT_ID;
+      root.innerHTML = \`
+        <button type="button" aria-label="Rewind 10 seconds" title="-10s" data-delta="-10">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M9.5 7.5H5.5V3.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M5.7 7.6A8 8 0 1 1 5 12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+          </svg>
+          <span class="jiyu-seek-badge">10</span>
+        </button>
+        <button type="button" aria-label="Forward 10 seconds" title="+10s" data-delta="10">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M14.5 7.5H18.5V3.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M18.3 7.6A8 8 0 1 0 19 12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+          </svg>
+          <span class="jiyu-seek-badge">10</span>
+        </button>
+      \`;
+      (document.body || document.documentElement).appendChild(root);
+      root.addEventListener('click', (e) => {
+        const btn = e.target && e.target.closest ? e.target.closest('button[data-delta]') : null;
+        if (!btn) return;
+        e.preventDefault();
+        e.stopPropagation();
+        seekBy(Number(btn.getAttribute('data-delta')) || 0);
+        show();
+      }, true);
+    }
+
+    let hideTimer = 0;
+    const show = () => {
+      const v = pickVideo();
+      if (!v || !Number.isFinite(v.duration) || v.duration === Infinity) {
+        root.classList.remove('is-visible');
+        return;
+      }
+      root.classList.add('is-visible');
+      window.clearTimeout(hideTimer);
+      hideTimer = window.setTimeout(() => root.classList.remove('is-visible'), 2200);
+    };
+
+    window.addEventListener('mousemove', show, { passive: true });
+    window.addEventListener('pointerdown', show, { passive: true });
+    return 'bound';
+  } catch (_) {
+    return 'error';
+  }
+})();`
+
+async function installBrowserFrameScript(contents, script) {
+  if (!contents || contents.isDestroyed()) return
+  const frames = collectContentFrames(contents, { maxFrames: 10 })
+  for (const frame of frames) {
+    try {
+      await raceFrameExec(frame.executeJavaScript(script, true), 1500)
+    } catch {
+      /* timeout / cross-process / detached frame */
+    }
+  }
+}
+
+async function installBrowserWheelVolume(contents) {
+  if (!contents || contents.isDestroyed()) return
+  const script = BROWSER_WHEEL_VOLUME_SCRIPT.replace(
+    'window.__jiyuVolLevel = 1;',
+    `window.__jiyuVolLevel = ${Number.isFinite(webBrowserVolume) ? webBrowserVolume : 1};`,
+  )
+  await installBrowserFrameScript(contents, script)
+  await installBrowserFrameScript(contents, BROWSER_SEEK_OVERLAY_SCRIPT)
+}
+
+function scheduleBrowserWheelVolume(contents) {
+  if (!contents || contents.isDestroyed()) return
+  const run = () => {
+    void installBrowserWheelVolume(contents)
+  }
+  run()
+  setTimeout(run, 400)
+  setTimeout(run, 1500)
+  setTimeout(run, 4000)
+}
+
+/** Last audible level so Mute → Unmute restores instead of jumping to 100%. */
+let webBrowserVolumeBeforeMute = 1
+
+function buildApplyWebBrowserVolumeScript(level) {
+  const snapped = Math.max(0, Math.min(1, Number(level) || 0))
+  const pct = Math.round(snapped * 100)
+  return `(() => {
+    try {
+      const level = ${snapped};
+      window.__jiyuVolLevel = level;
+      document.querySelectorAll('video,audio').forEach((m) => {
+        try {
+          m.volume = level;
+          m.muted = level <= 0.001;
+        } catch (_) {}
+      });
+      try {
+        if (typeof jwplayer === 'function') {
+          const players =
+            typeof jwplayer.getPlayers === 'function' ? jwplayer.getPlayers() || [] : [];
+          for (const p of players) {
+            try {
+              p.setVolume?.(Math.round(level * 100));
+              p.setMute?.(level <= 0.001);
+            } catch (_) {}
+          }
+          try {
+            jwplayer().setVolume?.(Math.round(level * 100));
+            jwplayer().setMute?.(level <= 0.001);
+          } catch (_) {}
+        }
+      } catch (_) {}
+      try {
+        if (window.videojs) {
+          for (const el of document.querySelectorAll('.video-js')) {
+            try {
+              const p = window.videojs.getPlayer?.(el);
+              p?.volume?.(level);
+              p?.muted?.(level <= 0.001);
+            } catch (_) {}
+          }
+        }
+      } catch (_) {}
+    } catch (_) {}
+  })();`
+}
+
+/**
+ * Set in-app embed volume (0–1) from chrome UI or IPC.
+ * @param {number} level
+ * @param {{ emit?: boolean }} [options]
+ */
+function applyWebBrowserVolume(level, options = {}) {
+  const next = Math.max(0, Math.min(1, Number(level) || 0))
+  const snapped = next >= 0.995 ? 1 : next <= 0.001 ? 0 : next
+  if (snapped > 0.001) webBrowserVolumeBeforeMute = snapped
+  webBrowserVolume = snapped
+  const muted = snapped <= 0.001
+  const script = buildApplyWebBrowserVolumeScript(snapped)
+  const targets = []
+  if (webBrowserView && !webBrowserView.webContents.isDestroyed()) {
+    targets.push(webBrowserView.webContents)
+  }
+  for (const view of multiWebViews.values()) {
+    if (view && !view.webContents.isDestroyed()) targets.push(view.webContents)
+  }
+  for (const contents of targets) {
+    void installBrowserFrameScript(contents, script)
+    try {
+      // Only force-mute the single-player view; multi tiles use setMultiWebAudio.
+      if (webBrowserView && contents === webBrowserView.webContents) {
+        contents.setAudioMuted(muted)
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  const percent = Math.round(snapped * 100)
+  if (options.emit !== false && mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('browser:volume', { percent })
+  }
+  return { ok: true, percent }
+}
+
+/** Common sports-embed ad / adult networks — blocked in the Jiyu web session. */
+const BROWSER_AD_BLOCK_URLS = [
+  '*://fstream365.com/banner/*',
+  '*://*.fstream365.com/banner/*',
+  '*://app.adaround.net/*',
+  '*://*.adaround.net/*',
+  '*://*.doubleclick.net/*',
+  '*://*.googlesyndication.com/*',
+  '*://*.googleadservices.com/*',
+  '*://*.adservice.google.com/*',
+  '*://*.popads.net/*',
+  '*://*.propellerads.com/*',
+  '*://*.exoclick.com/*',
+  '*://*.trafficjunky.net/*',
+  '*://*.juicyads.com/*',
+  '*://*.tsyndicate.com/*',
+  '*://*.adsterra.com/*',
+  '*://*.adnxs.com/*',
+  '*://*.moatads.com/*',
+  '*://*.taboola.com/*',
+  '*://*.outbrain.com/*',
+  '*://*.adultfriendfinder.com/*',
+  '*://*.stripchat.com/*',
+  '*://*.chaturbate.com/*',
+  '*://*.pornhub.com/*',
+  '*://*.xvideos.com/*',
+  '*://*.xnxx.com/*',
+  '*://*.xhamster.com/*',
+  '*://*.spankwire.com/*',
+  '*://*.livejasmin.com/*',
+  '*://maleinsider.org/*',
+  '*://*.maleinsider.org/*',
+  '*://soulk.com/*',
+  '*://*.soulk.com/*',
+  '*://soulk.net/*',
+  '*://*.soulk.net/*',
+  // Sports-embed “Weiterleitung” / YouTube bait (CSP frame-ancestors none → ERR_BLOCKED_BY_RESPONSE)
+  '*://yt.drimzzzz.info/*',
+  '*://*.drimzzzz.info/*',
+  '*://drimzzzz.info/*',
+  '*://wpnxiswpuyrfn.icu/*',
+  '*://*.wpnxiswpuyrfn.icu/*',
+  '*://therocketlanguages.com/*',
+  '*://*.therocketlanguages.com/*',
+  '*://opera.com/*',
+  '*://*.opera.com/*',
+  '*://promo.worldofwarships.com/*',
+  '*://*.worldofwarships.com/*',
+  // Pre-roll “download our browser” adware (OperaSetup, etc.)
+  '*://net.geo.opera.com/*',
+  '*://*.geo.opera.com/*',
+  '*://download.opera.com/*',
+  '*://*.download.opera.com/*',
+]
+
+/** Installer / forced-download bait from embed ads (PRIMEROLL → OperaSetup.exe). */
+function isBlockedBrowserDownloadUrl(url) {
+  const raw = String(url || '')
+  if (!raw) return false
+  if (/utm_source=PRIMEROLL|OperaSetup|opera\/stable\/windows/i.test(raw)) return true
+  if (/net\.geo\.opera\.com|download\.opera\.com|get\.opera\.com/i.test(raw)) return true
+  if (/\.(exe|msi|dmg|pkg|bat|cmd|ps1|apk)(\?|#|$)/i.test(raw)) return true
+  return false
+}
+
+/** Known ad / promo / bait URLs that must never take the player tile. */
+function isAdHijackUrl(url) {
+  const raw = String(url || '')
+  if (!raw) return false
+  if (
+    /PWNgames|utm_source=PWN|OperaSetup|opera_gx|get\/opera|promo\.worldofwarships|worldofwarships\.com\/glow|utm_source=PRIMEROLL|download.*(browser|player)|install.*(browser|player)/i.test(
+      raw,
+    )
+  ) {
+    return true
+  }
+  try {
+    const host = new URL(raw).hostname.replace(/^www\./i, '').toLowerCase()
+    if (
+      /(^|\.)(drimzzzz\.info|wpnxiswpuyrfn\.icu|therocketlanguages\.com|opera\.com|geo\.opera\.com|download\.opera\.com|get\.opera\.com|worldofwarships\.com|wargaming\.net|wgcdn\.co|adaround\.net|popads\.net|propellerads\.com|exoclick\.com|trafficjunky\.net|juicyads\.com|tsyndicate\.com|adsterra\.com|doubleclick\.net|googlesyndication\.com|googleadservices\.com|adservice\.google\.com|taboola\.com|outbrain\.com|adultfriendfinder\.com|stripchat\.com|chaturbate\.com|pornhub\.com|xvideos\.com|xnxx\.com|xhamster\.com|livejasmin\.com|maleinsider\.org|soulk\.com|soulk\.net)$/i.test(
+        host,
+      )
+    ) {
+      return true
+    }
+  } catch {
+    /* ignore */
+  }
+  return false
+}
+
+function shouldBlockBrowserNavigation(url) {
+  return (
+    isBlockedBrowserDownloadUrl(url) ||
+    isAdHijackUrl(url) ||
+    isDeadPlaceholderEmbedUrl(url) ||
+    isStreamRefererOnlyUrl(url)
+  )
+}
+
+/**
+ * Movy / Atlantic site origins are Referer headers for HLS CDNs only.
+ * Never open them as in-app browser documents (Warp interstitial, marketing pages).
+ */
+function isStreamRefererOnlyUrl(url) {
+  try {
+    const parsed = new URL(String(url || ''))
+    const host = parsed.hostname.replace(/^www\./i, '').toLowerCase()
+    if (host === 'atlantic.st' || host.endsWith('.atlantic.st')) return true
+    if (host === 'movy.sx' || host.endsWith('.movy.sx')) return true
+    return false
+  } catch {
+    return false
+  }
+}
+
+/** Fake / unresolvable hosts Rive (and others) sometimes hand off to — white screen. */
+function isDeadPlaceholderEmbedUrl(url) {
+  try {
+    const raw = String(url || '')
+    if (/\/undefined(?:\/|\?|#|$)/i.test(raw)) return true
+    if (/[?&](?:tmdb|id|tv|movie)=undefined\b/i.test(raw)) return true
+    if (/^chrome-error:|chromewebdata/i.test(raw)) return true
+    const host = new URL(raw).hostname.replace(/^www\./i, '').toLowerCase()
+    if (!host) return false
+    if (/(^|\.)example\.(com|net|org)$/i.test(host)) return true
+    if (/(^|\.)invalid$/i.test(host)) return true
+    if (/(^|\.)nextgencloudfabric\.com$/i.test(host)) return true
+    if (host === '0.0.0.0') return true
+    return false
+  } catch {
+    return false
+  }
+}
+
+/** Any in-app player / embed host we treat as a locked watch surface. */
+function isPlayerEmbedHost(url) {
+  try {
+    const parsed = new URL(url)
+    const host = parsed.hostname.replace(/^www\./i, '').toLowerCase()
+    const path = parsed.pathname || ''
+    return (
+      host === 'embed.st' ||
+      host.endsWith('.embed.st') ||
+      host === 'embedhd.st' ||
+      host.endsWith('.embedhd.st') ||
+      host === 'embedindia.st' ||
+      host.endsWith('.embedindia.st') ||
+      host === 'streamed.pk' ||
+      host.endsWith('.streamed.pk') ||
+      host === 'ppv.st' ||
+      host.endsWith('.ppv.st') ||
+      host === 'rivestream.ru' ||
+      host.endsWith('.rivestream.ru') ||
+      host === 'fstream365.com' ||
+      host.endsWith('.fstream365.com') ||
+      host === 'vsembed.ru' ||
+      host.endsWith('.vsembed.ru') ||
+      host === 'vidsrc.to' ||
+      host.endsWith('.vidsrc.to') ||
+      host === 'vidsrc.me' ||
+      host.endsWith('.vidsrc.me') ||
+      host === 'vidlink.pro' ||
+      host.endsWith('.vidlink.pro') ||
+      host === 'primesrc.me' ||
+      host.endsWith('.primesrc.me') ||
+      host === 'vaplayer.ru' ||
+      host.endsWith('.vaplayer.ru') ||
+      host === 'vidup.to' ||
+      host.endsWith('.vidup.to') ||
+      host === 'streamingnow.mov' ||
+      host.endsWith('.streamingnow.mov') ||
+      host === 'player.cinezo.live' ||
+      host.endsWith('.cinezo.live') ||
+      host === 'player.videasy.to' ||
+      host.endsWith('.videasy.to') ||
+      host === 'mapple.fun' ||
+      host.endsWith('.mapple.fun') ||
+      host === 'player.vidzee.wtf' ||
+      host.endsWith('.vidzee.wtf') ||
+      host === 'vidsrcme.ru' ||
+      host.endsWith('.vidsrcme.ru') ||
+      host === 'vidsrc.sh' ||
+      host.endsWith('.vidsrc.sh') ||
+      host === 'cinetaro.to' ||
+      host.endsWith('.cinetaro.to') ||
+      host === 'cinextream.cc' ||
+      host.endsWith('.cinextream.cc') ||
+      host === 'ww.ymovies.vip' ||
+      host.endsWith('.ymovies.vip') ||
+      host === 'soccerfull.net' ||
+      host.endsWith('.soccerfull.net') ||
+      host === 'livextv.hybrows.workers.dev' ||
+      host.includes('livextv') ||
+      // DoodStream-style VOD mirrors used by LiveXTV replays.
+      /^\/[de]\/[a-z0-9]{6,}/i.test(path) ||
+      host.includes('netmirror') ||
+      host.includes('mcloud') ||
+      (/(^|\.)ww\d*\.surf$/i.test(host) && /netmirror/i.test(path))
+    )
+  } catch {
+    return false
+  }
+}
+
+function browserHostKey(url) {
+  try {
+    return new URL(url).hostname.replace(/^www\./i, '').toLowerCase()
+  } catch {
+    return ''
+  }
+}
+
+function sameBrowserSite(a, b) {
+  const ha = browserHostKey(a)
+  const hb = browserHostKey(b)
+  if (!ha || !hb) return false
+  return ha === hb || ha.endsWith(`.${hb}`) || hb.endsWith(`.${ha}`)
+}
+
+/**
+ * While the tile is on a player embed, only same-site / player-CDN / media
+ * navigations are allowed — everything else is treated as a hijack.
+ */
+function isAllowedPlayerNav(fromUrl, toUrl) {
+  const raw = String(toUrl || '')
+  if (!raw || /^(about:blank|about:srcdoc|chrome:|chrome-error:|data:)/i.test(raw)) return true
+  if (shouldBlockBrowserNavigation(raw)) return false
+  if (isPlayerEmbedHost(raw)) return true
+  if (fromUrl && sameBrowserSite(fromUrl, raw)) return true
+  try {
+    const u = new URL(raw)
+    const host = u.hostname.replace(/^www\./i, '').toLowerCase()
+    const path = u.pathname.toLowerCase()
+    if (
+      /(^|\.)(b-cdn\.net|cloudfront\.net|akamaized\.net|akamaihd\.net|fastly\.net|jsdelivr\.net|unpkg\.com|clappr\.io|jwpcdn\.com|jwplatform\.com|strmd\.|cdn\.streamed|ppvservices\.st|embed\.ppv\.st|videodelivery\.net|mux\.com)$/i.test(
+        host,
+      )
+    ) {
+      return true
+    }
+    if (/\.(m3u8|mp4|ts|m4s|webm|mkv)(\?|$)/i.test(path)) return true
+  } catch {
+    return false
+  }
+  return false
+}
+
+/** Lock the BrowserView onto the current player embed — block off-site ad hijacks. */
+function installEmbedNavGuard(contents) {
+  if (!contents || contents.isDestroyed() || contents.__jiyuEmbedNavGuard) return
+  contents.__jiyuEmbedNavGuard = true
+  let lastEmbedUrl = ''
+  const remember = (url) => {
+    if (isPlayerEmbedHost(url)) lastEmbedUrl = String(url || '')
+    try {
+      const fs = require('fs')
+      const path = require('path')
+      const file = path.join(app.getPath('userData'), 'browser-now.json')
+      fs.writeFileSync(
+        file,
+        JSON.stringify(
+          {
+            at: new Date().toISOString(),
+            url: String(url || ''),
+            lastEmbedUrl: lastEmbedUrl || null,
+          },
+          null,
+          2,
+        ),
+      )
+    } catch {
+      /* ignore */
+    }
+  }
+  try {
+    remember(contents.getURL())
+  } catch {
+    /* ignore */
+  }
+  contents.on('did-navigate', (_event, url) => {
+    remember(url)
+  })
+  contents.on('did-navigate-in-page', (_event, url) => {
+    remember(url)
+  })
+  contents.on('will-navigate', (event, url) => {
+    if (isStreamRefererOnlyUrl(url)) {
+      event.preventDefault()
+      console.log('[browser] blocked stream-referer page', String(url || '').slice(0, 140))
+      return
+    }
+    if (isDeadPlaceholderEmbedUrl(url)) {
+      event.preventDefault()
+      console.log('[browser] blocked dead embed host', String(url || '').slice(0, 140))
+      let current = ''
+      try {
+        current = contents.getURL() || ''
+      } catch {
+        current = ''
+      }
+      if (
+        /rivestream\.(ru|app)|vaplayer\.ru|vidup\.to|videasy\.to|cinezo\.live|vidzee\.wtf|mapple\.fun|primesrc\.me/i.test(
+          current,
+        )
+      ) {
+        forceRiveEmbedHop(contents, 'nav-dead-host')
+      } else if (lastEmbedUrl && /rivestream\.(ru|app)/i.test(lastEmbedUrl)) {
+        void contents.loadURL(lastEmbedUrl).then(() => {
+          setTimeout(() => scheduleRiveEmbedAuto(contents), 400)
+        }).catch(() => {})
+      }
+      return
+    }
+    if (shouldBlockBrowserNavigation(url)) {
+      event.preventDefault()
+      console.log('[browser] blocked ad nav', String(url || '').slice(0, 140))
+      return
+    }
+    let current = ''
+    try {
+      current = contents.getURL() || ''
+    } catch {
+      current = ''
+    }
+    const locked = isPlayerEmbedHost(current) || isPlayerEmbedHost(lastEmbedUrl)
+    if (!locked) return
+    const from = isPlayerEmbedHost(current) ? current : lastEmbedUrl
+    if (isAllowedPlayerNav(from, url)) return
+    event.preventDefault()
+    console.log('[browser] blocked embed hijack', String(url || '').slice(0, 140))
+    if (/^https?:\/\//i.test(url)) showAdDock(url)
+  })
+  try {
+    contents.on('will-frame-navigate', (details) => {
+      const target = details?.url
+      if (!shouldBlockBrowserNavigation(target)) return
+      details.preventDefault?.()
+      if (isDeadPlaceholderEmbedUrl(target)) {
+        forceRiveEmbedHop(contents, 'frame-nav-dead-host')
+      }
+    })
+  } catch {
+    /* older Electron */
+  }
+  contents.on('did-finish-load', () => {
+    let current = ''
+    try {
+      current = contents.getURL() || ''
+    } catch {
+      return
+    }
+    if (!lastEmbedUrl) return
+    if (isPlayerEmbedHost(current) || isAllowedPlayerNav(lastEmbedUrl, current)) return
+    console.log('[browser] restoring embed after hijack', current.slice(0, 120))
+    void contents.loadURL(lastEmbedUrl).catch(() => {})
+  })
+}
+
+function installWebSessionDownloadGuard(ses) {
+  if (!ses || ses.__jiyuDownloadGuard) return
+  ses.__jiyuDownloadGuard = true
+  ses.on('will-download', (event, item) => {
+    const url = (() => {
+      try {
+        return item.getURL()
+      } catch {
+        return ''
+      }
+    })()
+    const name = (() => {
+      try {
+        return item.getFilename()
+      } catch {
+        return ''
+      }
+    })()
+    // Never allow embeds to push installers / random files into a Save dialog.
+    event.preventDefault()
+    try {
+      item.cancel()
+    } catch {
+      /* ignore */
+    }
+    console.log('[browser] blocked download', name || url.slice(0, 160))
+  })
+}
+
+function isSportsEmbedHost(url) {
+  try {
+    const host = new URL(url).hostname.replace(/^www\./i, '').toLowerCase()
+    return (
+      host === 'embed.st' ||
+      host.endsWith('.embed.st') ||
+      host === 'embedhd.st' ||
+      host.endsWith('.embedhd.st') ||
+      host === 'embedindia.st' ||
+      host.endsWith('.embedindia.st') ||
+      host === 'streamed.pk' ||
+      host.endsWith('.streamed.pk') ||
+      host === 'ppv.st' ||
+      host.endsWith('.ppv.st')
+    )
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Live sports OR Replay VOD embeds — both need the main-process play kick
+ * (muted→unmute + at most one center click). Replay hosts were previously
+ * excluded, so soccerfull/Dood loaded a frame then sat paused.
+ */
+function needsSportsStyleAutoplay(url) {
+  return isSportsEmbedHost(url) || isReplayAdSensitiveUrl(url)
+}
+
+/**
+ * LiveXTV / soccerfull / DoodStream-style VOD hosts refuse playback when they
+ * detect adblock (bait .adsbox CSS + blocked googlesyndication). Soften shield.
+ */
+function isReplayAdSensitiveUrl(url) {
+  try {
+    const parsed = new URL(String(url || ''))
+    const host = parsed.hostname.replace(/^www\./i, '').toLowerCase()
+    if (host === 'soccerfull.net' || host.endsWith('.soccerfull.net')) return true
+    if (host.includes('livextv')) return true
+    if (host === 'footreplays.com' || host.endsWith('.footreplays.com')) return true
+    // DoodStream mirrors: /d/{id} or /e/{id} short paths on rotating hosts.
+    if (/^\/[de]\/[a-z0-9]{6,}/i.test(parsed.pathname || '')) return true
+    return false
+  } catch {
+    return false
+  }
+}
+
+function browserSessionAllowsReplayAds() {
+  const urls = []
+  try {
+    if (webBrowserView && !webBrowserView.webContents.isDestroyed()) {
+      urls.push(webBrowserView.webContents.getURL() || '')
+    }
+  } catch {
+    /* ignore */
+  }
+  try {
+    for (const view of multiWebViews.values()) {
+      if (view && !view.webContents.isDestroyed()) {
+        urls.push(view.webContents.getURL() || '')
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return urls.some((u) => isReplayAdSensitiveUrl(u))
+}
+
+function isGoogleAdsNetworkHost(host) {
+  const h = String(host || '')
+    .replace(/^www\./i, '')
+    .toLowerCase()
+  return /(^|\.)(doubleclick\.net|googlesyndication\.com|googleadservices\.com|adservice\.google\.com|googletagservices\.com|googletagmanager\.com)$/i.test(
+    h,
+  )
+}
+
+function isLikelyAdFrameUrl(url) {
+  try {
+    const host = new URL(url).hostname.replace(/^www\./i, '').toLowerCase()
+    const path = new URL(url).pathname.toLowerCase()
+    return (
+      /(^|\.)(doubleclick\.net|googlesyndication\.com|googleadservices\.com|adservice\.google\.com|popads\.net|propellerads\.com|exoclick\.com|trafficjunky\.net|juicyads\.com|adnxs\.com|moatads\.com|taboola\.com|outbrain\.com|adaround\.net)$/i.test(
+        host,
+      ) ||
+      /\/banner\//i.test(path)
+    )
+  } catch {
+    return false
+  }
+}
+
+/** Cap hung executeJavaScript on dead/ad iframes (sports embeds spawn many). */
+function raceFrameExec(promise, ms = 1200) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('frame-exec-timeout')), ms)
+    Promise.resolve(promise).then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (err) => {
+        clearTimeout(timer)
+        reject(err)
+      },
+    )
+  })
+}
+
+/**
+ * Collect BrowserView frames, sports/player first, skip obvious ad iframes.
+ * @param {Electron.WebContents} contents
+ * @param {{ maxFrames?: number }} [options]
+ */
+function collectContentFrames(contents, options = {}) {
+  const maxFrames = Math.max(1, Number(options.maxFrames) || 8)
+  const frames = []
+  try {
+    const root = contents.mainFrame
+    if (root?.framesInSubtree?.length) frames.push(...root.framesInSubtree)
+    else if (root) {
+      const walk = (frame) => {
+        if (!frame) return
+        frames.push(frame)
+        for (const child of frame.frames || []) walk(child)
+      }
+      walk(root)
+    }
+  } catch {
+    /* ignore */
+  }
+  if (frames.length === 0 && contents.mainFrame) frames.push(contents.mainFrame)
+
+  const scored = frames.filter(Boolean).map((frame) => {
+    const url = String(frame.url || '')
+    let score = 1
+    if (!url || url === 'about:blank') score = 0
+    else if (isSportsEmbedHost(url) || isReplayAdSensitiveUrl(url)) score = 20
+    else if (/player|embed|stream|hls|video/i.test(url)) score = 8
+    else if (isLikelyAdFrameUrl(url)) score = -50
+    return { frame, score }
+  })
+  scored.sort((a, b) => b.score - a.score)
+  const usable = scored.filter((row) => row.score >= 0)
+  const pick = (usable.length ? usable : scored).slice(0, maxFrames)
+  return pick.map((row) => row.frame)
+}
+
+/** Soften overlays + trap window.open so ads don't steal the main player. */
+const BROWSER_AD_SHIELD_SCRIPT = `(() => {
+  try {
+    const host = String(location.hostname || '').replace(/^www\\./i, '').toLowerCase();
+    const path = String(location.pathname || '');
+    // Wait for real navigation — blank frames must not lock in the hard shield.
+    if (!host || /^about:/i.test(String(location.protocol || ''))) return 'skip-blank';
+    // LiveXTV / soccerfull / DoodStream VODs detect .adsbox bait + blocked ad scripts.
+    const replayAds =
+      /(^|\\.)soccerfull\\.net$/i.test(host) ||
+      /livextv/i.test(host) ||
+      /(^|\\.)footreplays\\.com$/i.test(host) ||
+      /^\\/[de]\\/[a-z0-9]{6,}/i.test(path);
+    // Always re-assert — early-return must not skip FS block on later injects.
+    try {
+      if (!window.__jiyuFsBlocked) {
+        window.__jiyuFsBlocked = true;
+        const reject = () => Promise.reject(new DOMException('Fullscreen blocked in Jiyu', 'NotAllowedError'));
+        const patch = (proto, key) => {
+          try {
+            if (proto && typeof proto[key] === 'function') proto[key] = reject;
+          } catch (_) {}
+        };
+        patch(Element.prototype, 'requestFullscreen');
+        patch(Element.prototype, 'webkitRequestFullscreen');
+        patch(Element.prototype, 'webkitRequestFullScreen');
+        patch(HTMLElement.prototype, 'webkitRequestFullScreen');
+      }
+      try {
+        if (document.fullscreenElement) document.exitFullscreen();
+        if (document.webkitFullscreenElement) document.webkitExitFullscreen();
+      } catch (_) {}
+    } catch (_) {}
+    if (window.__jiyuAdShield) return 'bound';
+    window.__jiyuAdShield = true;
+    const report = (url) => {
+      try { console.log('jiyu-ad-open:' + String(url || '')); } catch (_) {}
+    };
+    const wrapOpen = () => {
+      try {
+        const nativeOpen = window.open;
+        window.open = function (url) {
+          report(url);
+          return null;
+        };
+        window.open.__jiyuWrapped = true;
+        window.open.toString = () => 'function open() { [native code] }';
+        void nativeOpen;
+      } catch (_) {}
+    };
+    // Fake notification interstitials (treasure chest / "You received a message!" / OK).
+    // Narrow text match only — never touch .adsbox bait nodes on replay hosts.
+    const hideFakePushAds = () => {
+      try {
+        const looksFake = (text) => {
+          if (!text) return false;
+          if (/You received a message!?/i.test(text)) return true;
+          if (/You have (?:a |received a )?message!?/i.test(text)) return true;
+          if (/New message!?/i.test(text) && /\bOK\b/i.test(text)) return true;
+          if (/A Surprise Is Waiting/i.test(text) && /OPEN\\s*NOW/i.test(text)) return true;
+          if (
+            /(?:push|browser)\\s+notification/i.test(text) &&
+            /\b(?:OK|Allow|Accept|Open)\\b/i.test(text) &&
+            text.length < 280
+          ) {
+            return true;
+          }
+          return false;
+        };
+        const nodes = document.querySelectorAll('div,section,aside,article');
+        for (const el of nodes) {
+          if (!el || el.getAttribute('data-jiyu-ad-hide') === '1') continue;
+          let text = '';
+          try { text = String(el.innerText || el.textContent || ''); } catch (_) { continue; }
+          text = text.replace(/\\s+/g, ' ').trim();
+          if (!text || text.length > 360) continue;
+          if (!looksFake(text)) continue;
+          let target = el;
+          try {
+            for (let i = 0; i < 6 && target.parentElement; i += 1) {
+              const parent = target.parentElement;
+              if (!parent || parent === document.body || parent === document.documentElement) break;
+              const st = window.getComputedStyle(parent);
+              const pos = st ? String(st.position || '') : '';
+              if (pos === 'fixed' || pos === 'absolute' || pos === 'sticky') {
+                target = parent;
+                break;
+              }
+              let parentText = '';
+              try { parentText = String(parent.innerText || '').replace(/\\s+/g, ' ').trim(); } catch (_) {}
+              if (parentText && parentText.length <= text.length + 64 && looksFake(parentText)) {
+                target = parent;
+                continue;
+              }
+              break;
+            }
+          } catch (_) {}
+          try {
+            target.setAttribute('data-jiyu-ad-hide', '1');
+            target.style.setProperty('display', 'none', 'important');
+            target.style.setProperty('visibility', 'hidden', 'important');
+            target.style.setProperty('pointer-events', 'none', 'important');
+            target.style.setProperty('opacity', '0', 'important');
+            try { target.remove(); } catch (_) {}
+          } catch (_) {}
+        }
+      } catch (_) {}
+    };
+    const armFakePushWatch = () => {
+      try {
+        hideFakePushAds();
+        if (window.__jiyuSurpriseObs || !document.documentElement) return;
+        let scheduled = 0;
+        const kick = () => {
+          if (scheduled) return;
+          scheduled = window.setTimeout(() => {
+            scheduled = 0;
+            try { hideFakePushAds(); } catch (_) {}
+          }, 200);
+        };
+        const obs = new MutationObserver(kick);
+        obs.observe(document.documentElement, { childList: true, subtree: true });
+        window.__jiyuSurpriseObs = obs;
+        window.setInterval(() => {
+          try { hideFakePushAds(); } catch (_) {}
+        }, 2000);
+      } catch (_) {
+        try { hideFakePushAds(); } catch (_) {}
+      }
+    };
+    if (replayAds) {
+      // Keep FS block + route popups to the ad dock, but do NOT hide bait nodes
+      // or ad iframes — those hosts refuse to start the video otherwise.
+      wrapOpen();
+      armFakePushWatch();
+      return 'replay-soft';
+    }
+    try {
+      const style = document.createElement('style');
+      style.id = 'jiyu-ad-shield';
+      style.textContent = [
+        'iframe[src*="doubleclick"],iframe[src*="googlesyndication"],iframe[src*="popads"],',
+        'iframe[src*="exoclick"],iframe[src*="trafficjunky"],iframe[src*="juicyads"],',
+        'iframe[src*="pornhub"],iframe[src*="xvideos"],iframe[src*="xnxx"],',
+        'iframe[src*="chaturbate"],iframe[src*="stripchat"],iframe[src*="livejasmin"],',
+        '[id*="ad-overlay"],[class*="ad-overlay"],[id*="adsbox"],[class*="adsbox"],',
+        '#ol-ads,[class*="pop-under"],[class*="popunder"],',
+        '[data-jiyu-ad-hide="1"]',
+        '{ display:none !important; visibility:hidden !important; pointer-events:none !important; }',
+      ].join('');
+      (document.documentElement || document.head || document.body)?.appendChild(style);
+    } catch (_) {}
+    wrapOpen();
+    armFakePushWatch();
+    return 'bound';
+  } catch (_) {
+    return 'error';
+  }
+})();`
+
+/**
+ * Rive embed (rivestream.ru/embed): Direct mode auto-rotates; Embed does not.
+ * Seed Embed + Fast-Server (ADF) before page JS, then hop starred servers on error.
+ */
+/** Self-contained hop — jump straight to the next known embed host (skip dead PRIME/ADF shells). */
+const RIVESTREAM_FORCE_HOP_SCRIPT = `(() => {
+  try {
+    const host = String(location.hostname || '').replace(/^www\\./i, '').toLowerCase();
+    const ORDER = ['VUP','VIDZ','CIN','MAP','SUP','AGGREGATOR','TORR','VAP','EASY','PRIME','SMASH','VID','ADF'];
+    const HOP_KEY = 'jiyu.rive.hopIdx';
+    const EP_KEY = 'jiyu.rive.hopEp';
+    const LAST_KEY = 'jiyu.rive.lastGood';
+
+    const parseTv = () => {
+      try {
+        const u = new URL(location.href);
+        let id = u.searchParams.get('id') || u.searchParams.get('tmdb') || '';
+        let season = u.searchParams.get('season') || '1';
+        let episode = u.searchParams.get('episode') || '1';
+        const m = u.pathname.match(/\\/(?:embed\\/)?tv\\/(\\d+)(?:\\/(\\d+)(?:\\/(\\d+))?)?/i);
+        if (m) {
+          id = id || m[1];
+          season = m[2] || season;
+          episode = m[3] || episode;
+        }
+        const m2 = u.pathname.match(/\\/tv\\/(\\d+)-(\\d+)-(\\d+)/i);
+        if (m2) {
+          id = id || m2[1];
+          season = m2[2] || season;
+          episode = m2[3] || episode;
+        }
+        if (!id) {
+          try {
+            id = String(sessionStorage.getItem('jiyu.rive.tmdb') || '');
+            season = String(sessionStorage.getItem('jiyu.rive.season') || season);
+            episode = String(sessionStorage.getItem('jiyu.rive.episode') || episode);
+          } catch (_) {}
+        }
+        return { id: String(id || '').trim(), season: String(season || '1'), episode: String(episode || '1') };
+      } catch (_) {
+        return { id: '', season: '1', episode: '1' };
+      }
+    };
+
+    const directFor = (code, id, season, episode) => {
+      if (!id) return null;
+      const s = season || '1';
+      const e = episode || '1';
+      switch (code) {
+        case 'VAP': return 'https://vaplayer.ru/embed/tv/' + id + '/' + s + '/' + e;
+        case 'VUP': return 'https://vidup.to/tv/' + id + '/' + s + '/' + e + '?autoPlay=true';
+        case 'EASY': return 'https://player.videasy.to/tv/' + id + '/' + s + '/' + e;
+        case 'CIN': return 'https://player.cinezo.live/embed/tv/' + id + '/' + s + '/' + e + '?autoplay=true&poster=true';
+        case 'VIDZ': return 'https://player.vidzee.wtf/embed/tv/' + id + '/' + s + '/' + e;
+        case 'SUP': return null; // needs Rive tokenized streamingnow URL
+        case 'AGGREGATOR': return 'https://rivestream.ru/embed/agg?type=tv&id=' + id + '&season=' + s + '&episode=' + e;
+        case 'MAP': return 'https://mapple.fun/watch/tv/' + id + '-' + s + '-' + e + '?nextButton=true&autoPlay=true&autoNext=true';
+        case 'TORR': return 'https://rivestream.ru/embed/torrent?type=tv&id=' + id + '&season=' + s + '&episode=' + e;
+        case 'PRIME': return 'https://primesrc.me/embed/tv?tmdb=' + id + '&season=' + s + '&episode=' + e;
+        default: return null;
+      }
+    };
+
+    const { id, season, episode } = parseTv();
+    if (id) {
+      try {
+        sessionStorage.setItem('jiyu.rive.tmdb', id);
+        sessionStorage.setItem('jiyu.rive.season', season);
+        sessionStorage.setItem('jiyu.rive.episode', episode);
+        sessionStorage.setItem(EP_KEY, 'tv:' + id + ':' + season + ':' + episode);
+      } catch (_) {}
+    }
+
+    let idx = 0;
+    try {
+      const raw = sessionStorage.getItem(HOP_KEY);
+      if (raw != null && Number.isFinite(Number(raw))) {
+        idx = Number(raw) || 0;
+      } else {
+        const cur = String(localStorage.getItem('RiveStreamLatestAgg') || '').trim();
+        const at = ORDER.indexOf(cur);
+        idx = at >= 0 ? at : 0;
+      }
+    } catch (_) {}
+
+    for (let step = 1; step <= ORDER.length; step += 1) {
+      const next = idx + step;
+      if (next >= ORDER.length) break;
+      const code = ORDER[next];
+      const target = directFor(code, id, season, episode);
+      if (!target && code !== 'SUP') continue;
+      try { sessionStorage.setItem(HOP_KEY, String(next)); } catch (_) {}
+      try {
+        localStorage.setItem('RiveStreamWatchMode', 'embed');
+        localStorage.setItem('RiveStreamEmbedMode', 'true');
+        localStorage.setItem('RiveStreamLatestAgg', code);
+        localStorage.removeItem(LAST_KEY);
+      } catch (_) {}
+      console.log('jiyu-rive-force-hop:' + code);
+      if (target) {
+        location.replace(target);
+        return code;
+      }
+      // SUP etc. — fall back to Rive shell with seeded aggregator.
+      location.replace(
+        'https://rivestream.ru/embed?type=tv&id=' + encodeURIComponent(id) +
+        '&season=' + encodeURIComponent(season) + '&episode=' + encodeURIComponent(episode) + '#jiyuAuto=1'
+      );
+      return code;
+    }
+
+    try {
+      if (!document.getElementById('jiyu-rive-no-source')) {
+        const banner = document.createElement('div');
+        banner.id = 'jiyu-rive-no-source';
+        banner.textContent = 'No working RiveStream source for this episode.';
+        banner.setAttribute('style',
+          'position:fixed;inset:auto 12px 12px 12px;z-index:2147483647;padding:12px 14px;' +
+          'border-radius:10px;background:rgba(12,14,18,0.92);color:#f3f6fb;font:600 14px/1.35 Segoe UI,sans-serif;' +
+          'border:1px solid rgba(255,255,255,0.12);pointer-events:none;');
+        (document.body || document.documentElement).appendChild(banner);
+      }
+    } catch (_) {}
+    return 'exhausted';
+  } catch (e) {
+    return 'err';
+  }
+})();`
+
+const RIVESTREAM_EMBED_AUTO_SCRIPT = `(() => {
+  try {
+    const host = String(location.hostname || '').replace(/^www\\./i, '').toLowerCase();
+    const onRive = /(^|\\.)rivestream\\.(ru|app)$/i.test(host);
+    const onDirect =
+      /(^|\\.)(vaplayer\\.ru|vidup\\.to|videasy\\.to|cinezo\\.live|vidzee\\.wtf|mapple\\.fun|primesrc\\.me|streamingnow\\.mov)$/i.test(host);
+    if (!onRive && !onDirect) return 'skip-host';
+
+    // Prefer path-based hosts. VAP shells nextgencloudfabric "Cloud:" ads then whites.
+    const ORDER = ['VUP','VIDZ','CIN','MAP','SUP','AGGREGATOR','TORR','VAP','EASY','PRIME','SMASH','VID','ADF'];
+    const LAST_KEY = 'jiyu.rive.lastGood';
+    const HOP_KEY = 'jiyu.rive.hopIdx';
+    const EP_KEY = 'jiyu.rive.hopEp';
+
+    const parseTv = () => {
+      try {
+        const u = new URL(location.href);
+        let id = u.searchParams.get('id') || u.searchParams.get('tmdb') || '';
+        let season = u.searchParams.get('season') || '1';
+        let episode = u.searchParams.get('episode') || '1';
+        const m = u.pathname.match(/\\/(?:embed\\/)?tv\\/(\\d+)(?:\\/(\\d+)(?:\\/(\\d+))?)?/i);
+        if (m) {
+          id = id || m[1];
+          season = m[2] || season;
+          episode = m[3] || episode;
+        }
+        const m2 = u.pathname.match(/\\/tv\\/(\\d+)-(\\d+)-(\\d+)/i);
+        if (m2) {
+          id = id || m2[1];
+          season = m2[2] || season;
+          episode = m2[3] || episode;
+        }
+        if (!id) {
+          try {
+            id = String(sessionStorage.getItem('jiyu.rive.tmdb') || '');
+            season = String(sessionStorage.getItem('jiyu.rive.season') || season);
+            episode = String(sessionStorage.getItem('jiyu.rive.episode') || episode);
+          } catch (_) {}
+        }
+        return { id: String(id || '').trim(), season: String(season || '1'), episode: String(episode || '1') };
+      } catch (_) {
+        return { id: '', season: '1', episode: '1' };
+      }
+    };
+
+    const directFor = (code, id, season, episode) => {
+      if (!id) return null;
+      const s = season || '1';
+      const e = episode || '1';
+      switch (code) {
+        case 'VAP': return 'https://vaplayer.ru/embed/tv/' + id + '/' + s + '/' + e;
+        case 'VUP': return 'https://vidup.to/tv/' + id + '/' + s + '/' + e + '?autoPlay=true';
+        case 'EASY': return 'https://player.videasy.to/tv/' + id + '/' + s + '/' + e;
+        case 'CIN': return 'https://player.cinezo.live/embed/tv/' + id + '/' + s + '/' + e + '?autoplay=true&poster=true';
+        case 'VIDZ': return 'https://player.vidzee.wtf/embed/tv/' + id + '/' + s + '/' + e;
+        case 'AGGREGATOR': return 'https://rivestream.ru/embed/agg?type=tv&id=' + id + '&season=' + s + '&episode=' + e;
+        case 'MAP': return 'https://mapple.fun/watch/tv/' + id + '-' + s + '-' + e + '?nextButton=true&autoPlay=true&autoNext=true';
+        case 'TORR': return 'https://rivestream.ru/embed/torrent?type=tv&id=' + id + '&season=' + s + '&episode=' + e;
+        case 'PRIME': return 'https://primesrc.me/embed/tv?tmdb=' + id + '&season=' + s + '&episode=' + e;
+        default: return null;
+      }
+    };
+
+    const seedPrefs = (code) => {
+      try {
+        // Prefer Direct (Vanguard/Citadel/…) first; Embed servers are hop fallback.
+        localStorage.setItem('RiveStreamWatchMode', 'direct');
+        localStorage.setItem('RiveStreamEmbedMode', 'false');
+        if (code) localStorage.setItem('RiveStreamLatestAgg', code);
+      } catch (_) {}
+    };
+
+    const seedEmbedPrefs = (code) => {
+      try {
+        localStorage.setItem('RiveStreamWatchMode', 'embed');
+        localStorage.setItem('RiveStreamEmbedMode', 'true');
+        if (code) localStorage.setItem('RiveStreamLatestAgg', code);
+      } catch (_) {}
+    };
+
+    const { id: tvId, season: tvSeason, episode: tvEpisode } = parseTv();
+    if (tvId) {
+      try {
+        sessionStorage.setItem('jiyu.rive.tmdb', tvId);
+        sessionStorage.setItem('jiyu.rive.season', tvSeason);
+        sessionStorage.setItem('jiyu.rive.episode', tvEpisode);
+        const ep = 'tv:' + tvId + ':' + tvSeason + ':' + tvEpisode;
+        if (sessionStorage.getItem(EP_KEY) !== ep) {
+          sessionStorage.setItem(EP_KEY, ep);
+          sessionStorage.removeItem(HOP_KEY);
+        }
+      } catch (_) {}
+    }
+
+    const prefer = (() => {
+      try {
+        const hopRaw = sessionStorage.getItem(HOP_KEY);
+        if (hopRaw != null) {
+          const idx = Number(hopRaw);
+          if (Number.isFinite(idx) && ORDER[idx]) return ORDER[idx];
+        }
+        const last = String(localStorage.getItem(LAST_KEY) || '').trim();
+        if (last && ORDER.includes(last) && last !== 'ADF' && last !== 'PRIME' && last !== 'VAP') return last;
+      } catch (_) {}
+      return 'VUP';
+    })();
+
+    // Stay on Rivestream Direct first. Only hop to Embed hosts after Direct fails.
+    const hoppingToEmbed = (() => {
+      try { return sessionStorage.getItem(HOP_KEY) != null; } catch (_) { return false; }
+    })();
+    if (hoppingToEmbed) seedEmbedPrefs(prefer);
+    else seedPrefs(prefer);
+
+    // Click Direct mode control when still on the Rive shell.
+    if (onRive && !hoppingToEmbed) {
+      const clickDirect = () => {
+        try {
+          for (const el of Array.from(document.querySelectorAll('button, [role="button"], div, span, label, a'))) {
+            if (!(el instanceof HTMLElement)) continue;
+            if (el.closest('video, audio, iframe')) continue;
+            const label = String(el.getAttribute('aria-label') || el.getAttribute('title') || el.textContent || '')
+              .replace(/\\s+/g, ' ').trim();
+            if (!label || label.length > 48) continue;
+            if (!/^direct$/i.test(label) && !/^playback\\s*mode\\s*:?\\s*direct$/i.test(label)) continue;
+            el.click();
+            return;
+          }
+        } catch (_) {}
+      };
+      clickDirect();
+      setTimeout(clickDirect, 700);
+      setTimeout(clickDirect, 1800);
+    }
+
+    // When already hopping, jump once to an Embed player URL.
+    if (hoppingToEmbed && onRive && /\\/embed/i.test(String(location.pathname || '') + String(location.search || '')) && !/\\/embed\\/(agg|torrent)/i.test(location.pathname || '')) {
+      const jumpKey = 'jiyu.rive.directJump:' + (tvId || '') + ':' + tvSeason + ':' + tvEpisode;
+      let already = false;
+      try { already = sessionStorage.getItem(jumpKey) === '1'; } catch (_) {}
+      const target = directFor(prefer, tvId, tvSeason, tvEpisode);
+      if (target && !already && !window.__jiyuRiveDirectJump) {
+        window.__jiyuRiveDirectJump = true;
+        try { sessionStorage.setItem(jumpKey, '1'); } catch (_) {}
+        console.log('jiyu-rive-embed-jump:' + prefer);
+        location.replace(target);
+        return 'embed-jump';
+      }
+    }
+
+    const isBrokenSrc = (src) => {
+      const s = String(src || '');
+      if (!s || s === 'about:blank') return false;
+      if (/\\/undefined(?:\\/|\\?|#|$)/i.test(s)) return true;
+      if (/[?&](?:tmdb|id)=undefined\\b/i.test(s)) return true;
+      if (/chrome-error:|chromewebdata/i.test(s)) return true;
+      try {
+        const h = new URL(s, location.href).hostname.replace(/^www\\./i, '').toLowerCase();
+        if (/(^|\\.)example\\.(com|net|org)$/i.test(h)) return true;
+        if (/(^|\\.)invalid$/i.test(h)) return true;
+        // VAP handoff that only paints Cloud: ad tips (no real stream for many titles).
+        if (/(^|\\.)nextgencloudfabric\\.com$/i.test(h)) return true;
+      } catch (_) {}
+      return false;
+    };
+
+    const textLooksDead = () => {
+      const t = String(document.body && document.body.innerText || '');
+      // Loading copy is not a failure — hopping here caused white↔spinner flashes.
+      if (/getting things ready|loading|buffering|please wait/i.test(t)) return false;
+      return /Cloud:\\s*use AD-Blocker|Cloud:\\s*use video downloader|no working sources|access denied|http error 403|err_name_not_resolved|Firefox Can't Open This Page|will not allow Firefox to display|X-Frame-Options|to protect your security/i.test(t);
+    };
+
+    const hideServerChrome = () => {
+      if (!onRive) return;
+      try {
+        let style = document.getElementById('jiyu-rive-hide-servers');
+        if (!style) {
+          style = document.createElement('style');
+          style.id = 'jiyu-rive-hide-servers';
+          (document.head || document.documentElement).appendChild(style);
+        }
+        const PROVIDER =
+          /\\b(Vanguard|Citadel|FlowCast|Flowcast|Apex|Pulse|Nova|Hydra|Shadow|Astra|Zenith|Orion|Vertex|Prism|Forge|Beacon|Harbor|Summit|Cascade)\\b/i;
+        style.textContent = [
+          '[aria-label="Playback Mode"],',
+          '[aria-label="Select Aggregator Server"],',
+          '[aria-label="Select Direct Server"],',
+          '[aria-label="Select Local Media Server"],',
+          '[aria-label="Select Server"],',
+          '[aria-label*="Server"], [aria-label*="server"],',
+          '[aria-label*="Playback Mode"],',
+          '[aria-label*="Controls Bar"], [aria-label*="controls bar"],',
+          '[title*="Controls Bar"],',
+          '[aria-label="Expand Controls Bar"], [aria-label="Shrink Controls Bar"],',
+          '[title="Expand Controls Bar"], [title="Shrink Controls Bar"],',
+          '[aria-label*="Quick Menu"], [aria-label*="quick menu"], [title*="Quick Menu"],',
+          'button#source, button[name="source"],',
+          'select#watchMode, select[name="watchMode"],',
+          '[class*="watchBar"], [class*="WatchBar"],',
+          '[class*="modeSelect"], [class*="serverSelect"], [class*="ServerSelect"],',
+          '[class*="selectWrapper"], [class*="pillText"], [class*="pillChevron"],',
+          '[class*="expandedContent"], [class*="collapsedContent"],',
+          '[class*="collapsedState"], [class*="expandedState"],',
+          '[class*="hideNavBtn"], [class*="sourceBar"], [class*="SourceBar"],',
+          '[class*="quickMenu"], [class*="QuickMenu"]',
+          '{ display: none !important; visibility: hidden !important; opacity: 0 !important;',
+          '  pointer-events: none !important; height: 0 !important; max-height: 0 !important;',
+          '  overflow: hidden !important; margin: 0 !important; padding: 0 !important; }',
+        ].join('');
+        const kill = (el) => {
+          if (!(el instanceof HTMLElement)) return;
+          if (el.closest('video, audio, iframe')) return;
+          el.style.setProperty('display', 'none', 'important');
+          el.style.setProperty('visibility', 'hidden', 'important');
+          el.style.setProperty('opacity', '0', 'important');
+          el.style.setProperty('pointer-events', 'none', 'important');
+          el.style.setProperty('height', '0', 'important');
+          el.style.setProperty('max-height', '0', 'important');
+          el.style.setProperty('overflow', 'hidden', 'important');
+        };
+        const killBar = (el) => {
+          kill(el);
+          let p = el.parentElement;
+          for (let i = 0; i < 5 && p; i++) {
+            if (p === document.body || p === document.documentElement) break;
+            const pt = String(p.textContent || '').replace(/\\s+/g, ' ').trim();
+            if (pt.length > 220) break;
+            const hasMode = /\\b(Direct|Embed)\\b/i.test(pt);
+            const hasServer = PROVIDER.test(pt) || /\\bServer\\s*\\d+/i.test(pt) || /\\b\\d{3,4}p\\b/i.test(pt);
+            if (hasMode && hasServer) kill(p);
+            p = p.parentElement;
+          }
+        };
+        for (const el of Array.from(document.querySelectorAll(
+          '[aria-label*="Controls Bar"], [aria-label*="controls bar"], [aria-label*="Server"], [aria-label*="server"],' +
+          '[aria-label*="Playback Mode"], [aria-label*="Quick Menu"],' +
+          '[class*="watchBar"], [class*="serverSelect"], [class*="sourceBar"], [class*="quickMenu"], [class*="QuickMenu"]',
+        ))) {
+          kill(el);
+        }
+        for (const el of Array.from(document.querySelectorAll('button, div, span, section, nav, label, a'))) {
+          if (!(el instanceof HTMLElement)) continue;
+          if (el.closest('video, audio, iframe')) continue;
+          const raw = String(el.textContent || '').replace(/\\s+/g, ' ').trim();
+          if (!raw || raw.length > 160) continue;
+          if (/Servers\\s*&\\s*Mode/i.test(raw) || /^QUICK\\s*MENU$/i.test(raw)) {
+            killBar(el);
+            continue;
+          }
+          const looksLikeServerCapsule =
+            !el.querySelector('iframe, video') &&
+            (
+              (/\\bDirect\\b/i.test(raw) && (PROVIDER.test(raw) || /\\b\\d{3,4}p\\b/i.test(raw))) ||
+              (/\\bEmbed\\b/i.test(raw) && /\\bServer\\s*\\d+/i.test(raw))
+            );
+          if (looksLikeServerCapsule) killBar(el);
+        }
+      } catch (_) {}
+    };
+
+    const nudgePlay = () => {
+      try {
+        for (const v of Array.from(document.querySelectorAll('video'))) {
+          try { v.muted = false; v.play?.(); } catch (_) {}
+        }
+        const hit = Array.from(document.querySelectorAll('button, [role="button"], div, span')).find((el) => {
+          if (!(el instanceof HTMLElement)) return false;
+          const t = String(el.getAttribute('aria-label') || el.textContent || '').replace(/\\s+/g, ' ').trim();
+          if (!t || t.length > 40) return false;
+          return /^(play|watch|start)$/i.test(t) || /^play\\b/i.test(t);
+        });
+        if (hit) hit.click();
+        else {
+          const mid = document.elementFromPoint(Math.floor(window.innerWidth / 2), Math.floor(window.innerHeight / 2));
+          if (mid) mid.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+        }
+      } catch (_) {}
+    };
+
+    const hasBrokenFrame = () =>
+      Array.from(document.querySelectorAll('iframe[src]')).some((f) => isBrokenSrc(f.getAttribute('src')));
+
+    const hasPlayerFrame = () => {
+      const frames = Array.from(document.querySelectorAll('iframe[src]'));
+      const okFrame = frames.some((f) => {
+        const src = String(f.getAttribute('src') || '');
+        if (!src || src === 'about:blank' || isBrokenSrc(src)) return false;
+        const r = f.getBoundingClientRect();
+        return r.width > 120 && r.height > 80;
+      });
+      if (okFrame) return true;
+      return Array.from(document.querySelectorAll('video')).some((v) => {
+        try {
+          return v.readyState >= 2 && (v.videoWidth > 0 || v.currentTime > 0);
+        } catch (_) {
+          return false;
+        }
+      });
+    };
+
+    const hop = (reason) => {
+      if (window.__jiyuRiveHopping) return 'busy';
+      const now = Date.now();
+      if (window.__jiyuRiveLastHopAt && now - window.__jiyuRiveLastHopAt < 12000) return 'cooldown';
+      window.__jiyuRiveHopping = true;
+      window.__jiyuRiveLastHopAt = now;
+      let idx = 0;
+      try {
+        const raw = sessionStorage.getItem(HOP_KEY);
+        if (raw != null) idx = Number(raw) || 0;
+        else idx = -1; // first Direct→Embed hop starts at ORDER[0]
+      } catch (_) {
+        idx = -1;
+      }
+      for (let step = 1; step <= ORDER.length; step += 1) {
+        const next = idx + step;
+        if (next >= ORDER.length) break;
+        const code = ORDER[next];
+        const target = directFor(code, tvId, tvSeason, tvEpisode);
+        if (!target && code !== 'SUP' && code !== 'SMASH' && code !== 'VID' && code !== 'ADF') continue;
+        try { sessionStorage.setItem(HOP_KEY, String(next)); } catch (_) {}
+        seedEmbedPrefs(code);
+        try { localStorage.removeItem(LAST_KEY); } catch (_) {}
+        console.log('jiyu-rive-hop:' + code + ':' + String(reason || ''));
+        if (target) {
+          location.replace(target);
+          return true;
+        }
+        if (tvId) {
+          location.replace(
+            'https://rivestream.ru/embed?type=tv&id=' + encodeURIComponent(tvId) +
+            '&season=' + encodeURIComponent(tvSeason) + '&episode=' + encodeURIComponent(tvEpisode) + '#jiyuAuto=1'
+          );
+          return true;
+        }
+      }
+      window.__jiyuRiveHopping = false;
+      try {
+        console.log('jiyu-rive-hop-exhausted:' + String(reason || ''));
+        if (!document.getElementById('jiyu-rive-no-source')) {
+          const banner = document.createElement('div');
+          banner.id = 'jiyu-rive-no-source';
+          banner.textContent = 'No working RiveStream source for this episode.';
+          banner.setAttribute('style',
+            'position:fixed;inset:auto 12px 12px 12px;z-index:2147483647;padding:12px 14px;' +
+            'border-radius:10px;background:rgba(12,14,18,0.92);color:#f3f6fb;font:600 14px/1.35 Segoe UI,sans-serif;' +
+            'border:1px solid rgba(255,255,255,0.12);pointer-events:none;');
+          (document.body || document.documentElement).appendChild(banner);
+        }
+      } catch (_) {}
+      return false;
+    };
+
+    try {
+      window.__jiyuRiveForceHop = (reason) => hop(String(reason || 'forced'));
+    } catch (_) {}
+
+    // primesrc with empty servers paints a play UI then hands off to /undefined/ — skip it.
+    if (/(^|\\.)primesrc\\.me$/i.test(host)) {
+      setTimeout(() => {
+        try {
+          if (hasBrokenFrame() || !hasPlayerFrame()) hop('primesrc-empty');
+        } catch (_) {}
+      }, 3500);
+      setTimeout(() => {
+        try { if (hasBrokenFrame()) hop('primesrc-undefined'); } catch (_) {}
+      }, 7000);
+    }
+
+    const markGood = () => {
+      try {
+        const cur = String(localStorage.getItem('RiveStreamLatestAgg') || prefer || 'VAP');
+        if (ORDER.includes(cur) && cur !== 'ADF' && cur !== 'PRIME') localStorage.setItem(LAST_KEY, cur);
+        sessionStorage.removeItem(HOP_KEY);
+      } catch (_) {}
+      hideServerChrome();
+    };
+
+    if (window.__jiyuRiveEmbedHop) return 'seeded';
+    window.__jiyuRiveEmbedHop = true;
+
+    let startedAt = Date.now();
+    let hops = 0;
+    let goodAt = 0;
+    const tick = () => {
+      try {
+        if (window.__jiyuRiveHopping) return;
+        if (hasBrokenFrame() || textLooksDead()) {
+          if (hops >= ORDER.length) return;
+          hops += 1;
+          startedAt = Date.now();
+          goodAt = 0;
+          hop(hasBrokenFrame() ? 'broken-src' : 'dead-text');
+          return;
+        }
+        if (hasPlayerFrame()) {
+          if (!goodAt) goodAt = Date.now();
+          if (Date.now() - goodAt > 4000) markGood();
+          return;
+        }
+        goodAt = 0;
+        if (Date.now() - startedAt < 3000) return;
+        if (hops >= ORDER.length) return;
+        if (Date.now() - startedAt > 20000) {
+          hops += 1;
+          startedAt = Date.now();
+          hop('no-player');
+        }
+      } catch (_) {}
+    };
+
+    const start = () => {
+      nudgePlay();
+      setTimeout(nudgePlay, 1200);
+      setTimeout(nudgePlay, 3000);
+      setInterval(tick, 1000);
+      setTimeout(tick, 2000);
+      setTimeout(tick, 5000);
+      setTimeout(tick, 9000);
+    };
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', start, { once: true });
+    } else {
+      setTimeout(start, 50);
+    }
+    return 'armed';
+  } catch (_) {
+    return 'error';
+  }
+})();`
+
+function forceRiveEmbedHop(contents, reason) {
+  if (!contents || contents.isDestroyed()) return
+  let current = ''
+  try {
+    current = contents.getURL() || ''
+  } catch {
+    return
+  }
+  const onRiveFamily =
+    /rivestream\.(ru|app)/i.test(current) ||
+    /vaplayer\.ru|vidup\.to|videasy\.to|cinezo\.live|vidzee\.wtf|mapple\.fun|primesrc\.me|streamingnow\.mov/i.test(
+      current,
+    )
+  if (!onRiveFamily) return
+  const now = Date.now()
+  if (contents.__jiyuRiveForceHopAt && now - contents.__jiyuRiveForceHopAt < 2500) {
+    console.log('[rive-auto] force hop debounced', reason || '')
+    return
+  }
+  contents.__jiyuRiveForceHopAt = now
+  console.log('[rive-auto] force hop', reason || '')
+  void contents
+    .executeJavaScript(RIVESTREAM_FORCE_HOP_SCRIPT, true)
+    .then((r) => console.log('[rive-auto] force hop result', r))
+    .catch((err) =>
+      console.log('[rive-auto] force hop err', err instanceof Error ? err.message : err),
+    )
+}
+
+async function installRiveEmbedAutoScript(contents) {
+  if (!contents || contents.isDestroyed()) return
+  if (contents.__jiyuRiveEmbedAutoInstalled) return
+  contents.__jiyuRiveEmbedAutoInstalled = true
+  try {
+    const dbg = contents.debugger
+    if (!dbg.isAttached()) dbg.attach('1.3')
+    await dbg.sendCommand('Page.addScriptToEvaluateOnNewDocument', {
+      source: RIVESTREAM_EMBED_AUTO_SCRIPT,
+    })
+  } catch (err) {
+    console.log(
+      '[rive-auto] CDP inject skipped',
+      err instanceof Error ? err.message : err,
+    )
+  }
+}
+
+function scheduleRiveEmbedAuto(contents) {
+  if (!contents || contents.isDestroyed()) return
+  let pageUrl = ''
+  try {
+    pageUrl = contents.getURL() || ''
+  } catch {
+    return
+  }
+  const onRiveFamily =
+    /rivestream\.(ru|app)/i.test(pageUrl) ||
+    /vaplayer\.ru|vidup\.to|videasy\.to|cinezo\.live|vidzee\.wtf|mapple\.fun|primesrc\.me|streamingnow\.mov/i.test(
+      pageUrl,
+    )
+  if (!onRiveFamily) return
+  const run = () => {
+    if (!contents || contents.isDestroyed()) return
+    void contents.executeJavaScript(RIVESTREAM_EMBED_AUTO_SCRIPT, true).catch(() => {})
+  }
+  run()
+  setTimeout(run, 800)
+  setTimeout(run, 2500)
+}
+
+async function installBrowserAdShield(contents) {
+  if (!contents || contents.isDestroyed()) return
+  let pageUrl = ''
+  try {
+    pageUrl = contents.getURL()
+  } catch {
+    return
+  }
+  if (!isSportsEmbedHost(pageUrl) && !/embedindia|embed\.st|ppv\.st|streamed\.pk/i.test(pageUrl)) {
+    // Still install on blank→embed navigations via frame scripts below.
+  }
+  const frames = collectContentFrames(contents, { maxFrames: 10 })
+  for (const frame of frames) {
+    try {
+      await raceFrameExec(frame.executeJavaScript(BROWSER_AD_SHIELD_SCRIPT, true), 1500)
+    } catch {
+      /* timeout / ignore */
+    }
+  }
+}
+
+function scheduleBrowserAdShield(contents) {
+  if (!contents || contents.isDestroyed()) return
+  const run = () => {
+    void installBrowserAdShield(contents)
+  }
+  run()
+  setTimeout(run, 500)
+  setTimeout(run, 2000)
+  setTimeout(run, 5000)
+}
+
+function destroyAdDock() {
+  stopAdDockHardMute()
+  if (!adDockView) return
+  try {
+    if (mainWindow && !mainWindow.isDestroyed() && adDockAttached) {
+      mainWindow.contentView.removeChildView(adDockView)
+    }
+  } catch {
+    /* ignore */
+  }
+  try {
+    adDockView.webContents.destroy()
+  } catch {
+    /* ignore */
+  }
+  adDockView = null
+  adDockAttached = false
+  adDockVisible = false
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('browser:ad-dock', { visible: false, url: '' })
+  }
+}
+
+/** Keep parked ads silent — page JS often unmutes a few seconds after load. */
+const AD_DOCK_HARD_MUTE_SCRIPT = `(() => {
+  try {
+    const lockMedia = (m) => {
+      try {
+        m.muted = true;
+        m.volume = 0;
+        m.defaultMuted = true;
+        try { m.setAttribute('muted', ''); } catch (_) {}
+        try { m.pause(); } catch (_) {}
+      } catch (_) {}
+    };
+    const lockAll = () => {
+      try {
+        document.querySelectorAll('video,audio').forEach(lockMedia);
+      } catch (_) {}
+    };
+    if (!window.__jiyuAdDockMuteLock) {
+      window.__jiyuAdDockMuteLock = true;
+      try {
+        const proto = window.HTMLMediaElement && window.HTMLMediaElement.prototype;
+        if (proto) {
+          const descVol = Object.getOwnPropertyDescriptor(proto, 'volume');
+          const descMute = Object.getOwnPropertyDescriptor(proto, 'muted');
+          if (descVol && descVol.set) {
+            Object.defineProperty(proto, 'volume', {
+              configurable: true,
+              get: descVol.get,
+              set: function () { try { descVol.set.call(this, 0); } catch (_) {} },
+            });
+          }
+          if (descMute && descMute.set) {
+            Object.defineProperty(proto, 'muted', {
+              configurable: true,
+              get: function () { return true; },
+              set: function () { try { descMute.set.call(this, true); } catch (_) {} },
+            });
+          }
+          const origPlay = proto.play;
+          if (typeof origPlay === 'function') {
+            proto.play = function (...args) {
+              try { this.muted = true; this.volume = 0; } catch (_) {}
+              return origPlay.apply(this, args);
+            };
+          }
+        }
+      } catch (_) {}
+      try {
+        document.addEventListener('play', (e) => {
+          try { if (e && e.target) lockMedia(e.target); } catch (_) {}
+        }, true);
+        document.addEventListener('volumechange', (e) => {
+          try { if (e && e.target) lockMedia(e.target); } catch (_) {}
+        }, true);
+      } catch (_) {}
+      try {
+        const mo = new MutationObserver(() => lockAll());
+        mo.observe(document.documentElement || document.body, { childList: true, subtree: true });
+      } catch (_) {}
+      try { setInterval(lockAll, 750); } catch (_) {}
+    }
+    lockAll();
+    if (!document.getElementById('jiyu-ad-dock-cover')) {
+      const cover = document.createElement('div');
+      cover.id = 'jiyu-ad-dock-cover';
+      cover.setAttribute('aria-hidden', 'true');
+      cover.style.cssText =
+        'position:fixed;inset:0;z-index:2147483647;background:#0b0d12;pointer-events:none;';
+      (document.documentElement || document.body).appendChild(cover);
+    }
+    try {
+      document.documentElement.style.background = '#0b0d12';
+      if (document.body) document.body.style.background = '#0b0d12';
+    } catch (_) {}
+    return 'locked';
+  } catch (_) {
+    return 'error';
+  }
+})();`
+
+function muteAdDockMedia() {
+  if (!adDockView || adDockView.webContents.isDestroyed()) return
+  try {
+    adDockView.webContents.setAudioMuted(true)
+  } catch {
+    /* ignore */
+  }
+  void adDockView.webContents.executeJavaScript(AD_DOCK_HARD_MUTE_SCRIPT, true).catch(() => {})
+}
+
+function startAdDockHardMute() {
+  stopAdDockHardMute()
+  muteAdDockMedia()
+  adDockMuteTimer = setInterval(() => {
+    if (!adDockVisible || !adDockView || adDockView.webContents.isDestroyed()) {
+      stopAdDockHardMute()
+      return
+    }
+    muteAdDockMedia()
+  }, 800)
+}
+
+function stopAdDockHardMute() {
+  if (adDockMuteTimer) {
+    clearInterval(adDockMuteTimer)
+    adDockMuteTimer = null
+  }
+}
+
+function ensureAdDock() {
+  if (adDockView) return adDockView
+  if (!mainWindow || mainWindow.isDestroyed()) return null
+  adDockView = new WebContentsView({
+    webPreferences: {
+      session: webSession(),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+      backgroundThrottling: false,
+    },
+  })
+  adDockView.setBackgroundColor('#0b0d12')
+  adDockView.webContents.setUserAgent(BROWSER_UA)
+  adDockView.webContents.setAudioMuted(true)
+  adDockView.webContents.setWindowOpenHandler(({ url }) => {
+    const target = String(url || '')
+    if (/^https?:\/\//i.test(target)) {
+      void adDockView.webContents.loadURL(target)
+    }
+    return { action: 'deny' }
+  })
+  adDockView.webContents.on('did-finish-load', muteAdDockMedia)
+  adDockView.webContents.on('did-navigate', muteAdDockMedia)
+  adDockView.webContents.on('did-frame-finish-load', muteAdDockMedia)
+  adDockView.webContents.on('dom-ready', muteAdDockMedia)
+  adDockView.webContents.on('media-started-playing', () => {
+    muteAdDockMedia()
+  })
+  return adDockView
+}
+
+function applyAdDockBounds() {
+  if (!adDockView || !mainWindow || mainWindow.isDestroyed()) return
+  // Park off-screen: ads stay loaded/muted so they don't hijack the player,
+  // but adult creatives never paint in the corner.
+  adDockView.setBounds({
+    x: -64,
+    y: -64,
+    width: 32,
+    height: 32,
+  })
+}
+
+function isPipLikeBrowserBounds(bounds) {
+  if (!bounds) return false
+  const w = Number(bounds.width) || 0
+  const h = Number(bounds.height) || 0
+  return w > 0 && h > 0 && w <= 420 && h <= 240
+}
+
+function showAdDock(url) {
+  const target = String(url || '').trim()
+  if (!/^https?:\/\//i.test(target)) return false
+  // Never park Cloudflare challenges in the ad dock.
+  if (/challenges\.cloudflare\.com|turnstile|__cf_chl/i.test(target)) return false
+  // Never open installer / adware bait in the dock (or anywhere).
+  if (isBlockedBrowserDownloadUrl(target)) return false
+  // PiP stage is small; an ad dock would cover the HTML Expand/Full/Close bar.
+  if (isPipLikeBrowserBounds(webBrowserLastBounds)) return false
+  const now = Date.now()
+  // Avoid thrashing the main player with rapid popup storms.
+  if (
+    adDockVisible &&
+    (target === adDockLastUrl || now - adDockLastShownAt < 2500)
+  ) {
+    return true
+  }
+  const view = ensureAdDock()
+  if (!view || !mainWindow || mainWindow.isDestroyed()) return false
+  try {
+    view.webContents.setAudioMuted(true)
+  } catch {
+    /* ignore */
+  }
+  if (!adDockAttached) {
+    mainWindow.contentView.addChildView(view)
+    adDockAttached = true
+  }
+  applyAdDockBounds()
+  // Keep attached + loaded, but never paint the creative (Close ad bar is enough).
+  try {
+    view.setVisible(false)
+  } catch {
+    /* ignore */
+  }
+  adDockVisible = true
+  adDockLastUrl = target
+  adDockLastShownAt = now
+  void view.webContents.loadURL(target)
+  startAdDockHardMute()
+  // Keep the main stream focused so playback doesn't stall when the dock opens.
+  try {
+    if (webBrowserView && !webBrowserView.webContents.isDestroyed() && webBrowserVisible) {
+      webBrowserView.webContents.setBackgroundThrottling(false)
+      webBrowserView.webContents.focus()
+    } else if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.focus()
+    }
+  } catch {
+    /* ignore */
+  }
+  mainWindow.webContents.send('browser:ad-dock', { visible: true, url: target })
+  return true
+}
+
+function hideAdDock() {
+  stopAdDockHardMute()
+  if (!adDockView) {
+    adDockVisible = false
+    adDockAttached = false
+    adDockLastUrl = ''
+    return
+  }
+  try {
+    adDockView.setVisible(false)
+  } catch {
+    /* ignore */
+  }
+  try {
+    if (mainWindow && !mainWindow.isDestroyed() && adDockAttached) {
+      mainWindow.contentView.removeChildView(adDockView)
+    }
+  } catch {
+    /* ignore */
+  }
+  adDockAttached = false
+  try {
+    void adDockView.webContents.loadURL('about:blank')
+  } catch {
+    /* ignore */
+  }
+  adDockVisible = false
+  adDockLastUrl = ''
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('browser:ad-dock', { visible: false, url: '' })
+  }
+}
 
 /**
  * Cloudflare unlock + authenticated fetches for EZTV Show List.
@@ -258,6 +2426,142 @@ function isYtsApiPath(pageUrl) {
   } catch {
     return false
   }
+}
+
+/** NetMirror catalog host — Cloudflare blocks Electron; use system Chrome like EZTV. */
+function isFreemoviesHost(hostname) {
+  const host = String(hostname || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^www\./, '')
+  return host === 'freemovies.lol' || host.endsWith('.freemovies.lol')
+}
+
+function isFreemoviesOrigin(origin) {
+  try {
+    return isFreemoviesHost(new URL(origin).hostname)
+  } catch {
+    return false
+  }
+}
+
+function isFreemoviesUrl(pageUrl) {
+  try {
+    return isFreemoviesHost(new URL(pageUrl).hostname)
+  } catch {
+    return false
+  }
+}
+
+function freemoviesNeedsSystemBrowser(targetUrl) {
+  return isFreemoviesUrl(targetUrl)
+}
+
+/**
+ * Embed hosts that 404/403 when Electron navigates with no site Referer.
+ * @param {string} targetUrl
+ * @returns {string | undefined}
+ */
+function httpReferrerForBrowserUrl(targetUrl) {
+  try {
+    const parsed = new URL(targetUrl)
+    const host = parsed.hostname.replace(/^www\./i, '').toLowerCase()
+    const path = parsed.pathname || ''
+    if (host === 'fstream365.com' || host.endsWith('.fstream365.com')) {
+      return 'https://ww.ymovies.vip/'
+    }
+    if (host === 'cinextream.cc' || host.endsWith('.cinextream.cc')) {
+      return 'https://cinetaro.to/'
+    }
+    if (
+      host === 'vsembed.ru' ||
+      host.endsWith('.vsembed.ru') ||
+      host === 'vidsrc.to' ||
+      host.endsWith('.vidsrc.to') ||
+      host === 'vidsrc.me' ||
+      host.endsWith('.vidsrc.me')
+    ) {
+      return 'https://freemovies.lol/'
+    }
+    if (isFreemoviesHost(host)) {
+      return 'https://freemovies.lol/'
+    }
+    // embed.st / embedhd.st: ANY Referer (including streamed.pk) often returns a
+    // ~1KB stub with no media — leave Referer unset so the full player loads.
+    if (host === 'embedindia.st' || host.endsWith('.embedindia.st')) {
+      return 'https://ppv.st/'
+    }
+    if (host === 'rivestream.ru' || host.endsWith('.rivestream.ru')) {
+      return 'https://rivestream.ru/'
+    }
+    if (host === 'soccerfull.net' || host.endsWith('.soccerfull.net')) {
+      return 'https://livextv.hybrows.workers.dev/'
+    }
+    if (host === 'livextv.hybrows.workers.dev' || /livextv/i.test(host)) {
+      return 'https://livextv.hybrows.workers.dev/'
+    }
+    // YouTube embeds (Error 153): top-level /embed loads in WebContentsView often
+    // have no Referer (about:blank). YouTube requires an embedder identity — and
+    // rejects Referer https://www.youtube.com/ itself.
+    if (
+      host === 'youtube.com' ||
+      host.endsWith('.youtube.com') ||
+      host === 'youtube-nocookie.com' ||
+      host.endsWith('.youtube-nocookie.com')
+    ) {
+      if (/^\/embed\//i.test(path) || host.includes('nocookie')) {
+        return 'https://jiyu.app/'
+      }
+    }
+    // DoodStream-style /e|/d embeds nested under soccerfull.
+    if (/^\/[de]\/[a-z0-9]{6,}/i.test(path)) {
+      return 'https://soccerfull.net/'
+    }
+  } catch {
+    /* ignore */
+  }
+  return undefined
+}
+
+/**
+ * YouTube Error 153 — embedder identity missing. Packaged UI iframes load from
+ * file:// so Chromium sends no Referer; force a https embed host YouTube accepts.
+ * Mutates headers in place. Returns true when applied.
+ * @param {string} url
+ * @param {Record<string, string>} headers
+ */
+function applyYouTubeEmbedderHeaders(url, headers) {
+  try {
+    const parsed = new URL(url)
+    const host = parsed.hostname.replace(/^www\./i, '').toLowerCase()
+    const pathName = parsed.pathname || ''
+    const isYt =
+      host === 'youtube.com' ||
+      host.endsWith('.youtube.com') ||
+      host === 'youtube-nocookie.com' ||
+      host.endsWith('.youtube-nocookie.com')
+    if (!isYt) return false
+    const isEmbedPath = /^\/embed\//i.test(pathName) || host.includes('nocookie')
+    // Player config / Innertube calls from the embed also need an embedder.
+    const isPlayerApi =
+      /\/youtubei\//i.test(pathName) ||
+      /\/get_video_info/i.test(pathName) ||
+      /\/player_api/i.test(pathName)
+    if (!isEmbedPath && !isPlayerApi) return false
+    for (const name of Object.keys(headers)) {
+      const lower = name.toLowerCase()
+      if (lower === 'referer' || lower === 'origin') delete headers[name]
+    }
+    headers.Referer = 'https://jiyu.app/'
+    headers.Origin = 'https://jiyu.app'
+    return true
+  } catch {
+    return false
+  }
+}
+
+function scrapeOriginNeedsSystemBrowser(origin) {
+  return /eztv/i.test(origin) || isFreemoviesOrigin(origin)
 }
 
 /**
@@ -758,6 +3062,106 @@ async function probeShowlistAjax(page, origin) {
   }
 }
 
+async function probeFreemoviesCatalog(page, origin) {
+  const listUrl = `${origin}/category/tv-series/`
+  try {
+    return await page.evaluate(async (url) => {
+      try {
+        const r = await fetch(url, {
+          credentials: 'include',
+          headers: { Accept: 'text/html,application/xhtml+xml,*/*;q=0.8' },
+        })
+        if (!r.ok) return false
+        const text = await r.text()
+        return /id="post-\d+"/.test(text)
+      } catch {
+        return false
+      }
+    }, listUrl)
+  } catch {
+    return false
+  }
+}
+
+async function probeOriginUnlocked(page, origin) {
+  if (/eztv/i.test(origin)) return probeShowlistAjax(page, origin)
+  if (isFreemoviesOrigin(origin)) return probeFreemoviesCatalog(page, origin)
+  return false
+}
+
+function warmUrlForOrigin(origin) {
+  if (/eztv/i.test(origin)) return `${origin}/showlist/`
+  if (isFreemoviesOrigin(origin)) return `${origin}/category/tv-series/`
+  return `${origin}/`
+}
+
+/**
+ * freemovies.lol paints bonus / “verify” overlays after CF clears.
+ * Hide them in the unlock Chrome so sync isn’t covered in spam.
+ * @param {import('puppeteer-core').Page} page
+ */
+async function suppressFreemoviesChromeNoise(page) {
+  try {
+    await page.evaluate(() => {
+      const STYLE_ID = 'jiyu-hide-freemovies-noise'
+      if (!document.getElementById(STYLE_ID)) {
+        const style = document.createElement('style')
+        style.id = STYLE_ID
+        style.textContent = `
+          [class*="popup"], [class*="modal"], [id*="popup"], [id*="modal"],
+          [class*="overlay"], [id*="overlay"], [class*="bonus"], [id*="bonus"],
+          .swal2-container, .fancybox-container, .mfp-wrap {
+            display: none !important;
+            visibility: hidden !important;
+            pointer-events: none !important;
+          }
+          body { overflow: auto !important; }
+        `
+        document.documentElement.appendChild(style)
+      }
+      const kill = (el) => {
+        try {
+          el.remove()
+        } catch (_) {
+          try {
+            el.style.setProperty('display', 'none', 'important')
+          } catch (_) {
+            /* ignore */
+          }
+        }
+      }
+      const noisy =
+        /bonus account|you have received|\$\d+|congratulations|claim now|verify your age|download our app/i
+      for (const el of document.querySelectorAll('body *')) {
+        const text = (el.textContent || '').slice(0, 240)
+        if (!noisy.test(text)) continue
+        // Only kill small overlay-ish nodes, not the whole page shell.
+        const rect = el.getBoundingClientRect?.()
+        if (!rect || (rect.width > window.innerWidth * 0.95 && rect.height > window.innerHeight * 0.95)) {
+          continue
+        }
+        kill(el)
+      }
+    })
+  } catch {
+    /* page may be navigating */
+  }
+}
+
+/** @param {import('puppeteer-core').Page} page */
+async function minimizeSystemBrowserPage(page) {
+  try {
+    const client = await page.createCDPSession()
+    const { windowId } = await client.send('Browser.getWindowForTarget')
+    await client.send('Browser.setWindowBounds', {
+      windowId,
+      bounds: { windowState: 'minimized' },
+    })
+  } catch {
+    /* ignore */
+  }
+}
+
 async function fetchViaSystemBrowser(targetUrl) {
   let active = activeSystemBrowser
   if (!active?.page || !active.browser?.connected) {
@@ -835,15 +3239,22 @@ async function warmViaSystemBrowser(origin) {
     activeSystemBrowser?.browser?.connected &&
     activeSystemBrowser.origin === origin
   ) {
-    const probe = await fetchViaSystemBrowser(
-      `${origin}/showlist/ajax/?page=1&letter=all&status=all`,
-    )
+    const probeUrl = /eztv/i.test(origin)
+      ? `${origin}/showlist/ajax/?page=1&letter=all&status=all`
+      : isFreemoviesOrigin(origin)
+        ? `${origin}/category/tv-series/`
+        : `${origin}/`
+    const probe = await fetchViaSystemBrowser(probeUrl)
     if (probe.ok) {
-      try {
-        const json = JSON.parse(probe.content)
-        if (Array.isArray(json.shows) && json.shows.length > 0) return true
-      } catch {
-        /* continue relaunch */
+      if (/eztv/i.test(origin)) {
+        try {
+          const json = JSON.parse(probe.content)
+          if (Array.isArray(json.shows) && json.shows.length > 0) return true
+        } catch {
+          /* continue relaunch */
+        }
+      } else if (isFreemoviesOrigin(origin) && /id="post-\d+"/.test(probe.content || '')) {
+        return true
       }
     }
   }
@@ -864,9 +3275,9 @@ async function warmViaSystemBrowser(origin) {
     return false
   }
 
-  const warmUrl = /eztv/i.test(origin) ? `${origin}/showlist/` : `${origin}/`
+  const warmUrl = warmUrlForOrigin(origin)
   const profileDir = path.join(app.getPath('userData'), 'cf-system-browser-profile')
-  console.log('[cf-unlock] launching system browser', exe, { serverMode: cfServerMode() })
+  console.log('[cf-unlock] launching system browser', exe, { serverMode: cfServerMode(), origin })
 
   let browser
   try {
@@ -902,27 +3313,36 @@ async function warmViaSystemBrowser(origin) {
         /* ignore */
       }
     })
+    // freemovies: block popunder tabs and strip bonus overlays during unlock/sync.
+    if (isFreemoviesOrigin(origin)) {
+      browser.on('targetcreated', async (target) => {
+        try {
+          if (target.type() !== 'page') return
+          const popup = await target.page()
+          if (popup && popup !== page) await popup.close().catch(() => {})
+        } catch {
+          /* ignore */
+        }
+      })
+      page.on('framenavigated', () => {
+        void suppressFreemoviesChromeNoise(page)
+      })
+    }
+
     try {
       await page.goto(warmUrl, { waitUntil: 'domcontentloaded', timeout: 120_000 })
     } catch (err) {
       console.log('[cf-unlock] system browser goto', err instanceof Error ? err.message : err)
     }
+    if (isFreemoviesOrigin(origin)) await suppressFreemoviesChromeNoise(page)
 
     // Persistent profile may already be cleared — succeed silently (no dialog).
-    if (await probeShowlistAjax(page, origin)) {
+    if (await probeOriginUnlocked(page, origin)) {
       activeSystemBrowser = { browser, page, origin }
       scheduleSystemBrowserIdleClose()
       console.log('[cf-unlock] system browser ready from saved profile')
-      try {
-        const client = await page.createCDPSession()
-        const { windowId } = await client.send('Browser.getWindowForTarget')
-        await client.send('Browser.setWindowBounds', {
-          windowId,
-          bounds: { windowState: 'minimized' },
-        })
-      } catch {
-        /* ignore */
-      }
+      if (isFreemoviesOrigin(origin)) await suppressFreemoviesChromeNoise(page)
+      await minimizeSystemBrowserPage(page)
       return true
     }
 
@@ -941,24 +3361,17 @@ async function warmViaSystemBrowser(origin) {
         lastClick = Date.now()
         await tryAutoClickCfVerify(page)
       }
+      if (isFreemoviesOrigin(origin)) await suppressFreemoviesChromeNoise(page)
 
-      const ok = await probeShowlistAjax(page, origin)
+      const ok = await probeOriginUnlocked(page, origin)
       console.log('[cf-unlock] system browser probe', { ok, url: page.url() })
       if (ok) {
         activeSystemBrowser = { browser, page, origin }
         scheduleSystemBrowserIdleClose()
-        console.log('[cf-unlock] system browser ready — Show List fetches will use Chrome')
+        console.log('[cf-unlock] system browser ready — scrape fetches will use Chrome')
         // Minimize (do not close) — closing would drop the CF session the server needs.
-        try {
-          const client = await page.createCDPSession()
-          const { windowId } = await client.send('Browser.getWindowForTarget')
-          await client.send('Browser.setWindowBounds', {
-            windowId,
-            bounds: { windowState: 'minimized' },
-          })
-        } catch {
-          /* ignore */
-        }
+        if (isFreemoviesOrigin(origin)) await suppressFreemoviesChromeNoise(page)
+        await minimizeSystemBrowserPage(page)
         return true
       }
 
@@ -969,10 +3382,11 @@ async function warmViaSystemBrowser(origin) {
             '[cf-unlock] server mode: still blocked — auto-click ran; complete Verify once in Chrome if a checkbox is visible',
           )
         } else if (mainWindow && !mainWindow.isDestroyed()) {
+          const siteLabel = isFreemoviesOrigin(origin) ? 'NetMirror' : 'EZTV'
           void dialog.showMessageBox(mainWindow, {
             type: 'info',
             buttons: ['OK'],
-            title: 'EZTV security check',
+            title: `${siteLabel} security check`,
             message: 'Complete Verify in Chrome/Edge if asked',
             detail:
               'Jiyu tries to complete Cloudflare automatically. If a “Verify you are human” box is still visible in the Chrome window, click it once. Chrome will minimize when unlocked and stay running for sync (needed for a future TV/server setup).',
@@ -1001,7 +3415,16 @@ async function warmViaSystemBrowser(origin) {
  * @param {{ allowVisible?: boolean }} opts
  */
 async function warmScrapeOriginImpl(origin, { allowVisible = true } = {}) {
+  // Local torrent/remux servers must never trigger a Cloudflare Verify window.
+  try {
+    const host = new URL(origin).hostname
+    if (/^(127\.0\.0\.1|localhost)$/i.test(host)) return false
+  } catch {
+    return false
+  }
+
   const isEztv = /eztv/i.test(origin)
+  const isFreemovies = isFreemoviesOrigin(origin)
 
   // YTS catalog uses the public JSON API — never open Verify/Chrome unlock UI.
   if (isYtsUrl(origin)) {
@@ -1013,10 +3436,34 @@ async function warmScrapeOriginImpl(origin, { allowVisible = true } = {}) {
     return false
   }
 
-  // EZTV Show List must use a live system Chrome page. A prior "warmed" flag or
-  // a lucky session.fetch must not skip launching Chrome — that produced
-  // "System browser not unlocked" during sync.
-  if (isEztv) {
+  // YMovies: already a huge Series shelf; popping Verify during background sync
+  // is more pain than gain. Stay quiet — manual Sync can retry later.
+  try {
+    const yHost = new URL(origin).hostname.replace(/^www\./i, '').toLowerCase()
+    if (yHost === 'ww.ymovies.vip' || yHost.endsWith('.ymovies.vip') || yHost === 'ymovies.vip') {
+      if (await originAjaxUnlocked(origin, { verbose: false })) {
+        scrapeWarmedOrigins.add(origin)
+        return true
+      }
+      console.log('[cf-unlock] skipping visible unlock for YMovies (quiet mode)')
+      return false
+    }
+    // Cinetaro: CF Turnstile in Electron is disruptive; catalog can wait.
+    if (yHost === 'cinetaro.to' || yHost.endsWith('.cinetaro.to') || yHost === 'cinextream.cc') {
+      if (await originAjaxUnlocked(origin, { verbose: false })) {
+        scrapeWarmedOrigins.add(origin)
+        return true
+      }
+      console.log('[cf-unlock] skipping visible unlock for Cinetaro (quiet mode)')
+      return false
+    }
+  } catch {
+    /* not a URL */
+  }
+
+  // EZTV + freemovies.lol must use live system Chrome. Electron Turnstile unlock
+  // stays blank; session.fetch does not keep clearance after Chrome unlock.
+  if (isEztv || isFreemovies) {
     if (activeSystemBrowser?.page && activeSystemBrowser.browser?.connected) {
       if (activeSystemBrowser.origin === origin || !activeSystemBrowser.origin) {
         scrapeWarmedOrigins.add(origin)
@@ -1024,8 +3471,8 @@ async function warmScrapeOriginImpl(origin, { allowVisible = true } = {}) {
       }
     }
     if (!allowVisible) return false
-    console.log('[cf-unlock] EZTV → system Chrome unlock (Electron stealth skipped)')
-    eztvElectronSessionOk.delete(origin)
+    console.log('[cf-unlock] system Chrome unlock (Electron stealth skipped)', { origin })
+    if (isEztv) eztvElectronSessionOk.delete(origin)
     const unlocked = await warmViaSystemBrowser(origin)
     if (unlocked) {
       scrapeWarmedOrigins.add(origin)
@@ -1125,8 +3572,26 @@ async function tryStealthElectronUnlock(origin, timeoutMs) {
         }
       })
       .catch(() => {})
-  }, 4000)
-  setTimeout(() => clearInterval(blankWatch), Math.min(timeoutMs, 45_000))
+  }, 1500)
+  setTimeout(() => clearInterval(blankWatch), Math.min(timeoutMs, 20_000))
+  // If still blank after a few seconds, don't hold the sync hostage.
+  setTimeout(() => {
+    if (!win || win.isDestroyed()) return
+    void win.webContents
+      .executeJavaScript(
+        `(() => {
+          const text = (document.body && document.body.innerText || '').trim();
+          return text.length;
+        })()`,
+      )
+      .then((len) => {
+        if (typeof len === 'number' && len < 8 && !win.isDestroyed()) {
+          console.log('[cf-unlock] blank challenge still empty — aborting unlock wait')
+          destroyUnlockWindow()
+        }
+      })
+      .catch(() => {})
+  }, 8_000)
   try {
     win.webContents.setUserAgent(BROWSER_UA)
   } catch {
@@ -1168,8 +3633,10 @@ async function tryStealthElectronUnlock(origin, timeoutMs) {
  * Fetch Cloudflare-guarded URLs. EZTV Show List goes through system Chrome
  * (Electron session.fetch stays challenged even after a valid Chrome unlock).
  * @param {string} targetUrl
+ * @param {{ allowVisible?: boolean }} [opts]
  */
-async function fetchViaScrapeBrowser(targetUrl) {
+async function fetchViaScrapeBrowser(targetUrl, opts = {}) {
+  const allowVisible = opts.allowVisible !== false
   let origin
   try {
     origin = new URL(targetUrl).origin
@@ -1187,22 +3654,23 @@ async function fetchViaScrapeBrowser(targetUrl) {
     return fetchYtsQuietly(targetUrl)
   }
 
-  const warmed = await warmScrapeOrigin(origin, { allowVisible: true })
+  const warmed = await warmScrapeOrigin(origin, { allowVisible })
   if (!warmed) {
     return {
       ok: false,
       status: 403,
       content: '',
-      error:
-        'Cloudflare blocked this site. Complete Verify in the Chrome window, then sync again.',
+      error: allowVisible
+        ? 'Cloudflare blocked this site. Complete Verify in the Chrome window, then sync again.'
+        : 'Catalog unlock needed. Sync this source from Library (Chrome verify), then try again.',
     }
   }
 
-  if (/eztv/i.test(origin)) {
+  if (scrapeOriginNeedsSystemBrowser(origin)) {
     let result = await fetchViaSystemBrowser(targetUrl)
     if (!result.ok || looksLikeCloudflareChallenge(result.content)) {
       scrapeWarmedOrigins.delete(origin)
-      const rewarmed = await warmScrapeOrigin(origin, { allowVisible: true })
+      const rewarmed = await warmScrapeOrigin(origin, { allowVisible })
       if (rewarmed) result = await fetchViaSystemBrowser(targetUrl)
     }
     if (looksLikeCloudflareChallenge(result.content)) {
@@ -1210,7 +3678,9 @@ async function fetchViaScrapeBrowser(targetUrl) {
         ok: false,
         status: result.status || 403,
         content: result.content || '',
-        error: 'Cloudflare blocked this site. Complete Verify in the Chrome window, then sync again.',
+        error: allowVisible
+          ? 'Cloudflare blocked this site. Complete Verify in the Chrome window, then sync again.'
+          : 'Catalog unlock needed. Sync this source from Library (Chrome verify), then try again.',
       }
     }
     return {
@@ -1224,7 +3694,7 @@ async function fetchViaScrapeBrowser(targetUrl) {
   let result = await sessionFetchText(targetUrl)
   if (!result.ok || looksLikeCloudflareChallenge(result.content)) {
     scrapeWarmedOrigins.delete(origin)
-    const rewarmed = await warmScrapeOrigin(origin, { allowVisible: true })
+    const rewarmed = await warmScrapeOrigin(origin, { allowVisible })
     if (rewarmed) result = await sessionFetchText(targetUrl)
   }
 
@@ -1233,8 +3703,9 @@ async function fetchViaScrapeBrowser(targetUrl) {
       ok: false,
       status: result.status || 403,
       content: result.content || '',
-      error:
-        'Cloudflare blocked this site. Complete Verify in the Chrome window, then sync again.',
+      error: allowVisible
+        ? 'Cloudflare blocked this site. Complete Verify in the Chrome window, then sync again.'
+        : 'Catalog unlock needed. Sync this source from Library (Chrome verify), then try again.',
     }
   }
   return {
@@ -1243,6 +3714,106 @@ async function fetchViaScrapeBrowser(targetUrl) {
     content: result.content || '',
     error: result.ok ? '' : result.error || `Server returned ${result.status}`,
   }
+}
+
+/** Push updater state to the renderer (brand menu / toast). */
+function sendUpdaterEvent(payload) {
+  try {
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    mainWindow.webContents.send('app:updater', payload)
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * GitHub Releases feed via electron-builder publish config (app-update.yml).
+ * No-op in `npm run dev:desktop`. Packaged NSIS / AppImage check on launch.
+ */
+function setupAutoUpdater() {
+  if (!app.isPackaged) {
+    sendUpdaterEvent({ status: 'idle', reason: 'dev' })
+    return
+  }
+  // Portable .exe cannot self-update (missing update.yml / no install dir).
+  if (process.env.PORTABLE_EXECUTABLE_FILE || process.env.PORTABLE_EXECUTABLE_DIR) {
+    sendUpdaterEvent({
+      status: 'error',
+      message:
+        'Portable builds cannot auto-update. Install with “Jiyu Setup”, or download the latest Setup from GitHub Releases.',
+    })
+    return
+  }
+  let autoUpdater
+  try {
+    ;({ autoUpdater } = require('electron-updater'))
+  } catch (err) {
+    console.warn('[updater] electron-updater missing:', err?.message || err)
+    sendUpdaterEvent({ status: 'error', message: 'Updater not installed' })
+    return
+  }
+  autoUpdaterRef = autoUpdater
+  autoUpdater.autoDownload = false
+  autoUpdater.autoInstallOnAppQuit = true
+  try {
+    autoUpdater.logger = null
+  } catch {
+    /* ignore */
+  }
+
+  autoUpdater.on('checking-for-update', () => {
+    sendUpdaterEvent({ status: 'checking' })
+  })
+  autoUpdater.on('update-available', (info) => {
+    sendUpdaterEvent({
+      status: 'available',
+      version: info?.version || null,
+    })
+  })
+  autoUpdater.on('update-not-available', (info) => {
+    sendUpdaterEvent({
+      status: 'not-available',
+      version: info?.version || APP_VERSION,
+    })
+  })
+  autoUpdater.on('download-progress', (progress) => {
+    sendUpdaterEvent({
+      status: 'downloading',
+      percent: Number(progress?.percent) || 0,
+      transferred: Number(progress?.transferred) || 0,
+      total: Number(progress?.total) || 0,
+    })
+  })
+  autoUpdater.on('update-downloaded', (info) => {
+    sendUpdaterEvent({
+      status: 'downloaded',
+      version: info?.version || null,
+    })
+  })
+  autoUpdater.on('error', (err) => {
+    const raw = String(err?.message || err || 'Update check failed')
+    const message = /ENOENT|update\.yml/i.test(raw)
+      ? 'Auto-update needs the installed app (Jiyu Setup). Download the latest Setup from GitHub Releases.'
+      : raw
+    sendUpdaterEvent({
+      status: 'error',
+      message,
+    })
+  })
+
+  // Let the window settle before hitting GitHub.
+  setTimeout(() => {
+    autoUpdater.checkForUpdates().catch((err) => {
+      const raw = String(err?.message || err || 'Update check failed')
+      const message = /ENOENT|update\.yml/i.test(raw)
+        ? 'Auto-update needs the installed app (Jiyu Setup). Download the latest Setup from GitHub Releases.'
+        : raw
+      sendUpdaterEvent({
+        status: 'error',
+        message,
+      })
+    })
+  }, 10_000)
 }
 
 function createWindow() {
@@ -1267,6 +3838,52 @@ function createWindow() {
   mainWindow = win
   /** @type {boolean} */
   win.__jiyuAllowClose = false
+  /** @type {boolean} */
+  win.__jiyuTrueMinimize = false
+  installEscapeExitsFullscreen(win.webContents)
+  // Never start (or stay) stuck in OS fullscreen on launch.
+  try {
+    jiyuWantOsFullScreen = false
+    if (win.isFullScreen()) win.setFullScreen(false)
+  } catch {
+    /* ignore */
+  }
+
+  win.on('enter-full-screen', () => {
+    try {
+      win.webContents.send('app:fullscreen-changed', { fullScreen: true })
+    } catch {
+      /* ignore */
+    }
+  })
+  win.on('leave-full-screen', () => {
+    // Embed players often enter+exit HTML fullscreen on resize. That can drop the
+    // BrowserWindow out of OS fullscreen even when Jiyu explicitly requested it.
+    // Re-assert instead of clearing the want-flag (which made Full look broken).
+    // Skip while minimize is being turned into PiP — re-pinning looks like no PiP.
+    if (jiyuWantOsFullScreen && !jiyuSuppressFullscreenReassert) {
+      setImmediate(() => {
+        try {
+          if (
+            jiyuWantOsFullScreen &&
+            mainWindow &&
+            !mainWindow.isDestroyed() &&
+            !mainWindow.isFullScreen()
+          ) {
+            mainWindow.setFullScreen(true)
+          }
+        } catch {
+          /* ignore */
+        }
+      })
+      return
+    }
+    try {
+      win.webContents.send('app:fullscreen-changed', { fullScreen: false })
+    } catch {
+      /* ignore */
+    }
+  })
 
   win.once('ready-to-show', () => {
     win.show()
@@ -1301,13 +3918,52 @@ function createWindow() {
   })
 
   win.on('closed', () => {
+    destroyAdDock()
     destroyWebBrowser()
     destroyScrapeWindow()
     if (mainWindow === win) mainWindow = null
   })
 
   win.on('resize', () => {
-    // Renderer will re-send bounds; keep last bounds if still visible
+    if (adDockVisible) applyAdDockBounds()
+  })
+
+  // Hide the live WebContentsView while the window is dragged. Moving a
+  // hardware video layer onto another monitor otherwise stalls the GPU.
+  win.on('move', () => {
+    beginWindowMove()
+  })
+  win.on('moved', () => {
+    endWindowMove()
+  })
+
+  // Minimize → PiP: restore immediately and let the renderer demote playback.
+  // True taskbar minimize is allowed when the pref is off, already in PiP,
+  // multi-view, or the renderer asks via app:minimizeWindow.
+  win.on('minimize', () => {
+    if (win.__jiyuTrueMinimize) {
+      win.__jiyuTrueMinimize = false
+      return
+    }
+    if (!jiyuMinimizeToPipEnabled) return
+    // Drop the fullscreen pin first — otherwise leave-full-screen puts the
+    // window straight back to full screen and PiP never appears.
+    jiyuWantOsFullScreen = false
+    jiyuSuppressFullscreenReassert = true
+    setImmediate(() => {
+      try {
+        if (win.isDestroyed()) return
+        if (win.isFullScreen()) win.setFullScreen(false)
+        if (win.isMinimized()) win.restore()
+        win.show()
+        win.webContents.send('app:minimize-to-pip')
+      } catch {
+        /* ignore */
+      }
+      setTimeout(() => {
+        jiyuSuppressFullscreenReassert = false
+      }, 1500)
+    })
   })
 
   if (isDev) {
@@ -1381,6 +4037,8 @@ function detachWebBrowser() {
 }
 
 function destroyWebBrowser() {
+  destroyAdDock()
+  hideAllMultiWeb({ blank: true })
   if (!webBrowserView) return
   detachWebBrowser()
   try {
@@ -1421,13 +4079,18 @@ function ensureWebBrowser() {
   webBrowserView.setBackgroundColor('#10141a')
   webBrowserView.webContents.setUserAgent(BROWSER_UA)
   webBrowserView.webContents.setBackgroundThrottling(false)
+  void installRiveEmbedAutoScript(webBrowserView.webContents)
 
   webBrowserView.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:\/\//i.test(url)) {
-      void webBrowserView.webContents.loadURL(url)
+    const target = String(url || '')
+    // Never navigate the main sports/player tile into a popup (ads / adult sites).
+    if (/^https?:\/\//i.test(target)) {
+      if (!shouldBlockBrowserNavigation(target)) showAdDock(target)
     }
     return { action: 'deny' }
   })
+  installEmbedNavGuard(webBrowserView.webContents)
+  installEscapeExitsFullscreen(webBrowserView.webContents)
 
   const emitNav = () => {
     if (!mainWindow || mainWindow.isDestroyed() || !webBrowserView) return
@@ -1444,15 +4107,112 @@ function ensureWebBrowser() {
   webBrowserView.webContents.on('did-navigate', emitNav)
   webBrowserView.webContents.on('did-navigate-in-page', emitNav)
   webBrowserView.webContents.on('did-start-loading', emitNav)
-  webBrowserView.webContents.on('did-stop-loading', emitNav)
+  webBrowserView.webContents.on('did-stop-loading', () => {
+    emitNav()
+    scheduleBrowserWheelVolume(webBrowserView.webContents)
+    scheduleBrowserAdShield(webBrowserView.webContents)
+    scheduleRiveEmbedAuto(webBrowserView.webContents)
+    scheduleWebBrowserSportsAutoplay(webBrowserView.webContents)
+  })
   webBrowserView.webContents.on('page-title-updated', emitNav)
-  webBrowserView.webContents.on('dom-ready', emitNav)
+  webBrowserView.webContents.on('dom-ready', () => {
+    emitNav()
+    scheduleBrowserWheelVolume(webBrowserView.webContents)
+    scheduleBrowserAdShield(webBrowserView.webContents)
+    scheduleRiveEmbedAuto(webBrowserView.webContents)
+    scheduleWebBrowserSportsAutoplay(webBrowserView.webContents)
+  })
+  // Subframe loads (ads) used to re-run shield/volume on every iframe and hitch the stream.
+  let frameShieldTimer = 0
+  webBrowserView.webContents.on('did-frame-finish-load', (_e, isMainFrame) => {
+    if (isMainFrame) return
+    if (frameShieldTimer) clearTimeout(frameShieldTimer)
+    frameShieldTimer = setTimeout(() => {
+      frameShieldTimer = 0
+      if (!webBrowserView || webBrowserView.webContents.isDestroyed()) return
+      scheduleBrowserAdShield(webBrowserView.webContents)
+    }, 800)
+  })
+  try {
+    webBrowserView.webContents.on('frame-created', (_e, details) => {
+      const frame = details?.frame
+      if (!frame) return
+      setTimeout(() => {
+        try {
+          if (!frame.isDestroyed?.()) {
+            void frame.executeJavaScript(
+              BROWSER_WHEEL_VOLUME_SCRIPT.replace(
+                'window.__jiyuVolLevel = 1;',
+                `window.__jiyuVolLevel = ${Number.isFinite(webBrowserVolume) ? webBrowserVolume : 1};`,
+              ),
+              true,
+            )
+            void frame.executeJavaScript(BROWSER_AD_SHIELD_SCRIPT, true)
+          }
+        } catch {
+          /* ignore */
+        }
+      }, 200)
+    })
+  } catch {
+    /* older Electron */
+  }
+  webBrowserView.webContents.on('console-message', (...args) => {
+    let message = ''
+    if (typeof args[2] === 'string') message = args[2]
+    else if (args[1] && typeof args[1] === 'object' && args[1] && 'message' in args[1]) {
+      message = String(args[1].message || '')
+    }
+    const text = String(message || '').trim()
+    const adOpen = /^jiyu-ad-open:(.*)$/.exec(text)
+    if (adOpen) {
+      const target = String(adOpen[1] || '').trim()
+      if (target) showAdDock(target)
+      return
+    }
+    const m = /^jiyu-browser-vol:(\d+)\s*$/.exec(text)
+    if (!m) return
+    const percent = Math.max(0, Math.min(100, Number(m[1]) || 0))
+    webBrowserVolume = percent / 100
+    if (webBrowserVolume > 0.001) webBrowserVolumeBeforeMute = webBrowserVolume
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('browser:volume', { percent })
+    }
+  })
   webBrowserView.webContents.on('did-fail-load', (_e, errorCode, errorDescription, validatedURL, isMainFrame) => {
-    if (!isMainFrame || errorCode === -3) return
+    if (errorCode === -3) return
+    const failedUrl = String(validatedURL || '')
+    const dead =
+      isDeadPlaceholderEmbedUrl(failedUrl) ||
+      /ERR_NAME_NOT_RESOLVED|NAME_NOT_RESOLVED|DNS_PROBE/i.test(String(errorDescription || ''))
+    if (dead && webBrowserView && !webBrowserView.webContents.isDestroyed()) {
+      let current = ''
+      try {
+        current = webBrowserView.webContents.getURL() || ''
+      } catch {
+        current = ''
+      }
+      console.log('[browser] dead embed load failed', {
+        errorCode,
+        errorDescription,
+        url: failedUrl.slice(0, 140),
+        main: isMainFrame,
+      })
+      if (
+        /rivestream\.(ru|app)|vaplayer\.ru|vidup\.to|videasy\.to|cinezo\.live|vidzee\.wtf|mapple\.fun|primesrc\.me/i.test(
+          current,
+        )
+      ) {
+        forceRiveEmbedHop(webBrowserView.webContents, 'fail-load')
+      }
+    }
+    if (!isMainFrame) return
     if (!mainWindow || mainWindow.isDestroyed() || !webBrowserView) return
     mainWindow.webContents.send('browser:nav', {
       url: validatedURL || webBrowserView.webContents.getURL(),
-      title: `Failed to load (${errorDescription || errorCode})`,
+      title: dead
+        ? 'Source failed — trying next server…'
+        : `Failed to load (${errorDescription || errorCode})`,
       canGoBack: navCanGoBack(webBrowserView.webContents),
       canGoForward: navCanGoForward(webBrowserView.webContents),
       loading: false,
@@ -1464,32 +4224,75 @@ function ensureWebBrowser() {
 
 function applyBounds(view, bounds) {
   if (!bounds) return
-  view.setBounds({
+  webBrowserLastBounds = {
     x: Math.round(bounds.x),
     y: Math.round(bounds.y),
     width: Math.max(1, Math.round(bounds.width)),
     height: Math.max(1, Math.round(bounds.height)),
-  })
+  }
+  // Dragging across monitors: keep the hardware video layer hidden until the
+  // move ends. setBounds on every move tick deadlocks the GPU.
+  if (windowMoveActive) return
+  view.setBounds(webBrowserLastBounds)
 }
 
 function showWebBrowser(bounds) {
   const view = ensureWebBrowser()
   if (!view || !mainWindow || mainWindow.isDestroyed()) return false
+  // Navigate can call show without bounds — keep last size or fill the window.
+  let nextBounds = bounds
+  if (!nextBounds || nextBounds.width < 8 || nextBounds.height < 8) {
+    if (webBrowserLastBounds && webBrowserLastBounds.width >= 8 && webBrowserLastBounds.height >= 8) {
+      nextBounds = webBrowserLastBounds
+    } else {
+      const [cw, ch] = mainWindow.getContentSize()
+      nextBounds = { x: 0, y: 0, width: Math.max(1, cw), height: Math.max(1, ch) }
+    }
+  }
+  if (isPipLikeBrowserBounds(nextBounds)) hideAdDock()
+  const alreadyShown = webBrowserVisible && webBrowserAttached
+  if (!alreadyShown) {
+    // Single-player mode takes over — destroy multi tiles so they can't cover the UI.
+    hideAllMultiWeb({ blank: true })
+  }
   if (!webBrowserAttached) {
     mainWindow.contentView.addChildView(view)
     webBrowserAttached = true
-  } else {
-    // Re-add to ensure it's the topmost child view
-    mainWindow.contentView.addChildView(view)
   }
-  applyBounds(view, bounds)
-  view.setVisible(true)
+  applyBounds(view, nextBounds)
+  if (!windowMoveActive) view.setVisible(true)
   webBrowserVisible = true
+  if (alreadyShown) return true
+  try {
+    // Live embeds need full CPU while visible (PiP / full page).
+    view.webContents.setBackgroundThrottling(false)
+  } catch {
+    /* ignore */
+  }
+  try {
+    // Respect chrome Mute — sports kick used to force-unmute after the user muted.
+    const wantSound = !(Number.isFinite(webBrowserVolume) && webBrowserVolume <= 0.001)
+    view.webContents.setAudioMuted(!wantSound)
+  } catch {
+    /* ignore */
+  }
+  scheduleBrowserWheelVolume(view.webContents)
+  if (Number.isFinite(webBrowserVolume)) {
+    void applyWebBrowserVolume(webBrowserVolume, { emit: false })
+  }
   return true
+}
+
+function clearWebBrowserSportsAutoplay() {
+  for (const t of webBrowserSportsAutoplayTimers) clearTimeout(t)
+  webBrowserSportsAutoplayTimers = []
 }
 
 function hideWebBrowser(options = {}) {
   const blank = Boolean(options && options.blank)
+  const pause = options.pause !== false
+  hideAdDock()
+  clearWebBrowserSportsAutoplay()
   if (!webBrowserView) {
     webBrowserVisible = false
     return
@@ -1504,12 +4307,60 @@ function hideWebBrowser(options = {}) {
   try {
     const contents = webBrowserView.webContents
     if (contents && !contents.isDestroyed()) {
-      void contents
-        .executeJavaScript(
-          `(() => { try { document.querySelectorAll('video,audio').forEach((m) => { m.pause(); m.muted = true; }); } catch (_) {} })();`,
-          true,
-        )
-        .catch(() => {})
+      // Hidden views were left with throttling off, so HLS/JW kept decoding → high idle CPU.
+      try {
+        contents.setBackgroundThrottling(true)
+      } catch {
+        /* ignore */
+      }
+      if (pause) {
+        void contents
+          .executeJavaScript(
+            `(() => {
+              try {
+                document.querySelectorAll('video,audio').forEach((m) => {
+                  try {
+                    m.pause();
+                    m.muted = true;
+                    m.volume = 0;
+                  } catch (_) {}
+                });
+                try {
+                  if (typeof jwplayer === 'function') {
+                    const players =
+                      typeof jwplayer.getPlayers === 'function' ? jwplayer.getPlayers() || [] : [];
+                    for (const p of players) {
+                      try {
+                        p.pause?.();
+                        p.setMute?.(true);
+                      } catch (_) {}
+                    }
+                    try {
+                      jwplayer().pause?.();
+                      jwplayer().setMute?.(true);
+                    } catch (_) {}
+                  }
+                } catch (_) {}
+                try {
+                  if (window.videojs) {
+                    for (const el of document.querySelectorAll('.video-js')) {
+                      try {
+                        window.videojs.getPlayer?.(el)?.pause?.();
+                      } catch (_) {}
+                    }
+                  }
+                } catch (_) {}
+              } catch (_) {}
+            })();`,
+            true,
+          )
+          .catch(() => {})
+        try {
+          contents.setAudioMuted(true)
+        } catch {
+          /* ignore */
+        }
+      }
       if (blank) {
         const current = contents.getURL()
         if (current && current !== 'about:blank') {
@@ -1521,6 +4372,613 @@ function hideWebBrowser(options = {}) {
     /* ignore */
   }
   webBrowserVisible = false
+}
+
+function destroyMultiWebView(id) {
+  const key = String(id || '')
+  // Stop autoplay nudge timers first — otherwise executeJavaScript keeps the
+  // main process busy for up to ~12s after the tile is closed.
+  const timers = multiWebAutoplayTimers.get(key) || []
+  for (const t of timers) clearTimeout(t)
+  multiWebAutoplayTimers.delete(key)
+  const view = multiWebViews.get(key)
+  if (!view) return
+  try {
+    if (mainWindow && !mainWindow.isDestroyed() && multiWebAttached.has(key)) {
+      mainWindow.contentView.removeChildView(view)
+    }
+  } catch {
+    /* ignore */
+  }
+  multiWebAttached.delete(key)
+  try {
+    view.webContents.destroy()
+  } catch {
+    /* ignore */
+  }
+  multiWebViews.delete(key)
+}
+
+function hideAllMultiWeb(options = {}) {
+  const blank = Boolean(options && options.blank)
+  for (const id of [...multiWebViews.keys()]) {
+    const view = multiWebViews.get(id)
+    if (!view) continue
+    try {
+      view.setVisible(false)
+    } catch {
+      /* ignore */
+    }
+    try {
+      if (mainWindow && !mainWindow.isDestroyed() && multiWebAttached.has(id)) {
+        mainWindow.contentView.removeChildView(view)
+      }
+    } catch {
+      /* ignore */
+    }
+    multiWebAttached.delete(id)
+    if (blank) {
+      try {
+        void view.webContents.loadURL('about:blank')
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  if (blank) {
+    for (const id of [...multiWebViews.keys()]) destroyMultiWebView(id)
+    multiWebAudioPrimary = ''
+  }
+}
+
+function ensureMultiWebView(id) {
+  const key = String(id || '')
+  if (!key || !mainWindow || mainWindow.isDestroyed()) return null
+  let view = multiWebViews.get(key)
+  if (view) return view
+  const browserSession = session.fromPartition('persist:jiyu-web')
+  view = new WebContentsView({
+    webPreferences: {
+      session: browserSession,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+      backgroundThrottling: false,
+    },
+  })
+  view.setBackgroundColor('#10141a')
+  view.webContents.setUserAgent(BROWSER_UA)
+  view.webContents.setBackgroundThrottling(false)
+  void installRiveEmbedAutoScript(view.webContents)
+  view.webContents.setWindowOpenHandler(({ url }) => {
+    const target = String(url || '')
+    if (/^https?:\/\//i.test(target) && !shouldBlockBrowserNavigation(target)) showAdDock(target)
+    return { action: 'deny' }
+  })
+  installEmbedNavGuard(view.webContents)
+  view.webContents.on('did-stop-loading', () => {
+    scheduleBrowserAdShield(view.webContents)
+    scheduleRiveEmbedAuto(view.webContents)
+    scheduleMultiWebAutoplay(key)
+  })
+  view.webContents.on('dom-ready', () => {
+    scheduleRiveEmbedAuto(view.webContents)
+    scheduleMultiWebAutoplay(key)
+  })
+  view.webContents.on('console-message', (...args) => {
+    let message = ''
+    if (typeof args[2] === 'string') message = args[2]
+    else if (args[1] && typeof args[1] === 'object' && args[1] && 'message' in args[1]) {
+      message = String(args[1].message || '')
+    }
+    const adOpen = /^jiyu-ad-open:(.*)$/.exec(String(message || '').trim())
+    if (adOpen?.[1]) showAdDock(String(adOpen[1]).trim())
+  })
+  multiWebViews.set(key, view)
+  installEscapeExitsFullscreen(view.webContents)
+  view.webContents.on('focus', () => {
+    emitMultiWebUserFocus(key)
+  })
+  view.webContents.on('before-input-event', (_event, input) => {
+    if (!input || input.type !== 'mouseDown') return
+    if (input.button && input.button !== 'left') return
+    emitMultiWebUserFocus(key)
+  })
+  return view
+}
+
+/** Autoplay / play-button clicks for multi-view embed tiles.
+ *  `forceMute` keeps non-spotlight tiles silent; spotlight must not remute. */
+function multiWebAutoplayScript(forceMute) {
+  const muteJs = forceMute ? 'true' : 'false'
+  const level =
+    Number.isFinite(webBrowserVolume) && webBrowserVolume > 0.001 ? webBrowserVolume : 1
+  return `(() => {
+  try {
+    const forceMute = ${muteJs};
+    const wantVol = ${Number(level)};
+    const clickPlay = () => {
+      const sels = [
+        'button.ytp-large-play-button',
+        '.ytp-large-play-button',
+        '.vjs-big-play-button',
+        '.jw-icon-display',
+        '.jw-display-icon-container',
+        '.media-control-button[data-play]',
+        '.clappr-play-button',
+        '.play-wrapper',
+        '.plyr__control--overlaid',
+        '[data-testid="play-button"]',
+        'button[aria-label*="Play" i]',
+        'button[title*="Play" i]',
+        'button[class*="play" i]',
+        'div[class*="play" i][role="button"]'
+      ];
+      for (const s of sels) {
+        const nodes = document.querySelectorAll(s);
+        for (const el of nodes) {
+          if (!el) continue;
+          if (el.getAttribute && el.getAttribute('aria-hidden') === 'true') continue;
+          const r = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+          if (r && (r.width < 8 || r.height < 8)) continue;
+          try { el.click(); return 'ui:' + s; } catch (_) {}
+        }
+      }
+      return null;
+    };
+    const applyMute = (m) => {
+      try {
+        m.muted = forceMute;
+        if (forceMute) { try { m.volume = 0; } catch (_) {} }
+        else {
+          try {
+            const live =
+              typeof window.__jiyuVolLevel === 'number' && Number.isFinite(window.__jiyuVolLevel)
+                ? Math.max(0, Math.min(1, window.__jiyuVolLevel))
+                : wantVol;
+            m.volume = live;
+          } catch (_) {}
+        }
+      } catch (_) {}
+    };
+    const videos = Array.from(document.querySelectorAll('video'));
+    for (const v of videos) applyMute(v);
+    // Treat any non-paused video as playing — readyState/videoWidth lag and
+    // re-clicking Clappr/JW play UI toggles pause on LIVE sports.
+    const playing = videos.find((v) => !v.paused && !v.ended);
+    if (playing) return 'already';
+    for (const video of videos) {
+      try {
+        applyMute(video);
+        video.playsInline = true;
+        video.setAttribute('playsinline', '');
+        video.setAttribute('autoplay', '');
+        if (video.paused) {
+          const p = video.play();
+          if (p && typeof p.catch === 'function') p.catch(() => {});
+        }
+      } catch (_) {}
+    }
+    // If a <video> exists, never click toggleable stage/play chrome — play() only.
+    if (videos.length) return 'play';
+    const ui = clickPlay();
+    return ui || 'noop';
+  } catch (_) {
+    return 'error';
+  }
+})();`
+}
+
+const multiWebAutoplayTimers = new Map()
+
+async function executeInMultiWeb(id, script, options = {}) {
+  const view = multiWebViews.get(String(id || ''))
+  if (!view || view.webContents.isDestroyed()) return { ok: false, value: null }
+  const contents = view.webContents
+  const frames = collectContentFrames(contents, { maxFrames: 8 })
+  // Always try player frames — sports embeds put <video> in child iframes.
+  let value = null
+  let anyPlaying = false
+  for (const frame of frames) {
+    try {
+      const v = await raceFrameExec(frame.executeJavaScript(String(script || ''), true), 1200)
+      if (v === 'already' || v === 'playing' || (typeof v === 'string' && v.includes('play'))) {
+        anyPlaying = true
+      }
+      if (value == null || value === '' || value === 'noop' || value === 'error' || value === 'idle') {
+        value = v
+      }
+    } catch {
+      /* timeout / ignore */
+    }
+  }
+  if (anyPlaying && (value === 'noop' || value === 'idle' || value == null)) value = 'already'
+  return { ok: true, value }
+}
+
+function emitMultiWebUserFocus(id) {
+  if (Date.now() < multiWebIgnoreFocusUntil) return
+  const key = String(id || '')
+  if (!key) return
+  // Already the audio tile — don't re-enter spotlight / autoplay loops.
+  if (key === multiWebAudioPrimary) return
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  mainWindow.webContents.send('browser:multi-focus', { id: key })
+}
+
+async function multiWebIsPlaying(id) {
+  const result = await executeInMultiWeb(
+    id,
+    `(() => {
+      try {
+        const v = Array.from(document.querySelectorAll('video')).find(
+          (m) => !m.paused && !m.ended && m.readyState > 1
+        );
+        return v ? 'playing' : 'idle';
+      } catch (_) { return 'idle'; }
+    })();`,
+  )
+  return result?.value === 'playing'
+}
+
+function clickMultiWebCenter(id, aggressive = false) {
+  const view = multiWebViews.get(String(id || ''))
+  if (!view || view.webContents.isDestroyed()) return false
+  let bounds
+  try {
+    bounds = view.getBounds()
+  } catch {
+    return false
+  }
+  if (!bounds || bounds.width < 8 || bounds.height < 8) return false
+  const contents = view.webContents
+  // Only suppress audio-switch for the synthetic click itself — a long
+  // ignore window blocked click-to-spotlight on the added stream.
+  multiWebIgnoreFocusUntil = Math.max(multiWebIgnoreFocusUntil, Date.now() + 350)
+  const points = aggressive
+    ? [
+        { x: 0.5, y: 0.42 },
+        { x: 0.5, y: 0.32 },
+        { x: 0.5, y: 0.55 },
+        { x: 0.5, y: 0.22 },
+      ]
+    : [{ x: 0.5, y: 0.42 }]
+  for (const pt of points) {
+    const x = Math.max(1, Math.min(bounds.width - 1, Math.round(bounds.width * pt.x)))
+    const y = Math.max(1, Math.min(bounds.height - 1, Math.round(bounds.height * pt.y)))
+    contents.sendInputEvent({ type: 'mouseMove', x, y, movementX: 0, movementY: 0 })
+    contents.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 })
+    contents.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 })
+  }
+  return true
+}
+
+function scheduleMultiWebAutoplay(id) {
+  const key = String(id || '')
+  if (!key) return
+  const prev = multiWebAutoplayTimers.get(key) || []
+  for (const t of prev) clearTimeout(t)
+  const timers = []
+  const forceMute0 = !multiWebAudioPrimary || key !== multiWebAudioPrimary
+  // Muted add-on tiles can be nudged harder (autoplay policy allows muted play).
+  // Spotlight stays conservative so we don't pause an already-live primary.
+  // Keep intervals short — long timers used to hitch the UI for ~10s after close.
+  const aggressive = forceMute0
+  let clicksLeft = aggressive ? 4 : 1
+  const intervals = aggressive ? [350, 900, 1800, 3200] : [700, 1800]
+  const run = async () => {
+    const view = multiWebViews.get(key)
+    if (!view || view.webContents.isDestroyed()) return
+    if (!multiWebAttached.has(key)) return
+    const forceMute = !multiWebAudioPrimary || key !== multiWebAudioPrimary
+    try {
+      view.webContents.setAudioMuted(forceMute)
+    } catch {
+      /* ignore */
+    }
+    await executeInMultiWeb(key, multiWebAutoplayScript(forceMute))
+    const playing = await multiWebIsPlaying(key)
+    if (playing) {
+      clicksLeft = 0
+      return
+    }
+    if (clicksLeft > 0) {
+      clicksLeft -= 1
+      clickMultiWebCenter(key, forceMute)
+    }
+    scheduleBrowserAdShield(view.webContents)
+  }
+  void run()
+  for (const ms of intervals) {
+    timers.push(setTimeout(() => void run(), ms))
+  }
+  multiWebAutoplayTimers.set(key, timers)
+}
+
+/** Single-player sports embeds: kick play in main process (renderer nudges race/reload). */
+let webBrowserSportsAutoplayTimers = []
+let webBrowserSportsAutoplayUrl = ''
+let webBrowserSportsAutoplayAt = 0
+
+async function executeInWebBrowser(script) {
+  if (!webBrowserView || webBrowserView.webContents.isDestroyed()) {
+    return { ok: false, value: null }
+  }
+  const contents = webBrowserView.webContents
+  const frames = collectContentFrames(contents, { maxFrames: 8 })
+  let value = null
+  for (const frame of frames) {
+    try {
+      const v = await raceFrameExec(frame.executeJavaScript(String(script || ''), true), 1200)
+      value = v
+      if (
+        v === 'already' ||
+        v === 'playing' ||
+        (typeof v === 'string' && /play/i.test(v) && v !== 'noop')
+      ) {
+        break
+      }
+    } catch {
+      /* frame timeout / destroyed */
+    }
+  }
+  return { ok: true, value }
+}
+
+async function webBrowserIsPlaying() {
+  const result = await executeInWebBrowser(`(() => {
+    try {
+      const videos = Array.from(document.querySelectorAll('video'));
+      const v = videos.find((m) => !m.paused && !m.ended);
+      return v ? 'playing' : 'idle';
+    } catch (_) { return 'idle'; }
+  })();`)
+  return result?.value === 'playing'
+}
+
+function clickWebBrowserCenter(aggressive = false) {
+  if (!webBrowserView || webBrowserView.webContents.isDestroyed() || !webBrowserVisible) {
+    return false
+  }
+  const bounds = webBrowserLastBounds
+  if (!bounds || bounds.width < 8 || bounds.height < 8) return false
+  const contents = webBrowserView.webContents
+  try {
+    contents.focus()
+  } catch {
+    /* ignore */
+  }
+  // Default: ONE click. Two+ center hits toggle pause on Clappr/JW LIVE embeds.
+  const points = aggressive
+    ? [
+        { x: 0.5, y: 0.42 },
+        { x: 0.5, y: 0.32 },
+        { x: 0.5, y: 0.55 },
+      ]
+    : [{ x: 0.5, y: 0.42 }]
+  for (const pt of points) {
+    const x = Math.max(1, Math.min(bounds.width - 1, Math.round(bounds.width * pt.x)))
+    const y = Math.max(1, Math.min(bounds.height - 1, Math.round(bounds.height * pt.y)))
+    contents.sendInputEvent({ type: 'mouseMove', x, y, movementX: 0, movementY: 0 })
+    contents.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 })
+    contents.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 })
+  }
+  return true
+}
+
+function scheduleWebBrowserSportsAutoplay(contents, options = {}) {
+  if (!contents || contents.isDestroyed?.()) return
+  const url = (() => {
+    try {
+      return contents.getURL() || ''
+    } catch {
+      return ''
+    }
+  })()
+  if (!needsSportsStyleAutoplay(url)) return
+  const force = Boolean(options && options.force)
+  const now = Date.now()
+  // Ad iframes / partial reloads fire stop-loading often — don't reset forever.
+  if (!force && url === webBrowserSportsAutoplayUrl && now - webBrowserSportsAutoplayAt < 20000) {
+    return
+  }
+  webBrowserSportsAutoplayUrl = url
+  webBrowserSportsAutoplayAt = now
+  clearWebBrowserSportsAutoplay()
+  let clicksLeft = 1
+  let started = false
+  // Replay VODs often mount <video> later than live sports — poll a bit longer.
+  const intervals = isReplayAdSensitiveUrl(url) ? [900, 2200, 4500, 8000] : [900, 2800]
+  const run = async () => {
+    if (!webBrowserView || webBrowserView.webContents.isDestroyed()) return
+    if (!webBrowserVisible) return
+    if (started) return
+    try {
+      // Don't undo chrome Mute while kicking autoplay.
+      if (!(Number.isFinite(webBrowserVolume) && webBrowserVolume <= 0.001)) {
+        webBrowserView.webContents.setAudioMuted(false)
+      } else {
+        webBrowserView.webContents.setAudioMuted(true)
+      }
+    } catch {
+      /* ignore */
+    }
+    const keepMuted = Number.isFinite(webBrowserVolume) && webBrowserVolume <= 0.001
+    await executeInWebBrowser(multiWebAutoplayScript(keepMuted))
+    if (keepMuted) {
+      void applyWebBrowserVolume(0, { emit: false })
+    }
+    const playing = await webBrowserIsPlaying()
+    if (playing) {
+      started = true
+      clicksLeft = 0
+      clearWebBrowserSportsAutoplay()
+      // Re-assert chrome volume — embeds often reset to 100% when play resumes.
+      if (!keepMuted) {
+        void applyWebBrowserVolume(webBrowserVolume, { emit: false })
+      }
+      return
+    }
+    // One gentle center click only — extra clicks pause a started stream.
+    if (clicksLeft > 0) {
+      clicksLeft -= 1
+      clickWebBrowserCenter(false)
+    }
+  }
+  void run()
+  for (const ms of intervals) {
+    webBrowserSportsAutoplayTimers.push(setTimeout(() => void run(), ms))
+  }
+}
+
+function showMultiWeb(id, url, bounds, options = {}) {
+  const key = String(id || '')
+  const target = normalizeBrowserUrl(url)
+  if (!key || !target) return { ok: false, error: 'Invalid multi-web request' }
+  if (isStreamRefererOnlyUrl(target) || shouldBlockBrowserNavigation(target)) {
+    console.log('[browser] blocked multiShow stream-referer/ad', String(target).slice(0, 140))
+    return { ok: false, error: 'Blocked stream-referer page' }
+  }
+  const view = ensureMultiWebView(key)
+  if (!view || !mainWindow || mainWindow.isDestroyed()) {
+    return { ok: false, error: 'Browser unavailable' }
+  }
+  // Single-player browser must not keep playing under multi tiles (ghost audio).
+  if (webBrowserView && !webBrowserView.webContents.isDestroyed()) {
+    hideWebBrowser({ blank: true, pause: true })
+  } else {
+    webBrowserVisible = false
+  }
+  const wasAttached = multiWebAttached.has(key)
+  if (!wasAttached) {
+    mainWindow.contentView.addChildView(view)
+    multiWebAttached.add(key)
+  } else {
+    mainWindow.contentView.addChildView(view)
+  }
+  if (bounds) {
+    view.setBounds({
+      x: Math.round(bounds.x),
+      y: Math.round(bounds.y),
+      width: Math.max(1, Math.round(bounds.width)),
+      height: Math.max(1, Math.round(bounds.height)),
+    })
+  }
+  view.setVisible(true)
+  const muted = options.muted !== false && !options.primary
+  if (options.primary) multiWebAudioPrimary = key
+  else if (!multiWebAudioPrimary) multiWebAudioPrimary = key
+  try {
+    view.webContents.setAudioMuted(Boolean(muted) || key !== multiWebAudioPrimary)
+  } catch {
+    /* ignore */
+  }
+  const current = view.webContents.getURL()
+  const same =
+    current &&
+    current !== 'about:blank' &&
+    String(current).split('#')[0] === String(target).split('#')[0]
+  if (!same) {
+    const httpReferrer = httpReferrerForBrowserUrl(target)
+    void view.webContents
+      .loadURL(target, httpReferrer ? { httpReferrer } : undefined)
+      .catch(() => {})
+    scheduleMultiWebAutoplay(key)
+  } else if (!wasAttached) {
+    // First attach of an already-loaded URL — kick once.
+    scheduleMultiWebAutoplay(key)
+  }
+  // Re-show / layout refresh: do NOT re-nudge (center-clicks pause playing video).
+  return { ok: true, url: target }
+}
+
+function setMultiWebBounds(id, bounds) {
+  const view = multiWebViews.get(String(id || ''))
+  if (!view || !bounds) return false
+  view.setBounds({
+    x: Math.round(bounds.x),
+    y: Math.round(bounds.y),
+    width: Math.max(1, Math.round(bounds.width)),
+    height: Math.max(1, Math.round(bounds.height)),
+  })
+  return true
+}
+
+function setMultiWebAudio(id, muted) {
+  const key = String(id || '')
+  const view = multiWebViews.get(key)
+  if (!view || view.webContents.isDestroyed()) return false
+  try {
+    view.webContents.setAudioMuted(Boolean(muted))
+  } catch {
+    return false
+  }
+  // Match the single-browser volume so multi spotlight isn't stuck quiet.
+  const level =
+    Number.isFinite(webBrowserVolume) && webBrowserVolume > 0.001 ? webBrowserVolume : 1
+  // Autoplay leaves <video muted>; webContents mute alone isn't enough to switch hearable audio.
+  const script = muted
+    ? `(() => {
+        try {
+          document.querySelectorAll('video,audio').forEach((m) => {
+            m.muted = true;
+            try { m.volume = 0; } catch (_) {}
+          });
+          return 'muted';
+        } catch (_) { return 'error'; }
+      })();`
+    : `(() => {
+        try {
+          const level =
+            typeof window.__jiyuVolLevel === 'number' && Number.isFinite(window.__jiyuVolLevel)
+              ? Math.max(0, Math.min(1, window.__jiyuVolLevel))
+              : ${Number(level)};
+          window.__jiyuVolLevel = level;
+          document.querySelectorAll('video,audio').forEach((m) => {
+            m.muted = false;
+            try { m.volume = level; } catch (_) {}
+            if (m.paused) {
+              const p = m.play();
+              if (p && typeof p.catch === 'function') p.catch(() => {});
+            }
+          });
+          return 'unmuted';
+        } catch (_) { return 'error'; }
+      })();`
+  void executeInMultiWeb(key, script)
+  return true
+}
+
+/** Mute every multi tile except the spotlight; unmute the spotlight. */
+function setMultiWebSpotlight(primaryId) {
+  const primary = String(primaryId || '')
+  const same = primary && primary === multiWebAudioPrimary
+  multiWebAudioPrimary = primary
+  // Mute single browser too — leftover watch session must stay silent.
+  if (webBrowserView && !webBrowserView.webContents.isDestroyed()) {
+    try {
+      webBrowserView.webContents.setAudioMuted(true)
+    } catch {
+      /* ignore */
+    }
+  }
+  for (const id of multiWebViews.keys()) {
+    setMultiWebAudio(id, id !== primary)
+  }
+  if (primary) {
+    setTimeout(() => setMultiWebAudio(primary, false), 120)
+    setTimeout(() => {
+      // Re-mute everyone else in case a nudge unmuted a tile.
+      for (const id of multiWebViews.keys()) {
+        if (id !== primary) setMultiWebAudio(id, true)
+      }
+      setMultiWebAudio(primary, false)
+    }, 700)
+    if (!same) {
+      void executeInMultiWeb(primary, multiWebAutoplayScript(false))
+    }
+  }
+  return true
 }
 
 function normalizeBrowserUrl(raw) {
@@ -1553,10 +5011,17 @@ async function loadDevUrl(win, attempt = 0) {
 }
 
 app.whenReady().then(() => {
-  loadDotEnvFile(path.join(__dirname, '..', '.env'))
+  loadJiyuDotEnv()
   loadDotEnvFile(path.join(app.getPath('userData'), '.env'))
+  if (jiyuDataPaths?.temp) {
+    process.env.TEMP = jiyuDataPaths.temp
+    process.env.TMP = jiyuDataPaths.temp
+  }
 
   recoverCatalogFromLegacyApps()
+  sweepPartialTorrents()
+  const partialSweep = setInterval(sweepPartialTorrents, 15 * 60 * 1000)
+  if (typeof partialSweep.unref === 'function') partialSweep.unref()
 
   // Desktop Chrome UA + Sec-CH-UA* on the shared web session. Electron's default
   // UA / empty brands look non-browser to Cloudflare.
@@ -1575,8 +5040,96 @@ app.whenReady().then(() => {
       if (!headers['Accept-Language'] && !headers['accept-language']) {
         headers['Accept-Language'] = 'en-US,en;q=0.9'
       }
+      // fstream365 / vsembed: main document needs a site Referer (else nginx 404).
+      // Never overwrite same-origin XHR Referer — getSources then returns HTML and
+      // CryptoJS throws "Malformed UTF-8 data" (player spinner forever).
+      // embed.st: strip Referer on document navigations — a Referer yields a stub player.
+      try {
+        const host = new URL(details.url).hostname.replace(/^www\./i, '').toLowerCase()
+        if (
+          (host === 'embed.st' ||
+            host.endsWith('.embed.st') ||
+            host === 'embedhd.st' ||
+            host.endsWith('.embedhd.st')) &&
+          (details.resourceType === 'mainFrame' || details.resourceType === 'subFrame')
+        ) {
+          delete headers.Referer
+          delete headers.referer
+          callback({ requestHeaders: headers })
+          return
+        }
+      } catch {
+        /* ignore */
+      }
+      if (applyYouTubeEmbedderHeaders(details.url, headers)) {
+        callback({ requestHeaders: headers })
+        return
+      }
+      const forcedReferrer = httpReferrerForBrowserUrl(details.url)
+      if (forcedReferrer) {
+        const current = String(headers.Referer || headers.referer || '')
+        let reqHost = ''
+        let curHost = ''
+        try {
+          reqHost = new URL(details.url).hostname.replace(/^www\./i, '').toLowerCase()
+        } catch {
+          /* ignore */
+        }
+        try {
+          curHost = current ? new URL(current).hostname.replace(/^www\./i, '').toLowerCase() : ''
+        } catch {
+          /* ignore */
+        }
+        const sameSite =
+          Boolean(curHost) &&
+          (curHost === reqHost ||
+            reqHost.endsWith(`.${curHost}`) ||
+            curHost.endsWith(`.${reqHost}`))
+        const missing =
+          !current || /^(about:blank|about:srcdoc|chrome:|chrome-error:|data:)/i.test(current)
+        if (!sameSite && (missing || details.resourceType === 'mainFrame')) {
+          for (const name of Object.keys(headers)) {
+            if (name.toLowerCase() === 'referer') delete headers[name]
+          }
+          headers.Referer = forcedReferrer
+        }
+      }
       callback({ requestHeaders: headers })
     })
+    // Block ad networks + installer/adware bait in one handler (Electron keeps one listener).
+    ses.webRequest.onBeforeRequest((details, callback) => {
+      const url = String(details.url || '')
+      if (isBlockedBrowserDownloadUrl(url)) {
+        callback({ cancel: true })
+        return
+      }
+      try {
+        const host = new URL(url).hostname.replace(/^www\./i, '').toLowerCase()
+        // LiveXTV / DoodStream VODs refuse to play unless Google ad scripts load.
+        if (isGoogleAdsNetworkHost(host) && browserSessionAllowsReplayAds()) {
+          callback({})
+          return
+        }
+        const blockedHost =
+          /(^|\.)(doubleclick\.net|googlesyndication\.com|googleadservices\.com|adservice\.google\.com|popads\.net|propellerads\.com|exoclick\.com|trafficjunky\.net|juicyads\.com|tsyndicate\.com|adsterra\.com|adnxs\.com|moatads\.com|taboola\.com|outbrain\.com|adaround\.net|adultfriendfinder\.com|stripchat\.com|chaturbate\.com|pornhub\.com|xvideos\.com|xnxx\.com|xhamster\.com|spankwire\.com|livejasmin\.com|drimzzzz\.info|wpnxiswpuyrfn\.icu|therocketlanguages\.com|opera\.com|geo\.opera\.com|worldofwarships\.com|wargaming\.net)$/i.test(
+            host,
+          ) ||
+          ((host === 'fstream365.com' || host.endsWith('.fstream365.com')) &&
+            /\/banner\//i.test(url))
+        if (blockedHost || isAdHijackUrl(url)) {
+          callback({ cancel: true })
+          return
+        }
+      } catch {
+        /* ignore */
+      }
+      if (isAdHijackUrl(url)) {
+        callback({ cancel: true })
+        return
+      }
+      callback({})
+    })
+    installWebSessionDownloadGuard(ses)
     console.log('[cf-unlock] session UA =', BROWSER_UA)
     console.log('[cf-unlock] Sec-CH-UA =', desktopChromeClientHintHeaders()['Sec-CH-UA'])
   } catch (err) {
@@ -1624,20 +5177,38 @@ app.whenReady().then(() => {
       return { action: 'deny' }
     })
     contents.on('enter-html-full-screen', () => {
-      if (contents.getType?.() !== 'webview') return
+      // Main UI player fullscreen must be allowed (hides the Windows taskbar).
       try {
-        if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isFullScreen()) {
-          mainWindow.setFullScreen(false)
+        if (
+          mainWindow &&
+          !mainWindow.isDestroyed() &&
+          contents.id === mainWindow.webContents.id
+        ) {
+          return
         }
       } catch {
         /* ignore */
       }
+      // Guest pages (YouTube / sports embeds) must never use the HTML Fullscreen API —
+      // it fights Jiyu's OS fullscreen (enter then immediate leave). Always dismiss
+      // guest HTML FS; keep or restore OS fullscreen when Jiyu requested it.
+      // Never force OS FS *off* here — a stale want-flag must not yank Full out from
+      // under the user when a guest briefly tries HTML fullscreen.
       void contents
         .executeJavaScript(
           `(() => { try { document.exitFullscreen?.(); document.webkitExitFullscreen?.(); } catch (_) {} })();`,
           true,
         )
         .catch(() => {})
+      if (jiyuWantOsFullScreen) {
+        try {
+          if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isFullScreen()) {
+            mainWindow.setFullScreen(true)
+          }
+        } catch {
+          /* ignore */
+        }
+      }
     })
   })
 
@@ -1666,6 +5237,11 @@ app.whenReady().then(() => {
       const override = playbackHeaderOverrides.get(host)
       if (override?.userAgent) userAgent = override.userAgent
       if (override?.referrer) referer = override.referrer
+      // Manifest/probe host often differs from segment CDN — carry the active
+      // playback Referer onto media requests so RiveStream HLS isn't blocked.
+      if (!referer && activePlaybackReferrer && isIptvMediaUrl(url)) {
+        referer = activePlaybackReferrer
+      }
     } catch {
       /* ignore bad URLs */
     }
@@ -1674,6 +5250,11 @@ app.whenReady().then(() => {
       'User-Agent': userAgent,
     })
     if (!headers.Accept && !headers.accept) headers.Accept = '*/*'
+    // Home/local channel YouTube iframes use defaultSession (file:// → no Referer).
+    if (applyYouTubeEmbedderHeaders(url, headers)) {
+      callback({ requestHeaders: headers })
+      return
+    }
     // CVM Vimeo live: player config + CDN segments expect the official site origin
     if (/vimeocdn\.com|player\.vimeo\.com|vimeo\.com\/live\//i.test(url)) {
       headers.Referer = 'https://site.cvmtv.com/'
@@ -1709,6 +5290,7 @@ app.whenReady().then(() => {
   })
 
   createWindow()
+  setupAutoUpdater()
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
@@ -1716,6 +5298,59 @@ app.whenReady().then(() => {
 })
 
 ipcMain.handle('app:getVersion', async () => APP_VERSION)
+
+ipcMain.handle('app:backgroundSync', async (_event, active) => {
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.setBackgroundThrottling(!active)
+    }
+  } catch {
+    /* ignore */
+  }
+  return { ok: true }
+})
+
+ipcMain.handle('app:updater:check', async () => {
+  if (!app.isPackaged || !autoUpdaterRef) {
+    return { ok: false, reason: 'dev', message: 'Updates only run in packaged builds.' }
+  }
+  try {
+    const result = await autoUpdaterRef.checkForUpdates()
+    return {
+      ok: true,
+      version: result?.updateInfo?.version || null,
+    }
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err) }
+  }
+})
+
+ipcMain.handle('app:updater:download', async () => {
+  if (!app.isPackaged || !autoUpdaterRef) {
+    return { ok: false, reason: 'dev' }
+  }
+  try {
+    await autoUpdaterRef.downloadUpdate()
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err) }
+  }
+})
+
+ipcMain.handle('app:updater:install', async () => {
+  if (!app.isPackaged || !autoUpdaterRef) {
+    return { ok: false, reason: 'dev' }
+  }
+  // isSilent=false, isForceRunAfter=true
+  setImmediate(() => {
+    try {
+      autoUpdaterRef.quitAndInstall(false, true)
+    } catch {
+      /* ignore */
+    }
+  })
+  return { ok: true }
+})
 
 ipcMain.handle('system:getCapabilities', async () => {
   const totalMem = os.totalmem()
@@ -1929,63 +5564,206 @@ async function awaitTmdbFetchControl() {
 }
 
 /**
- * TMDB TV lists with IMDb ids.
- * kind: 'popular' (discover 2010+) | 'on_the_air' (currently airing)
+ * TMDB TV lists.
+ * kind: 'popular' (discover 2010+) | 'on_the_air' | 'trending' (week)
+ * options.withExternalIds — default true (EZTV); false for Rive/TMDB-only shelves (faster).
  * Key from .env — never sent to the renderer except as results.
  */
-async function fetchTmdbTvCatalog(kind = 'popular', limit = 3000) {
+async function fetchTmdbTvCatalog(kind = 'popular', limit = 3000, options = {}) {
   const apiKey = process.env.TMDB_API_KEY || process.env.TMDB_KEY || ''
   if (!apiKey) {
     return { ok: false, shows: [], error: 'TMDB_API_KEY missing from .env' }
   }
-  const mode = kind === 'on_the_air' ? 'on_the_air' : 'popular'
-  const defaultLimit = mode === 'on_the_air' ? 500 : 3000
-  const target = Math.max(1, Math.min(5000, Number(limit) || defaultLimit))
+  const mode =
+    kind === 'on_the_air'
+      ? 'on_the_air'
+      : kind === 'trending'
+        ? 'trending'
+        : kind === 'anime'
+          ? 'anime'
+          : kind === 'animation'
+            ? 'animation'
+            : kind === 'kids'
+              ? 'kids'
+              : kind === 'by_year'
+                ? 'by_year'
+                : 'popular'
+  const withExternalIds = options?.withExternalIds !== false
+  const byYearStart = 2000
+  const byYearPerYear = 20
+  const byYearEnd = new Date().getFullYear()
+  const byYearDefault =
+    Math.max(1, byYearEnd - byYearStart + 1) * byYearPerYear
+  const defaultLimit =
+    mode === 'on_the_air'
+      ? 500
+      : mode === 'trending'
+        ? 100
+        : mode === 'anime'
+          ? 2000
+          : mode === 'animation'
+            ? 8000
+            : mode === 'kids'
+              ? 500
+              : mode === 'by_year'
+                ? byYearDefault
+                : 3000
+  // Animation (Zenox) may pull up to ~10k discover rows (TMDB page cap).
+  const hardCap = mode === 'animation' ? 10000 : 5000
+  const target = Math.max(1, Math.min(hardCap, Number(limit) || defaultLimit))
   const pageSize = 20
   const pagesNeeded = Math.ceil(target / pageSize)
   const shows = []
   try {
     await awaitTmdbFetchControl()
     emitTmdbProgress({ phase: 'discover', kind: mode, page: 0, pagesNeeded, done: 0, total: target })
-    for (let page = 1; page <= pagesNeeded; page += 1) {
-      await awaitTmdbFetchControl()
-      const url =
-        mode === 'on_the_air'
-          ? new URL('https://api.themoviedb.org/3/tv/on_the_air')
-          : new URL('https://api.themoviedb.org/3/discover/tv')
-      url.searchParams.set('api_key', apiKey)
-      url.searchParams.set('language', 'en-US')
-      url.searchParams.set('page', String(page))
-      if (mode === 'popular') {
+
+    if (mode === 'by_year') {
+      // Top N per first-air year (newest → oldest). One Discover page per year.
+      const years = []
+      for (let y = byYearEnd; y >= byYearStart; y -= 1) years.push(y)
+      const yearTarget = Math.min(target, years.length * byYearPerYear)
+      const seenIds = new Set()
+      for (let i = 0; i < years.length && shows.length < yearTarget; i += 1) {
+        await awaitTmdbFetchControl()
+        const year = years[i]
+        const url = new URL('https://api.themoviedb.org/3/discover/tv')
+        url.searchParams.set('api_key', apiKey)
+        url.searchParams.set('language', 'en-US')
+        url.searchParams.set('page', '1')
         url.searchParams.set('sort_by', 'popularity.desc')
-        url.searchParams.set('first_air_date.gte', '2010-01-01')
+        url.searchParams.set('first_air_date_year', String(year))
         url.searchParams.set('include_null_first_air_dates', 'false')
-      }
-      const res = await fetch(url)
-      if (!res.ok) {
-        const body = await res.text().catch(() => '')
-        return {
-          ok: false,
-          shows: [],
-          error: `TMDB ${mode} HTTP ${res.status}: ${body.slice(0, 160)}`,
+        const res = await fetch(url)
+        if (!res.ok) {
+          const body = await res.text().catch(() => '')
+          return {
+            ok: false,
+            shows: [],
+            error: `TMDB by_year ${year} HTTP ${res.status}: ${body.slice(0, 160)}`,
+          }
         }
+        const json = await res.json()
+        const results = Array.isArray(json.results) ? json.results : []
+        let taken = 0
+        for (const row of results) {
+          if (taken >= byYearPerYear || shows.length >= yearTarget) break
+          const id = row?.id
+          if (!id || seenIds.has(id)) continue
+          seenIds.add(id)
+          shows.push(row)
+          taken += 1
+        }
+        emitTmdbProgress({
+          phase: 'discover',
+          kind: mode,
+          page: i + 1,
+          pagesNeeded: years.length,
+          done: Math.min(shows.length, yearTarget),
+          total: yearTarget,
+        })
       }
-      const json = await res.json()
-      const results = Array.isArray(json.results) ? json.results : []
-      if (results.length === 0) break
-      shows.push(...results)
-      emitTmdbProgress({
-        phase: 'discover',
-        kind: mode,
-        page,
-        pagesNeeded,
-        done: Math.min(shows.length, target),
-        total: target,
-      })
-      const totalPages = Number(json.total_pages) || pagesNeeded
-      if (page >= totalPages) break
+    } else {
+      for (let page = 1; page <= pagesNeeded; page += 1) {
+        await awaitTmdbFetchControl()
+        const url =
+          mode === 'on_the_air'
+            ? new URL('https://api.themoviedb.org/3/tv/on_the_air')
+            : mode === 'trending'
+              ? new URL('https://api.themoviedb.org/3/trending/tv/week')
+              : new URL('https://api.themoviedb.org/3/discover/tv')
+        url.searchParams.set('api_key', apiKey)
+        url.searchParams.set('language', 'en-US')
+        url.searchParams.set('page', String(page))
+        if (mode === 'popular') {
+          url.searchParams.set('sort_by', 'popularity.desc')
+          url.searchParams.set('first_air_date.gte', '2010-01-01')
+          url.searchParams.set('include_null_first_air_dates', 'false')
+        }
+        if (mode === 'anime') {
+          // Anime → Full Shows: complete (Ended) Japanese animation only.
+          // Weekly single-eps stay on New Releases via SubsPlease.
+          url.searchParams.set('with_genres', '16')
+          url.searchParams.set('with_original_language', 'ja')
+          url.searchParams.set('with_status', '3') // Ended
+          url.searchParams.set('sort_by', 'popularity.desc')
+          url.searchParams.set('include_null_first_air_dates', 'false')
+        }
+        if (mode === 'animation') {
+          // Zenox /tv?genre=16 — all TMDB Animation TV (anime + kids + Western).
+          url.searchParams.set('with_genres', '16')
+          url.searchParams.set('sort_by', 'popularity.desc')
+          url.searchParams.set('include_null_first_air_dates', 'false')
+        }
+        if (mode === 'kids') {
+          // Kids → Shows: TMDB Kids genre (10762). No Cloudflare — Rive plays by id.
+          url.searchParams.set('with_genres', '10762')
+          url.searchParams.set('sort_by', 'popularity.desc')
+          url.searchParams.set('include_null_first_air_dates', 'false')
+          url.searchParams.set('without_genres', '10767,10763') // Talk / News
+        }
+        const res = await fetch(url)
+        if (!res.ok) {
+          const body = await res.text().catch(() => '')
+          return {
+            ok: false,
+            shows: [],
+            error: `TMDB ${mode} HTTP ${res.status}: ${body.slice(0, 160)}`,
+          }
+        }
+        const json = await res.json()
+        const results = Array.isArray(json.results) ? json.results : []
+        if (results.length === 0) break
+        // Trending mixes movies + TV — keep TV / shows only.
+        const tvRows =
+          mode === 'trending'
+            ? results.filter((row) => !row.media_type || row.media_type === 'tv')
+            : results
+        shows.push(...tvRows)
+        emitTmdbProgress({
+          phase: 'discover',
+          kind: mode,
+          page,
+          pagesNeeded,
+          done: Math.min(shows.length, target),
+          total: target,
+        })
+        const totalPages = Number(json.total_pages) || pagesNeeded
+        if (page >= totalPages) break
+      }
     }
     const top = shows.slice(0, target)
+    const mapShow = (show, imdbId = '') => ({
+      tmdbId: show.id,
+      name: show.name || show.original_name || '',
+      firstAirDate: show.first_air_date || '',
+      popularity: show.popularity ?? 0,
+      imdbId,
+      overview: String(show.overview || '')
+        .replace(/\s+/g, ' ')
+        .trim(),
+      poster: show.poster_path
+        ? `https://image.tmdb.org/t/p/w342${show.poster_path}`
+        : '',
+      originalLanguage: String(show.original_language || '').trim(),
+      genreIds: Array.isArray(show.genre_ids)
+        ? show.genre_ids.map((g) => Number(g)).filter((n) => Number.isFinite(n))
+        : [],
+    })
+
+    if (!withExternalIds) {
+      const out = top.map((show) => mapShow(show))
+      emitTmdbProgress({
+        phase: 'done',
+        kind: mode,
+        page: out.length,
+        pagesNeeded: out.length,
+        done: out.length,
+        total: out.length,
+      })
+      return { ok: true, shows: out.filter((s) => s.tmdbId && s.name), error: null }
+    }
+
     const out = new Array(top.length)
     let cursor = 0
     let idsDone = 0
@@ -2008,19 +5786,7 @@ async function fetchTmdbTvCatalog(kind = 'popular', limit = 3000) {
         } catch {
           imdbId = ''
         }
-        out[idx] = {
-          tmdbId: show.id,
-          name: show.name || show.original_name || '',
-          firstAirDate: show.first_air_date || '',
-          popularity: show.popularity ?? 0,
-          imdbId,
-          overview: String(show.overview || '')
-            .replace(/\s+/g, ' ')
-            .trim(),
-          poster: show.poster_path
-            ? `https://image.tmdb.org/t/p/w342${show.poster_path}`
-            : '',
-        }
+        out[idx] = mapShow(show, imdbId)
         idsDone += 1
         if (idsDone === 1 || idsDone === top.length || idsDone % 40 === 0) {
           emitTmdbProgress({
@@ -2054,7 +5820,9 @@ async function fetchTmdbTvCatalog(kind = 'popular', limit = 3000) {
 }
 
 ipcMain.handle('tmdb:popularTv', async (_event, limit) => fetchTmdbTvCatalog('popular', limit))
-ipcMain.handle('tmdb:tvCatalog', async (_event, kind, limit) => fetchTmdbTvCatalog(kind, limit))
+ipcMain.handle('tmdb:tvCatalog', async (_event, kind, limit, options) =>
+  fetchTmdbTvCatalog(kind, limit, options || {}),
+)
 ipcMain.handle('tmdb:syncControl', async (_event, action) => {
   const cmd = String(action || '').toLowerCase()
   if (cmd === 'pause') {
@@ -2107,25 +5875,116 @@ ipcMain.handle('browser:hide', async (_event, options) => {
   return true
 })
 
+ipcMain.handle('browser:getVolume', async () => ({
+  percent: Math.round((Number.isFinite(webBrowserVolume) ? webBrowserVolume : 1) * 100),
+}))
+
+ipcMain.handle('browser:setVolume', async (_event, percent) => {
+  const pct = Math.max(0, Math.min(100, Number(percent) || 0))
+  return applyWebBrowserVolume(pct / 100)
+})
+
 ipcMain.handle('browser:setBounds', async (_event, bounds) => {
   if (!webBrowserView || !bounds) return false
+  if (isPipLikeBrowserBounds(bounds)) hideAdDock()
   applyBounds(webBrowserView, bounds)
   return true
 })
 
+function sameBrowserPageUrl(a, b) {
+  try {
+    const left = new URL(String(a || ''))
+    const right = new URL(String(b || ''))
+    if (left.hostname.replace(/^www\./i, '').toLowerCase() !== right.hostname.replace(/^www\./i, '').toLowerCase()) {
+      return false
+    }
+    return left.href.split('#')[0] === right.href.split('#')[0]
+  } catch {
+    return String(a || '') === String(b || '')
+  }
+}
+
+function rivestreamTmdbFromBrowserUrl(url) {
+  try {
+    const u = new URL(String(url || ''))
+    const host = u.hostname.replace(/^www\./i, '').toLowerCase()
+    if (host === 'rivestream.ru' || host.endsWith('.rivestream.ru')) {
+      return String(u.searchParams.get('id') || u.searchParams.get('tmdb') || '').trim()
+    }
+    const m =
+      u.pathname.match(/\/(?:embed\/)?tv\/(\d+)(?:\/|$)/i) ||
+      u.pathname.match(/\/tv\/(\d+)-\d+-\d+/i)
+    if (m) return m[1]
+    return String(u.searchParams.get('tmdb') || u.searchParams.get('id') || '').trim()
+  } catch {
+    return ''
+  }
+}
+
+/** Keep guest on vaplayer/vidup/… when React re-asks for the Rive shell URL. */
+function shouldKeepRiveGuestHop(currentUrl, requestedUrl) {
+  try {
+    const current = String(currentUrl || '')
+    const requested = String(requestedUrl || '')
+    if (!current || !requested) return false
+    if (sameBrowserPageUrl(current, requested)) return true
+    const curHost = new URL(current).hostname.replace(/^www\./i, '').toLowerCase()
+    const reqHost = new URL(requested).hostname.replace(/^www\./i, '').toLowerCase()
+    const reqIsRive = reqHost === 'rivestream.ru' || reqHost.endsWith('.rivestream.ru')
+    const curIsDirect =
+      /(^|\.)(vaplayer\.ru|vidup\.to|videasy\.to|cinezo\.live|vidzee\.wtf|mapple\.fun|primesrc\.me|streamingnow\.mov)$/i.test(
+        curHost,
+      )
+    if (!reqIsRive || !curIsDirect) return false
+    const reqId = rivestreamTmdbFromBrowserUrl(requested)
+    const curId = rivestreamTmdbFromBrowserUrl(current)
+    return Boolean(reqId && curId && reqId === curId)
+  } catch {
+    return false
+  }
+}
+
 ipcMain.handle('browser:navigate', async (_event, url) => {
   const target = normalizeBrowserUrl(url)
   if (!target) return { ok: false, error: 'Invalid URL' }
+  if (isStreamRefererOnlyUrl(target) || shouldBlockBrowserNavigation(target)) {
+    console.log('[browser] blocked navigate to stream-referer/ad url', String(target).slice(0, 140))
+    return { ok: false, error: 'Blocked stream-referer page' }
+  }
   const view = ensureWebBrowser()
   if (!view) return { ok: false, error: 'Browser unavailable' }
   if (!webBrowserAttached || !webBrowserVisible) showWebBrowser()
   try {
+    let current = ''
+    try {
+      current = view.webContents.getURL() || ''
+    } catch {
+      current = ''
+    }
+    if (current && (sameBrowserPageUrl(current, target) || shouldKeepRiveGuestHop(current, target))) {
+      return { ok: true, url: current, kept: true }
+    }
+    // PiP/hide may have left the guest muted — restore only if chrome volume is up.
+    try {
+      const wantSound = !(Number.isFinite(webBrowserVolume) && webBrowserVolume <= 0.001)
+      view.webContents.setAudioMuted(!wantSound)
+    } catch {
+      /* ignore */
+    }
+    // Force a fresh sports/replay autoplay cycle (retries after PiP/hide used to no-op).
+    if (needsSportsStyleAutoplay(target)) {
+      webBrowserSportsAutoplayUrl = ''
+      webBrowserSportsAutoplayAt = 0
+    }
     // Start navigation immediately — do not wait for YouTube to finish loading
     // (loadURL can take many seconds and made PiP feel broken/slow).
-    void view.webContents.loadURL(target).catch((err) => {
-      if (err && (err.code === 'ERR_ABORTED' || /ERR_ABORTED/.test(String(err)))) return
-      console.warn('[browser:navigate]', err instanceof Error ? err.message : err)
-    })
+    const httpReferrer = httpReferrerForBrowserUrl(target)
+    void view.webContents
+      .loadURL(target, httpReferrer ? { httpReferrer } : undefined)
+      .catch((err) => {
+        if (err && (err.code === 'ERR_ABORTED' || /ERR_ABORTED/.test(String(err)))) return
+        console.warn('[browser:navigate]', err instanceof Error ? err.message : err)
+      })
     return { ok: true, url: target }
   } catch (err) {
     if (err && (err.code === 'ERR_ABORTED' || /ERR_ABORTED/.test(String(err)))) {
@@ -2207,16 +6066,99 @@ ipcMain.handle('browser:openExternalCurrent', async () => {
   return true
 })
 
+/** Serialize browser:execute so sports autoplay nudges don't pile up forever. */
+let browserExecuteTail = Promise.resolve()
+
 ipcMain.handle('browser:execute', async (_event, code) => {
-  if (!webBrowserView || webBrowserView.webContents.isDestroyed()) {
+  const run = async () => {
+    if (!webBrowserView || webBrowserView.webContents.isDestroyed()) {
+      return { ok: false, error: 'Browser unavailable' }
+    }
+    const script = String(code || '')
+    const contents = webBrowserView.webContents
+    const frames = collectContentFrames(contents, { maxFrames: 8 })
+
+    const frameResults = []
+    let best = null
+    for (const frame of frames) {
+      try {
+        const result = await raceFrameExec(frame.executeJavaScript(script, true), 1200)
+        const entry = { ok: true, url: frame.url || '', result }
+        frameResults.push(entry)
+        const tag = typeof result === 'string' ? result : ''
+        if (
+          tag &&
+          tag !== 'no-video' &&
+          tag !== 'noop' &&
+          tag !== 'error' &&
+          (!best || best.result === 'no-video')
+        ) {
+          best = entry
+        }
+        if (!best) best = entry
+        // Only short-circuit on clear play successes — parent pages often return
+        // overlay-click strings before the real player iframe is ready.
+        if (
+          best &&
+          isSportsEmbedHost(best.url || '') &&
+          /^(play-with-sound|jw-unmute|player-click|play-ui-click|playing|already)$/i.test(tag)
+        ) {
+          break
+        }
+      } catch (err) {
+        frameResults.push({
+          ok: false,
+          url: frame.url || '',
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+    }
+    if (!best && frameResults.length > 0) {
+      return {
+        ok: false,
+        error: frameResults[0]?.error || 'Script failed in all frames',
+        frameResults,
+      }
+    }
+    return { ok: true, result: best?.result, frameResults }
+  }
+
+  const pending = browserExecuteTail.then(run, run)
+  browserExecuteTail = pending.then(
+    () => undefined,
+    () => undefined,
+  )
+  return pending
+})
+
+/** Synthetic click inside the embed view (cross-origin iframes block JS unmute). */
+ipcMain.handle('browser:clickCenter', async (_event, options) => {
+  if (!webBrowserView || webBrowserView.webContents.isDestroyed() || !webBrowserVisible) {
     return { ok: false, error: 'Browser unavailable' }
   }
-  try {
-    const result = await webBrowserView.webContents.executeJavaScript(String(code || ''), true)
-    return { ok: true, result }
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  const bounds = webBrowserLastBounds
+  if (!bounds || bounds.width < 8 || bounds.height < 8) {
+    return { ok: false, error: 'Browser bounds unknown' }
   }
+  const points = Array.isArray(options?.points) && options.points.length > 0
+    ? options.points
+    : [{ x: 0.5, y: 0.42 }]
+  const contents = webBrowserView.webContents
+  try {
+    contents.focus()
+  } catch {
+    /* ignore */
+  }
+  for (const pt of points) {
+    const fx = typeof pt.x === 'number' ? pt.x : 0.5
+    const fy = typeof pt.y === 'number' ? pt.y : 0.5
+    const x = Math.max(1, Math.min(bounds.width - 1, Math.round(bounds.width * fx)))
+    const y = Math.max(1, Math.min(bounds.height - 1, Math.round(bounds.height * fy)))
+    contents.sendInputEvent({ type: 'mouseMove', x, y, movementX: 0, movementY: 0 })
+    contents.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 })
+    contents.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 })
+  }
+  return { ok: true, clicks: points.length }
 })
 
 ipcMain.handle('browser:getNav', async () => {
@@ -2241,10 +6183,119 @@ ipcMain.handle('browser:getNav', async () => {
   }
 })
 
+ipcMain.handle('browser:adDockClose', async () => {
+  hideAdDock()
+  return true
+})
+
+ipcMain.handle('browser:adDockStatus', async () => ({
+  visible: adDockVisible,
+  url: adDockView && !adDockView.webContents.isDestroyed() ? adDockView.webContents.getURL() : '',
+}))
+
+ipcMain.handle('browser:multiShow', async (_event, payload) => {
+  const id = payload?.id
+  const url = payload?.url
+  const bounds = payload?.bounds
+  const primary = Boolean(payload?.primary)
+  return showMultiWeb(id, url, bounds, { primary, muted: !primary })
+})
+
+ipcMain.handle('browser:multiSetBounds', async (_event, payload) => {
+  return setMultiWebBounds(payload?.id, payload?.bounds)
+})
+
+ipcMain.handle('browser:multiSetAudio', async (_event, payload) => {
+  return setMultiWebAudio(payload?.id, Boolean(payload?.muted))
+})
+
+ipcMain.handle('browser:multiSpotlight', async (_event, payload) => {
+  return setMultiWebSpotlight(payload?.id)
+})
+
+ipcMain.handle('browser:multiNudge', async (_event, payload) => {
+  const id = String(payload?.id || '')
+  if (!id) return false
+  scheduleMultiWebAutoplay(id)
+  return true
+})
+
+ipcMain.handle('browser:multiHide', async (_event, payload) => {
+  const id = String(payload?.id || '')
+  if (!id) {
+    hideAllMultiWeb({ blank: Boolean(payload?.blank) })
+    return true
+  }
+  const view = multiWebViews.get(id)
+  if (!view) return true
+  try {
+    view.setVisible(false)
+  } catch {
+    /* ignore */
+  }
+  try {
+    if (mainWindow && !mainWindow.isDestroyed() && multiWebAttached.has(id)) {
+      mainWindow.contentView.removeChildView(view)
+    }
+  } catch {
+    /* ignore */
+  }
+  multiWebAttached.delete(id)
+  if (payload?.destroy) destroyMultiWebView(id)
+  return true
+})
+
+ipcMain.handle('browser:multiHideAll', async (_event, options) => {
+  hideAllMultiWeb(options || {})
+  return true
+})
+
 ipcMain.handle('desktop:isDesktop', async () => true)
 
 ipcMain.handle('app:quit', () => {
   app.quit()
+})
+
+ipcMain.handle('app:exitFullScreen', async () => {
+  exitAppFullscreenSurfaces()
+  return true
+})
+
+ipcMain.handle('app:setFullScreen', async (_event, enabled) => {
+  if (!mainWindow || mainWindow.isDestroyed()) return false
+  jiyuWantOsFullScreen = Boolean(enabled)
+  try {
+    mainWindow.setFullScreen(jiyuWantOsFullScreen)
+    return mainWindow.isFullScreen()
+  } catch {
+    return false
+  }
+})
+
+ipcMain.handle('app:isFullScreen', async () => {
+  try {
+    return Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isFullScreen())
+  } catch {
+    return false
+  }
+})
+
+ipcMain.handle('app:setMinimizeToPipPolicy', async (_event, policy) => {
+  jiyuMinimizeToPipEnabled = policy?.enabled !== false
+  jiyuMinimizeToPipArmed = Boolean(policy?.armed)
+  return true
+})
+
+ipcMain.handle('app:minimizeWindow', async () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return false
+  mainWindow.__jiyuTrueMinimize = true
+  try {
+    mainWindow.minimize()
+    return true
+  } catch {
+    mainWindow.__jiyuTrueMinimize = false
+    return false
+  }
 })
 
 /**
@@ -2277,7 +6328,9 @@ function eztvNeedsSystemBrowser(targetUrl) {
 }
 
 // Show List sync is infrequent — release the Chrome helper when the UI is done.
+// Also tear down the blank Electron "Verify" window so Cancel isn't stuck behind it.
 ipcMain.handle('cf:closeSystemBrowser', async (_event, options) => {
+  destroyUnlockWindow()
   const soon = !options || options.soon !== false
   if (soon) scheduleSystemBrowserCloseSoon(options?.reason || 'requested')
   else closeActiveSystemBrowser()
@@ -2286,7 +6339,9 @@ ipcMain.handle('cf:closeSystemBrowser', async (_event, options) => {
 
 // Fetch an HTML/JSON page as if from a real browser (for torrent-site scraping).
 // Plain fetch first; Cloudflare-guarded EZTV HTML uses the Chrome helper.
-ipcMain.handle('page:fetchHtml', async (_event, url) => {
+// opts.quiet: never open a visible Chrome unlock window (Show/Play paths).
+ipcMain.handle('page:fetchHtml', async (_event, url, opts = {}) => {
+  let quiet = Boolean(opts && opts.quiet)
   try {
     if (typeof url !== 'string' || !/^https?:\/\//i.test(url.trim())) {
       return { ok: false, status: 0, content: '', error: 'Invalid page URL' }
@@ -2302,13 +6357,48 @@ ipcMain.handle('page:fetchHtml', async (_event, url) => {
         target = parsed.toString()
         host = parsed.hostname
       }
+      const h = host.replace(/^www\./i, '').toLowerCase()
+      // Catalog hosts that must never pop Verify during background sync.
+      if (
+        h === 'ymovies.vip' ||
+        h.endsWith('.ymovies.vip') ||
+        h === 'cinetaro.to' ||
+        h.endsWith('.cinetaro.to') ||
+        h === 'cinextream.cc'
+      ) {
+        quiet = true
+      }
     } catch {
       return { ok: false, status: 0, content: '', error: 'Invalid page URL' }
     }
 
-    // Show List / show pages are CF-bound. /api/get-torrents stays on plain fetch.
-    if (eztvNeedsSystemBrowser(target)) {
-      return await fetchViaScrapeBrowser(target)
+    // Local remux / WebTorrent URLs are never Cloudflare-guarded — never open Verify.
+    if (/^(127\.0\.0\.1|localhost)$/i.test(host)) {
+      try {
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), 15_000)
+        const response = await fetch(target, { signal: controller.signal })
+        clearTimeout(timer)
+        const content = await response.text()
+        return {
+          ok: response.ok,
+          status: response.status,
+          content,
+          error: response.ok ? '' : `Server returned ${response.status}`,
+        }
+      } catch (err) {
+        return {
+          ok: false,
+          status: 0,
+          content: '',
+          error: err instanceof Error ? err.message : String(err),
+        }
+      }
+    }
+
+    // Show List / NetMirror catalog HTML are CF-bound. EZTV /api stays on plain fetch.
+    if (eztvNeedsSystemBrowser(target) || freemoviesNeedsSystemBrowser(target)) {
+      return await fetchViaScrapeBrowser(target, { allowVisible: !quiet })
     }
 
     // YTS catalog: never open the Verify window — quiet fetch + backoff only.
@@ -2318,6 +6408,14 @@ ipcMain.handle('page:fetchHtml', async (_event, url) => {
 
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 30_000)
+    const wantsSubtitle =
+      /\.(vtt|srt)(\?|$)/i.test(target) ||
+      /\/(?:english|en)(?:\.vtt)?(?:\?|$)/i.test(target) ||
+      /caption|subtitle|softsub/i.test(target)
+    const optReferer =
+      typeof opts?.referer === 'string' && /^https?:\/\//i.test(opts.referer)
+        ? opts.referer
+        : ''
     let response
     try {
       response = await fetch(target, {
@@ -2325,11 +6423,20 @@ ipcMain.handle('page:fetchHtml', async (_event, url) => {
         signal: controller.signal,
         headers: withDesktopChromeClientHints({
           'User-Agent': BROWSER_UA,
-          Accept: isEztvApiPath(target)
-            ? 'application/json,text/plain,*/*'
-            : 'text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8',
+          Accept: wantsSubtitle
+            ? 'text/vtt,text/plain,application/octet-stream,*/*;q=0.8'
+            : isEztvApiPath(target)
+              ? 'application/json,text/plain,*/*'
+              : 'text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8',
           'Accept-Language': 'en-US,en;q=0.9',
-          'Upgrade-Insecure-Requests': '1',
+          ...(wantsSubtitle
+            ? {
+                Referer: optReferer || 'https://rivestream.ru/',
+                Origin: 'https://rivestream.ru',
+              }
+            : optReferer
+              ? { Referer: optReferer }
+              : { 'Upgrade-Insecure-Requests': '1' }),
         }),
       })
     } finally {
@@ -2340,6 +6447,18 @@ ipcMain.handle('page:fetchHtml', async (_event, url) => {
     const challenged = looksLikeCloudflareChallenge(content)
     if (response.ok && !challenged) {
       return { ok: true, status: response.status, content, error: '' }
+    }
+
+    // Softsubs: never open the Verify / scrape browser — return the failure as-is.
+    if (wantsSubtitle) {
+      return {
+        ok: false,
+        status: response.status,
+        content,
+        error: challenged
+          ? 'Caption fetch blocked'
+          : `Server returned ${response.status}`,
+      }
     }
 
     // API-only sync must never open Chrome — return the failure as-is.
@@ -2357,7 +6476,7 @@ ipcMain.handle('page:fetchHtml', async (_event, url) => {
     }
 
     if (challenged || !response.ok) {
-      return await fetchViaScrapeBrowser(target)
+      return await fetchViaScrapeBrowser(target, { allowVisible: !quiet })
     }
 
     return {
@@ -2368,7 +6487,11 @@ ipcMain.handle('page:fetchHtml', async (_event, url) => {
     }
   } catch (err) {
     const failedUrl = String(url || '').trim()
-    if (isEztvApiPath(failedUrl) || isYtsUrl(failedUrl)) {
+    const failedIsSub =
+      /\.(vtt|srt)(\?|$)/i.test(failedUrl) ||
+      /\/(?:english|en)(?:\.vtt)?(?:\?|$)/i.test(failedUrl) ||
+      /caption|subtitle|softsub/i.test(failedUrl)
+    if (failedIsSub || isEztvApiPath(failedUrl) || isYtsUrl(failedUrl)) {
       if (isYtsUrl(failedUrl)) return await fetchYtsQuietly(failedUrl)
       return {
         ok: false,
@@ -2378,7 +6501,7 @@ ipcMain.handle('page:fetchHtml', async (_event, url) => {
       }
     }
     try {
-      return await fetchViaScrapeBrowser(failedUrl)
+      return await fetchViaScrapeBrowser(failedUrl, { allowVisible: !quiet })
     } catch {
       return {
         ok: false,
@@ -2398,6 +6521,17 @@ ipcMain.handle('page:fetchJsonPost', async (_event, url, body, referer) => {
     if (!body || typeof body !== 'object') {
       return { ok: false, status: 0, content: '', error: 'Invalid JSON body' }
     }
+    const ref =
+      typeof referer === 'string' && referer.trim()
+        ? referer.trim()
+        : 'https://m2box.org/web/tv-series'
+    let origin = 'https://m2box.org'
+    try {
+      origin = new URL(ref).origin
+    } catch {
+      /* keep default */
+    }
+    const isYoutube = /youtube\.com|youtu\.be/i.test(url) || /youtube\.com/i.test(ref)
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 30_000)
     let response
@@ -2407,11 +6541,19 @@ ipcMain.handle('page:fetchJsonPost', async (_event, url, body, referer) => {
         redirect: 'follow',
         signal: controller.signal,
         headers: withDesktopChromeClientHints({
-          'User-Agent': BROWSER_UA,
+          'User-Agent': isYoutube
+            ? 'com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip'
+            : BROWSER_UA,
           Accept: 'application/json',
           'Content-Type': 'application/json',
-          Origin: 'https://m2box.org',
-          Referer: typeof referer === 'string' && referer ? referer : 'https://m2box.org/web/tv-series',
+          Origin: origin,
+          Referer: ref,
+          ...(isYoutube
+            ? {
+                'X-Youtube-Client-Name': '3',
+                'X-Youtube-Client-Version': '20.10.38',
+              }
+            : {}),
         }),
         body: JSON.stringify(body),
       })
@@ -2432,6 +6574,117 @@ ipcMain.handle('page:fetchJsonPost', async (_event, url, body, referer) => {
       content: '',
       error: err instanceof Error ? err.message : String(err),
     }
+  }
+})
+
+/** Wyzie softsubs — API key stays in main-process .env only (never in Vite/Android bundle). */
+ipcMain.handle('wyzie:resolveSubtitle', async (_event, options = {}) => {
+  const key = String(process.env.WYZIE_API_KEY || '').trim()
+  if (!key) {
+    return { ok: false, error: 'WYZIE_API_KEY missing — add it to .env (Electron only)' }
+  }
+  const tmdbId = String(options?.tmdbId || '').trim()
+  if (!tmdbId) return { ok: false, error: 'No TMDB id for Wyzie' }
+
+  const params = new URLSearchParams({
+    id: tmdbId,
+    key,
+    language: String(options?.language || 'en').trim() || 'en',
+    format: 'srt,vtt,ass',
+    limit: '12',
+  })
+  const season = Number(options?.season)
+  const episode = Number(options?.episode)
+  if (Number.isFinite(season) && Number.isFinite(episode) && season >= 1 && episode >= 1) {
+    params.set('season', String(Math.floor(season)))
+    params.set('episode', String(Math.floor(episode)))
+  }
+
+  try {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 20_000)
+    let response
+    try {
+      response = await fetch(`https://sub.wyzie.io/search?${params.toString()}`, {
+        method: 'GET',
+        redirect: 'follow',
+        signal: controller.signal,
+        headers: {
+          Accept: 'application/json',
+          'User-Agent': BROWSER_UA,
+        },
+      })
+    } finally {
+      clearTimeout(timer)
+    }
+    const text = await response.text()
+    if (!response.ok) {
+      let detail = `HTTP ${response.status}`
+      try {
+        const err = JSON.parse(text)
+        detail = err.message || err.details || detail
+      } catch {
+        /* keep */
+      }
+      return { ok: false, error: detail }
+    }
+    let hits = []
+    try {
+      const parsed = JSON.parse(text)
+      if (Array.isArray(parsed)) hits = parsed
+      else if (parsed && Array.isArray(parsed.data)) hits = parsed.data
+    } catch {
+      return { ok: false, error: 'Invalid Wyzie response' }
+    }
+
+    const scoreHit = (hit) => {
+      let score = 0
+      const lang = `${hit.language || ''} ${hit.display || ''}`.toLowerCase()
+      if (/^en\b|english/.test(lang)) score += 20
+      if (hit.isHearingImpaired) score -= 8
+      const fmt = String(hit.format || '').toLowerCase()
+      if (fmt === 'vtt' || fmt === 'srt') score += 6
+      if (fmt === 'ass' || fmt === 'ssa') score += 3
+      score += Math.min(10, Math.floor((Number(hit.downloadCount) || 0) / 5000))
+      return score
+    }
+
+    const ranked = hits
+      .filter((h) => h && /^https?:\/\//i.test(String(h.url || '')))
+      .sort((a, b) => scoreHit(b) - scoreHit(a))
+    const best = ranked[0]
+    if (!best) return { ok: false, error: 'No Wyzie subtitles for this episode' }
+
+    // Download URLs use encrypted tok — safe to hand to the renderer. Never return the API key.
+    // Don't auto-apply fps=25:23.976 — many WEB English packs are already film-timed; stretching
+    // them makes cues lag. Player Subs − / + handles small constant offsets.
+    let subtitleUrl = String(best.url)
+    try {
+      const u = new URL(subtitleUrl)
+      u.searchParams.set('to', 'vtt')
+      u.searchParams.set('plain', '1')
+      subtitleUrl = u.toString()
+    } catch {
+      const sep = subtitleUrl.includes('?') ? '&' : '?'
+      subtitleUrl = `${subtitleUrl}${sep}to=vtt&plain=1`
+    }
+
+    return {
+      ok: true,
+      subtitleUrl,
+      subtitleKind: 'file',
+      source: 'wyzie',
+      hit: {
+        id: String(best.id || ''),
+        format: best.format,
+        language: best.language,
+        display: best.display,
+        fileName: best.fileName,
+        release: best.release,
+      },
+    }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
   }
 })
 
@@ -2706,6 +6959,21 @@ async function probeHttpStream(rawUrl, timeoutMs = 2500) {
     'User-Agent': STREAM_UA,
     Accept: '*/*',
   }
+  try {
+    const host = new URL(target).host.toLowerCase()
+    const override = playbackHeaderOverrides.get(host)
+    if (override?.userAgent) headers['User-Agent'] = override.userAgent
+    if (override?.referrer) {
+      headers.Referer = override.referrer
+      try {
+        headers.Origin = new URL(override.referrer).origin
+      } catch {
+        /* referer only */
+      }
+    }
+  } catch {
+    /* ignore bad URL */
+  }
 
   const withTimeout = async (fn) => {
     const controller = new AbortController()
@@ -2725,7 +6993,10 @@ async function probeHttpStream(rawUrl, timeoutMs = 2500) {
     error,
   })
 
-  const looksHls = /\.m3u8(\?|$)/i.test(target) || /[?&]output=hls\b/i.test(target)
+  const looksHls =
+    /\.m3u8(\?|$)/i.test(target) ||
+    /[?&]output=hls\b/i.test(target) ||
+    /m3u8-proxy/i.test(target)
 
   try {
     // Always GET a small slice — HEAD lies too often on IPTV CDNs
@@ -2818,9 +7089,11 @@ ipcMain.handle('stream:setPlaybackHeaders', async (_event, options) => {
         : ''
     if (!userAgent && !referrer) {
       playbackHeaderOverrides.delete(host)
+      activePlaybackReferrer = ''
       return { ok: true, cleared: true }
     }
     playbackHeaderOverrides.set(host, { userAgent, referrer })
+    activePlaybackReferrer = referrer
     return { ok: true }
   } catch {
     return { ok: false }
@@ -2878,6 +7151,7 @@ async function getTorrentClient() {
         utp: false,
         maxConns: performanceKnobs.torrentMaxConns || 64,
       })
+      console.log('[torrent] download root', torrentDownloadRoot())
       client.on('error', (err) => {
         console.error('[torrent] client error:', err?.message || err)
       })
@@ -2999,6 +7273,109 @@ function waitForFileBytes(file, minBytes, timeoutMs) {
   })
 }
 
+const TORRENT_PARTIAL_TTL_MS = 3 * 60 * 60 * 1000
+
+function torrentDownloadComplete(torrent) {
+  if (!torrent) return false
+  const length = Number(torrent.length) || 0
+  const downloaded = Number(torrent.downloaded) || 0
+  if (length > 0 && downloaded >= length) return true
+  return typeof torrent.progress === 'number' && torrent.progress >= 0.999
+}
+
+function torrentStoreDir(torrent) {
+  const root = torrent?.path
+  const name = torrent?.name
+  if (!root || !name) return null
+  const parent = path.resolve(root)
+  const dir = path.resolve(root, name)
+  if (dir !== parent && !dir.startsWith(parent + path.sep)) return null
+  return dir
+}
+
+function partialLedgerPath() {
+  return path.join(app.getPath('userData'), 'torrent-partials.json')
+}
+
+function readPartialLedger() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(partialLedgerPath(), 'utf8'))
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+function writePartialLedger(rows) {
+  try {
+    fs.writeFileSync(partialLedgerPath(), JSON.stringify(rows))
+  } catch (err) {
+    console.warn('[torrent] partial ledger write failed', err?.message || err)
+  }
+}
+
+function forgetPartialTorrent(infoHash) {
+  if (!infoHash) return
+  const key = String(infoHash).toLowerCase()
+  const rows = readPartialLedger().filter((row) => String(row?.infoHash || '').toLowerCase() !== key)
+  writePartialLedger(rows)
+}
+
+function rememberPartialTorrent(torrent) {
+  const storePath = torrentStoreDir(torrent)
+  const infoHash = torrent?.infoHash
+  if (!storePath || !infoHash) return
+  const key = String(infoHash).toLowerCase()
+  const rows = readPartialLedger().filter(
+    (row) => String(row?.infoHash || '').toLowerCase() !== key && row?.path !== storePath,
+  )
+  rows.push({
+    infoHash: key,
+    path: storePath,
+    expiresAt: Date.now() + TORRENT_PARTIAL_TTL_MS,
+  })
+  writePartialLedger(rows)
+}
+
+function sweepPartialTorrents() {
+  const now = Date.now()
+  const kept = []
+  for (const row of readPartialLedger()) {
+    if (!row?.path) continue
+    if (Number(row.expiresAt) > now) {
+      kept.push(row)
+      continue
+    }
+    try {
+      fs.rmSync(row.path, { recursive: true, force: true })
+      console.log('[torrent] removed unfinished download', row.infoHash)
+    } catch (err) {
+      console.warn('[torrent] partial cleanup failed', row.path, err?.message || err)
+      kept.push(row)
+    }
+  }
+  writePartialLedger(kept)
+}
+
+/** Finished downloads are deleted now. Unfinished ones are removed after 3 hours. */
+function releaseTorrent(torrent, callback) {
+  const done = typeof callback === 'function' ? callback : () => {}
+  if (!torrent) {
+    done()
+    return
+  }
+  const downloaded = Number(torrent.downloaded) || 0
+  const destroyStore = torrentDownloadComplete(torrent) || downloaded <= 0
+  if (!destroyStore) rememberPartialTorrent(torrent)
+  else forgetPartialTorrent(torrent.infoHash)
+  try {
+    torrent.destroy({ destroyStore }, () => done())
+  } catch (err) {
+    console.warn('[torrent] release failed', err?.message || err)
+    done()
+  }
+}
+
 function waitForTorrentReady(torrent, timeoutMs = METADATA_TIMEOUT_MS) {
   if (torrent.ready && torrent.files?.length) return Promise.resolve(torrent)
 
@@ -3034,11 +7411,7 @@ function waitForTorrentReady(torrent, timeoutMs = METADATA_TIMEOUT_MS) {
       torrent.off('ready', onReady)
       torrent.off('error', onError)
       if (err) {
-        try {
-          torrent.destroy()
-        } catch {
-          /* ignore */
-        }
+        releaseTorrent(torrent)
         reject(err)
         return
       }
@@ -3074,6 +7447,10 @@ const subtitleExtractors = new Map()
 const subtitleKinds = new Map()
 /** @type {Map<string, string>} HTTP webtorrent URL for embedded softsub ffmpeg -i */
 const subtitleHttpSources = new Map()
+/** @type {Map<string, number>} infoHash:fileIndex → probed runtime seconds */
+const torrentFileRuntimeSeconds = new Map()
+/** @type {Map<string, Promise<boolean>>} de-dupe concurrent mid-title seek waits */
+const remuxSeekWaitPromises = new Map()
 
 function localTorrentSourceOk(source) {
   return /^http:\/\/127\.0\.0\.1:\d+\//.test(source)
@@ -3385,7 +7762,7 @@ function resolveTorrentFileDiskPath(file) {
     const torrent = file._torrent || file.torrent || null
     const roots = []
     if (torrent?.path) roots.push(torrent.path)
-    roots.push(path.join(os.tmpdir(), 'webtorrent'))
+    roots.push(torrentDownloadRoot())
     const candidates = []
     if (rel && path.isAbsolute(rel)) candidates.push(rel)
     for (const root of roots) {
@@ -3667,6 +8044,11 @@ function scheduleSubtitleExtractWhenReady(file, cacheKey) {
   subtitleSources.set(cacheKey, file)
   if (subtitleExtractDeferred.has(cacheKey)) return
   const sidecar = SUBTITLE_FILE_RE.test(file.name || '')
+  console.log('[torrent subs] defer extract (need buffer first)', {
+    file: file.name,
+    downloaded: Number(file.downloaded) || 0,
+    need: SUBTITLE_EXTRACT_MIN_BYTES,
+  })
   const timer = setTimeout(() => {
     subtitleExtractDeferred.delete(cacheKey)
     const source = subtitleSources.get(cacheKey) || file
@@ -3684,11 +8066,6 @@ function startProgressiveSubtitleExtract(file, cacheKey) {
   // Sidecar subs: select + read immediately (a 100KB .srt never hits 12MB).
   // Embedded: wait for opening buffer so extract can't starve remux.
   if (!sidecar && !subtitleSourceReadyForExtract(file)) {
-    console.log('[torrent subs] defer extract (need buffer first)', {
-      file: file.name,
-      downloaded,
-      need: SUBTITLE_EXTRACT_MIN_BYTES,
-    })
     scheduleSubtitleExtractWhenReady(file, cacheKey)
     return
   }
@@ -3703,18 +8080,11 @@ function startProgressiveSubtitleExtract(file, cacheKey) {
   const existing = subtitleJobs.get(cacheKey)
   if (existing && !existing.done && subtitleExtractors.has(cacheKey)) return
   if (existing?.done && !existing.retryable && existing.error && !subtitleCache.has(cacheKey)) {
-    // Allow another attempt once more of the file has arrived, or when a prior
-    // HTTP-only probe falsely reported "no subtitle track" but disk now has the file.
-    const local = resolveTorrentFileDiskPath(file)
-    let localSize = 0
-    try {
-      localSize = local ? fs.statSync(local).size : 0
-    } catch {
-      localSize = 0
+    // A/V-only files used to re-probe forever via retryFalseNegative once 12MB was on disk.
+    if (existing.confirmedMissing || /no subtitle track/i.test(String(existing.error || ''))) {
+      return
     }
-    const retryFalseNegative =
-      /no subtitle track/i.test(String(existing.error || '')) && localSize >= 12 * 1024 * 1024
-    if (downloaded < 8 * 1024 * 1024 || retryFalseNegative) {
+    if (downloaded < 8 * 1024 * 1024) {
       subtitleJobs.delete(cacheKey)
     } else {
       return
@@ -3848,6 +8218,7 @@ function startProgressiveSubtitleExtract(file, cacheKey) {
     subtitleExtractors.delete(cacheKey)
     job.done = true
     job.retryable = false
+    job.confirmedMissing = true
     job.error = message
     console.warn('[torrent subs]', message, { file: file.name })
   }
@@ -4049,9 +8420,11 @@ function startProgressiveSubtitleExtract(file, cacheKey) {
       } catch {
         localSize = 0
       }
-      // HTTP probes often miss softsubs; only declare missing after a large on-disk probe.
+      // HTTP probes often miss softsubs; disk probes with enough header bytes are definitive.
       const probedDisk = path.isAbsolute(String(probeSource))
-      if (!probedDisk || localSize < 20 * 1024 * 1024 || progress < 0.35) {
+      if (probedDisk && localSize >= 8 * 1024 * 1024) {
+        finishMissing('No subtitle track found')
+      } else if (!probedDisk || localSize < 20 * 1024 * 1024 || progress < 0.35) {
         markRetryable('Subtitles not ready')
       } else {
         finishMissing('No subtitle track found')
@@ -4113,32 +8486,83 @@ async function materializeSubtitleUrl(torrent, videoFile, options = {}) {
   return { subtitleUrl: cachedSubtitleUrl(cacheKey), subtitleKind }
 }
 
-/** Wait for torrent pieces near a mid-title -ss seek so ffmpeg doesn't emit an empty MP4. */
-async function waitForRemuxSeekPoint(source, startAtSec) {
-  if (!source || !(startAtSec >= 1)) return
+/** Wait for torrent pieces near a mid-title -ss seek so ffmpeg doesn't emit an empty MP4.
+ *  @returns {Promise<boolean>} true when pieces look ready (or source isn't a torrent file).
+ */
+async function waitForRemuxSeekPoint(source, startAtSec, options = {}) {
+  if (!source || !(startAtSec >= 1)) return true
+  const signal = options.signal
+  const isAborted = () => Boolean(signal?.aborted)
   try {
     const u = new URL(source)
     const m = /^\/torrent-file\/([a-f0-9]{40})\/(\d+)\/?/i.exec(u.pathname)
-    if (!m) return
-    const client = await getTorrentClient()
-    const got = client.get(m[1].toLowerCase())
-    const torrent = got && typeof got.then === 'function' ? await got : got
-    const file = torrent?.files?.[Number(m[2])]
-    if (!file || !file.length) return
-    // Rough byte offset from a ~2h title; clamp so we never ask past EOF.
-    const assumedDuration = Math.max(startAtSec + 45 * 60, 2 * 60 * 60)
-    const offset = Math.min(
-      Math.max(0, Number(file.length) - 1),
-      Math.floor((startAtSec / assumedDuration) * Number(file.length)),
-    )
-    console.log('[torrent audio] waiting for seek point', {
-      startAtSec: Math.floor(startAtSec),
-      offset,
-      file: file.name,
+    if (!m) return true
+    const infoHash = m[1].toLowerCase()
+    const fileIndex = Number(m[2])
+    const waitKey = `${infoHash}:${fileIndex}:${Math.floor(startAtSec)}`
+    const inflight = remuxSeekWaitPromises.get(waitKey)
+    if (inflight) return inflight
+
+    const run = (async () => {
+      if (isAborted()) return false
+      const client = await getTorrentClient()
+      const got = client.get(infoHash)
+      const torrent = got && typeof got.then === 'function' ? await got : got
+      const file = torrent?.files?.[fileIndex]
+      if (!file || !file.length) return true
+      const runtimeKey = `${infoHash}:${fileIndex}`
+      const knownRuntime = torrentFileRuntimeSeconds.get(runtimeKey) || 0
+      // Prefer probed runtime; fall back to a conservative 2h assumption.
+      const assumedDuration = Math.max(
+        knownRuntime > 60 ? knownRuntime : 0,
+        startAtSec + 45 * 60,
+        2 * 60 * 60,
+      )
+      const offset = Math.min(
+        Math.max(0, Number(file.length) - 1),
+        Math.floor((startAtSec / assumedDuration) * Number(file.length)),
+      )
+      const downloaded = Number(file.downloaded) || 0
+      // Slow / cold swarm: fail the seek wait so the player can pause & retry
+      // at the same playhead (not fall back to t=0).
+      const timeoutMs = downloaded < 2 * 1024 * 1024 ? 28_000 : 120_000
+      console.log('[torrent audio] waiting for seek point', {
+        startAtSec: Math.floor(startAtSec),
+        offset,
+        assumedDuration: Math.floor(assumedDuration),
+        timeoutMs,
+        downloaded,
+        file: file.name,
+      })
+      // Prefer the seek window over the opening while Resume is waiting —
+      // opening-only critical was starving mid-title continues.
+      try {
+        if (torrent?.pieceLength) {
+          const piece = torrent.pieceLength
+          const fileStart = Number(file.offset)
+          const fileEnd = fileStart + Number(file.length) - 1
+          const seekFirst = Math.floor((fileStart + offset) / piece)
+          const seekLast = Math.min(
+            Math.floor((fileStart + offset + Math.min(12 * 1024 * 1024, Number(file.length) - offset)) / piece),
+            Math.floor(fileEnd / piece),
+          )
+          torrent.select(seekFirst, seekLast, 10)
+          torrent.critical(seekFirst, Math.min(seekFirst + 12, seekLast))
+        }
+      } catch {
+        /* ignore */
+      }
+      if (isAborted()) return false
+      return waitForTorrentFileBytesAt(file, offset, timeoutMs, signal)
+    })().finally(() => {
+      remuxSeekWaitPromises.delete(waitKey)
     })
-    await waitForTorrentFileBytesAt(file, offset, 90_000)
+
+    remuxSeekWaitPromises.set(waitKey, run)
+    return run
   } catch (err) {
     console.warn('[torrent audio] seek wait failed', err?.message || err)
+    return false
   }
 }
 
@@ -4176,10 +8600,37 @@ async function handleAudioTranscode(req, res, source) {
     return
   }
 
+  const abortCtl = typeof AbortController !== 'undefined' ? new AbortController() : null
+  const onClientGone = () => {
+    try {
+      abortCtl?.abort()
+    } catch {
+      /* ignore */
+    }
+  }
+  req.once('close', onClientGone)
+  res.once('close', onClientGone)
+
   // Resume / mid-title continue: wait for pieces first. Seeking into a hole
   // made ffmpeg exit with "Output file is empty" and the player fall back to t=0.
   if (startAt >= 1) {
-    await waitForRemuxSeekPoint(source, startAt)
+    const ready = await waitForRemuxSeekPoint(source, startAt, { signal: abortCtl?.signal })
+    if (abortCtl?.signal?.aborted || req.aborted) {
+      return
+    }
+    if (!ready) {
+      console.warn('[torrent audio] seek point not ready — 503', {
+        startAt: Math.floor(startAt),
+      })
+      res.writeHead(503, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Cache-Control': 'no-store',
+        'Retry-After': '8',
+        'Access-Control-Allow-Origin': '*',
+      })
+      res.end('Seek point not ready')
+      return
+    }
   }
 
   // MULTI packs often put French on a:0 — pick English when tagged.
@@ -4436,7 +8887,7 @@ async function handleCachedSubtitleRequest(req, res, cacheKey) {
 }
 
 /** Prioritize / wait for pieces covering a byte offset inside a torrent file. */
-function waitForTorrentFileBytesAt(file, byteOffset, timeoutMs = 45000) {
+function waitForTorrentFileBytesAt(file, byteOffset, timeoutMs = 45000, signal) {
   const torrent = file?._torrent || file?.torrent
   if (!file || !torrent || !torrent.pieceLength) {
     return Promise.resolve(false)
@@ -4467,21 +8918,46 @@ function waitForTorrentFileBytesAt(file, byteOffset, timeoutMs = 45000) {
     return Promise.resolve(true)
   }
 
-  const baseline = Number(file.downloaded) || 0
   return new Promise((resolve) => {
     const started = Date.now()
-    const timer = setInterval(() => {
-      if (
-        (hasPiece(first) && hasPiece(Math.min(first + 1, last))) ||
-        (Number(file.downloaded) || 0) >= baseline + 512 * 1024
-      ) {
-        clearInterval(timer)
-        resolve(true)
+    /** @type {ReturnType<typeof setInterval> | null} */
+    let timer = null
+    let settled = false
+    const finish = (ok) => {
+      if (settled) return
+      settled = true
+      if (timer) clearInterval(timer)
+      try {
+        signal?.removeEventListener?.('abort', onAbort)
+      } catch {
+        /* ignore */
+      }
+      resolve(ok)
+    }
+    const onAbort = () => finish(false)
+    try {
+      signal?.addEventListener?.('abort', onAbort, { once: true })
+    } catch {
+      /* ignore */
+    }
+    if (signal?.aborted) {
+      finish(false)
+      return
+    }
+    timer = setInterval(() => {
+      if (signal?.aborted) {
+        finish(false)
+        return
+      }
+      // Only trust the pieces at the seek point. Global download growth used to
+      // return true while the hole at `offset` was still empty — ffmpeg then hung
+      // and the player looked "stuck".
+      if (hasPiece(first) && hasPiece(Math.min(first + 1, last))) {
+        finish(true)
         return
       }
       if (Date.now() - started >= timeoutMs) {
-        clearInterval(timer)
-        resolve(false)
+        finish(false)
       }
     }, 250)
   })
@@ -4937,22 +9413,14 @@ ipcMain.handle('torrent:stream', async (_event, input, options) => {
     if (!keepOthers) {
       for (const other of [...client.torrents]) {
         if (hash && other.infoHash === hash) continue
-        try {
-          other.destroy({ destroyStore: true })
-        } catch {
-          /* ignore */
-        }
+        releaseTorrent(other)
       }
     } else {
       const others = client.torrents.filter((t) => !hash || t.infoHash !== hash)
       const overflow = others.length + 1 - MAX_CONCURRENT_TORRENTS
       if (overflow > 0) {
         for (const other of others.slice(0, overflow)) {
-          try {
-            other.destroy({ destroyStore: true })
-          } catch {
-            /* ignore */
-          }
+          releaseTorrent(other)
         }
       }
     }
@@ -4998,6 +9466,7 @@ ipcMain.handle('torrent:stream', async (_event, input, options) => {
         })
         try {
           const addedMagnet = client.add(torrentId, {
+            path: torrentDownloadRoot(),
             destroyStoreOnDestroy: true,
             announce,
             strategy: 'sequential',
@@ -5016,7 +9485,7 @@ ipcMain.handle('torrent:stream', async (_event, input, options) => {
           try {
             const stuck = client.get(hash)
             const existing = stuck && typeof stuck.then === 'function' ? await stuck : stuck
-            if (existing) existing.destroy({ destroyStore: true })
+            if (existing) releaseTorrent(existing)
           } catch {
             /* ignore */
           }
@@ -5036,6 +9505,7 @@ ipcMain.handle('torrent:stream', async (_event, input, options) => {
           retry: usedCachedTorrent ? 'itorrents' : undefined,
         })
         const added = client.add(torrentId, {
+          path: torrentDownloadRoot(),
           destroyStoreOnDestroy: true,
           announce,
           strategy: 'sequential',
@@ -5048,6 +9518,7 @@ ipcMain.handle('torrent:stream', async (_event, input, options) => {
 
     async function selectAndProbe(activeTorrent, options = {}) {
       const probeMs = Number(options.probeMs) > 0 ? Number(options.probeMs) : PEER_PROBE_MS
+      forgetPartialTorrent(activeTorrent.infoHash)
       const files = [...activeTorrent.files].sort((a, b) => b.length - a.length)
       const { file, playlistFiles } = pickTorrentVideoFile(activeTorrent, magnetHints)
       if (!file) {
@@ -5146,7 +9617,7 @@ ipcMain.handle('torrent:stream', async (_event, input, options) => {
 
     let prepared = await selectAndProbe(torrent)
     if (!prepared.ok) {
-      if (addedHere) torrent.destroy()
+      if (addedHere) releaseTorrent(torrent)
       return { ok: false, error: prepared.error }
     }
 
@@ -5163,11 +9634,7 @@ ipcMain.handle('torrent:stream', async (_event, input, options) => {
       console.log('[torrent] cache swarm idle — retrying as magnet', {
         infoHash: torrent.infoHash,
       })
-      try {
-        torrent.destroy({ destroyStore: true })
-      } catch {
-        /* ignore */
-      }
+      releaseTorrent(torrent)
       const announce = announceListForTorrent(uri)
       console.log('[torrent] add', {
         fromCache: false,
@@ -5177,6 +9644,7 @@ ipcMain.handle('torrent:stream', async (_event, input, options) => {
       })
       try {
         const added = client.add(magnetWithDefaultTrackers(uri), {
+          path: torrentDownloadRoot(),
           destroyStoreOnDestroy: true,
           announce,
           strategy: 'sequential',
@@ -5184,7 +9652,7 @@ ipcMain.handle('torrent:stream', async (_event, input, options) => {
         torrent = await waitForTorrentReady(added, MAGNET_RETRY_READY_MS)
         prepared = await selectAndProbe(torrent, { probeMs: PEER_PROBE_RETRY_MS })
         if (!prepared.ok) {
-          torrent.destroy()
+          releaseTorrent(torrent)
           return { ok: false, error: prepared.error }
         }
       } catch (err) {
@@ -5203,7 +9671,7 @@ ipcMain.handle('torrent:stream', async (_event, input, options) => {
         name: torrent.name,
         swarmIdle: Boolean(prepared.swarmIdle),
       })
-      if (addedHere) torrent.destroy()
+      if (addedHere) releaseTorrent(torrent)
       return {
         ok: false,
         error: NO_PEERS_ERROR,
@@ -5250,6 +9718,14 @@ ipcMain.handle('torrent:stream', async (_event, input, options) => {
           file: file.name,
           runtimeSeconds,
         })
+        try {
+          const idx = torrent.files.indexOf(file)
+          if (idx >= 0) {
+            torrentFileRuntimeSeconds.set(`${torrent.infoHash}:${idx}`, runtimeSeconds)
+          }
+        } catch {
+          /* ignore */
+        }
       }
     } catch (err) {
       console.warn('[torrent] runtime probe failed', err?.message || err)
@@ -5269,13 +9745,7 @@ ipcMain.handle('torrent:stream', async (_event, input, options) => {
     // Single-play: drop leftover swarms after this one is ready. Multi-view keeps them.
     if (!keepOthers && torrent.infoHash) {
       for (const other of [...client.torrents]) {
-        if (other.infoHash !== torrent.infoHash) {
-          try {
-            other.destroy({ destroyStore: true })
-          } catch {
-            /* ignore */
-          }
-        }
+        if (other.infoHash !== torrent.infoHash) releaseTorrent(other)
       }
     }
 
@@ -5361,14 +9831,7 @@ ipcMain.handle('torrent:stop', async (_event, infoHash) => {
     const targets = infoHash
       ? client.torrents.filter((t) => t.infoHash === infoHash)
       : [...client.torrents]
-    await Promise.all(
-      targets.map(
-        (t) =>
-          new Promise((resolve) => {
-            client.remove(t.infoHash, { destroyStore: true }, () => resolve())
-          }),
-      ),
-    )
+    await Promise.all(targets.map((t) => new Promise((resolve) => releaseTorrent(t, resolve))))
     return { ok: true }
   } catch (err) {
     return { ok: false, error: err?.message || 'Stop failed' }

@@ -30,3 +30,12 @@ npm run dev:desktop
 npm run pack:win
 npm run pack:linux
 ```
+
+## Publish a desktop update (GitHub Releases)
+
+1. Bump `"version"` in `package.json`.
+2. Set `GH_TOKEN` (classic PAT with `repo` scope) in the environment.
+3. Run `npm run release:win` and/or `npm run release:linux`.
+4. Open the draft release on GitHub, confirm assets (`latest.yml` / `latest-linux.yml` + installers), then publish.
+
+Packaged apps check Releases on launch (and via **Jiyu → Check for updates**). Dev mode does not.

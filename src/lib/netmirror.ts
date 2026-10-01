@@ -1,8 +1,8 @@
 /**
  * NetMirror (ww1.surf/netmirror) — iframe front for freemovies.lol.
  * Catalog from TV Series listings; episode picker via TMDB meta on the detail
- * page; play opens the freemovies player URL in Jiyu’s Web Browser (no native
- * HLS/MP4 from embed hosts).
+ * page; play opens the vsembed player in Jiyu’s Web Browser (freemovies.lol
+ * itself returns 403 inside Electron — Cloudflare).
  */
 
 import type { TorrentPageLink } from './torrents'
@@ -15,6 +15,8 @@ export const NETMIRROR_CATALOG_PAGES = 146
 export const NETMIRROR_REQUEST_GAP_MS = 350
 /** Default embed host label used by freemovies `sv=` (Vidsrc / vsembed.ru). */
 export const NETMIRROR_DEFAULT_SERVER = 'embedru'
+/** Direct player host for embedru (avoids freemovies.lol CF 403 in Electron). */
+export const NETMIRROR_EMBED_ORIGIN = 'https://vsembed.ru'
 
 export interface NetMirrorEpisodeInfo {
   key: string
@@ -64,7 +66,12 @@ export function isNetMirrorUrl(pageUrl: string): boolean {
 export function isNetMirrorCatalogItem(item: {
   url?: string
   detailUrl?: string
+  netmirrorPostId?: string
+  netmirrorTmdbId?: string
+  torrentSourceId?: string
 }): boolean {
+  if (item.netmirrorPostId || item.netmirrorTmdbId) return true
+  if (item.torrentSourceId === 'builtin-netmirror') return true
   if (item.url && isNetMirrorUrl(item.url)) return true
   if (item.detailUrl && isNetMirrorUrl(item.detailUrl)) return true
   return false
@@ -134,39 +141,39 @@ export function parseNetMirrorListHtml(html: string): TorrentPageLink[] {
       poster: match[3],
       category: 'series',
       releasedAt: Number.isFinite(releasedAt) ? releasedAt : undefined,
+      netmirrorPostId: match[1],
     })
   }
   return links
 }
 
-async function fetchHtml(url: string): Promise<{ ok: boolean; content: string; error: string }> {
+async function fetchHtml(
+  url: string,
+  options?: { quiet?: boolean },
+): Promise<{ ok: boolean; content: string; error: string }> {
   if (window.signalDesktop?.fetchHtml) {
-    const result = await window.signalDesktop.fetchHtml(url)
+    const result = await window.signalDesktop.fetchHtml(url, {
+      quiet: Boolean(options?.quiet),
+    })
     return {
       ok: result.ok,
       content: result.content || '',
       error: result.error || '',
     }
   }
-  try {
-    const res = await fetch(url, {
-      headers: {
-        Accept: 'text/html',
-        Referer: 'https://ww1.surf/netmirror/',
-      },
-    })
-    const content = await res.text()
-    return {
-      ok: res.ok,
-      content,
-      error: res.ok ? '' : `HTTP ${res.status}`,
-    }
-  } catch (err) {
-    return {
-      ok: false,
-      content: '',
-      error: err instanceof Error ? err.message : 'NetMirror fetch failed',
-    }
+  const { nativeFetchText } = await import('./nativeHttp')
+  const result = await nativeFetchText(url, {
+    quiet: Boolean(options?.quiet),
+    preferWebView: true,
+    headers: {
+      Accept: 'text/html',
+      Referer: 'https://freemovies.lol/',
+    },
+  })
+  return {
+    ok: result.ok,
+    content: result.content || '',
+    error: result.error || '',
   }
 }
 
@@ -276,6 +283,41 @@ export function netmirrorEpisodePlayerUrl(
   return `${base}${meta.postId}&s=${se}&e=${ep}&sv=${encodeURIComponent(server)}&tv=true`
 }
 
+/** Direct vsembed URL — works in Electron; freemovies.lol player_tv does not. */
+export function netmirrorDirectEmbedUrl(
+  postId: string,
+  season: number,
+  episode: number,
+): string {
+  const id = encodeURIComponent(String(postId).trim())
+  const se = Math.max(1, season)
+  const ep = Math.max(1, episode)
+  return `${NETMIRROR_EMBED_ORIGIN}/embed/tv/${id}/${se}/${ep}`
+}
+
+function absoluteEmbedUrl(raw: string): string | null {
+  let next = String(raw || '').trim()
+  if (!next) return null
+  if (next.startsWith('//')) next = `https:${next}`
+  if (!/^https?:\/\//i.test(next)) return null
+  try {
+    return new URL(next).toString()
+  } catch {
+    return null
+  }
+}
+
+/** Pull the real embed location out of getPlayTV.php HTML. */
+export function parseNetMirrorGetPlayEmbed(html: string): string | null {
+  const loc =
+    html.match(/location\.href\s*=\s*["']([^"']+)["']/i) ||
+    html.match(/window\.location(?:\.href)?\s*=\s*["']([^"']+)["']/i)
+  if (loc?.[1]) return absoluteEmbedUrl(loc[1])
+  const iframe = html.match(/<iframe[^>]+src=["']([^"']+)["']/i)
+  if (iframe?.[1]) return absoluteEmbedUrl(iframe[1])
+  return null
+}
+
 async function fetchJson(url: string): Promise<{ ok: boolean; data: unknown; error: string }> {
   if (window.signalDesktop?.fetchJsonGet) {
     const result = await window.signalDesktop.fetchJsonGet(url, `${NETMIRROR_CATALOG_ORIGIN}/`)
@@ -327,13 +369,26 @@ export async function fetchNetMirrorEpisodeList(
   description?: string
   error?: string
 }> {
-  const result = await fetchHtml(detailUrl)
+  // Quiet: never spawn the Free Movies Chrome unlock window from Show/Play.
+  // Sync still opens Chrome when it needs a fresh CF session.
+  const result = await fetchHtml(detailUrl, { quiet: true })
   if (!result.ok || !result.content) {
+    const postId = known?.postId || ''
+    if (postId) {
+      return {
+        postId,
+        tmdbId: known?.tmdbId || '',
+        episodes: [{ key: 'S01E01', season: 1, episode: 1, title: 'Episode 1' }],
+        error: undefined,
+      }
+    }
     return {
-      postId: known?.postId || '',
+      postId: '',
       tmdbId: known?.tmdbId || '',
       episodes: [],
-      error: result.error || 'Could not load NetMirror detail page',
+      error:
+        result.error ||
+        'NetMirror catalog is locked. Sync NetMirror from Library once (Chrome verify), then open this title again.',
     }
   }
 
@@ -423,8 +478,9 @@ export async function fetchNetMirrorEpisodeList(
 }
 
 /**
- * Resolve a NetMirror detail page to the in-app Web Browser player URL for S/E.
- * Embed hosts do not expose a stable native HLS/MP4 for Jiyu’s player.
+ * Resolve a NetMirror detail page to an in-app Web Browser embed URL for S/E.
+ * Prefer vsembed (or getPlayTV → embed) — never open freemovies.lol in Electron
+ * (Cloudflare returns 403 on the in-app BrowserView).
  */
 export async function resolveNetMirrorPlay(
   detailUrl: string,
@@ -441,12 +497,16 @@ export async function resolveNetMirrorPlay(
 
   let postId = options?.postId?.trim() || ''
   let tmdbId = options?.tmdbId?.trim() || ''
-  let tvPlayer = `${NETMIRROR_CATALOG_ORIGIN}/?player_tv=`
 
   if (!postId) {
-    const result = await fetchHtml(detailUrl)
+    const result = await fetchHtml(detailUrl, { quiet: true })
     if (!result.ok || !result.content) {
-      return { ok: false, error: result.error || 'Could not load NetMirror detail page' }
+      return {
+        ok: false,
+        error:
+          result.error ||
+          'Missing NetMirror id. Sync NetMirror from Library (Chrome verify once), then try again.',
+      }
     }
     const meta = parseNetMirrorMetaFromHtml(result.content)
     if (!meta) {
@@ -454,12 +514,16 @@ export async function resolveNetMirrorPlay(
     }
     postId = meta.postId
     tmdbId = meta.tmdbId || tmdbId
-    tvPlayer = meta.tvPlayer
   }
+
+  // Direct vsembed — freemovies.lol player_tv / getPlayTV pages 403 inside Electron.
+  // getPlayTV is only useful when already unlocked; skip it on the hot path so Play
+  // does not spawn a Chrome verify window.
+  const url = netmirrorDirectEmbedUrl(postId, season, episode)
 
   return {
     ok: true,
-    url: netmirrorEpisodePlayerUrl({ postId, tvPlayer }, season, episode, options?.server),
+    url,
     postId,
     tmdbId,
     season,
@@ -469,7 +533,7 @@ export async function resolveNetMirrorPlay(
 
 /** Optional: enrich description from a single detail page. */
 export async function fetchNetMirrorDescription(detailUrl: string): Promise<string | null> {
-  const result = await fetchHtml(detailUrl)
+  const result = await fetchHtml(detailUrl, { quiet: true })
   if (!result.ok) return null
   return parseDescriptionFromHtml(result.content)
 }

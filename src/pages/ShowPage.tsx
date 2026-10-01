@@ -4,10 +4,14 @@ import { PlaybackLoadingScreen } from '../components/PlaybackLoadingScreen'
 import { resolvePlayableItem } from '../data/catalog'
 import { useCatalog } from '../context/CatalogContext'
 import { usePlayback } from '../context/PlaybackContext'
-import { getContinueEntry, mergeRuntimeSeconds } from '../lib/continueWatching'
+import { getContinueEntry, mergeRuntimeSeconds, recordWebEmbedContinue } from '../lib/continueWatching'
 import { isWeakPosterUrl, resolveCatalogPoster } from '../lib/posterFallback'
 import { hasRealDebridToken } from '../lib/debridSettings'
 import { upsertTorrentItems } from '../lib/torrentCatalogStore'
+import {
+  fetchYtsMovieSynopsis,
+  needsRicherMovieSynopsis,
+} from '../lib/movieShelfSearch'
 import {
   cleanShowDisplayTitle,
   formatEpisodeListLabel,
@@ -15,6 +19,9 @@ import {
   isEztvSource,
   isM2BoxCatalogItem,
   isNetMirrorCatalogItem,
+  isYmoviesCatalogItem,
+  isCinetaroCatalogItem,
+  isTmdbTvCatalogItem,
   isShowBrowseItem,
   resolveShowEpisodes,
   torrentUrisForEpisodeWithTorrentio,
@@ -22,6 +29,20 @@ import {
 } from '../lib/torrents'
 import { resolveM2BoxPlay } from '../lib/m2box'
 import { resolveNetMirrorPlay } from '../lib/netmirror'
+import { resolveYmoviesPlay } from '../lib/ymovies'
+import { resolveCinetaroPlay } from '../lib/cinetaro'
+import {
+  lookupRivestreamTmdbId,
+  rivestreamTmdbIdFromItem,
+} from '../lib/rivestream'
+import { resolveMovyPlay } from '../lib/movy'
+import { resolveWyzieSubtitle } from '../lib/wyzie'
+import {
+  NYAA_SEARCH_SOURCE_ID,
+  nyaaTorrentCandidates,
+  resolveNyaaEpisodePlay,
+  shouldTryNyaaForItem,
+} from '../lib/nyaa'
 import { TORRENTIO_TV_TRIAL } from '../lib/torrentio'
 import {
   canQueueWatchNext,
@@ -30,7 +51,31 @@ import {
   setWatchNext,
   subscribeWatchNext,
 } from '../lib/watchNext'
+import {
+  isTorrentPlaybackAvailable,
+  torrentStream,
+} from '../lib/torrentBridge'
 import type { StreamItem, StreamPlaylistItem, TorrentStreamResult } from '../types'
+
+const TORRENT_CANDIDATE_TIMEOUT_MS = 28_000
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      reject(new Error(label))
+    }, ms)
+    promise.then(
+      (value) => {
+        window.clearTimeout(timer)
+        resolve(value)
+      },
+      (err) => {
+        window.clearTimeout(timer)
+        reject(err)
+      },
+    )
+  })
+}
 
 export function ShowPage() {
   const { id } = useParams<{ id: string }>()
@@ -72,47 +117,103 @@ export function ShowPage() {
 
   useEffect(() => {
     if (!item) return
-    if (!isShowBrowseItem(item)) {
+    // Movies open here for synopsis → Watch. Series/anime keep the episode list.
+    if (!isShowBrowseItem(item) && item.category !== 'movies') {
       navigate(`/watch/${item.id}`, { replace: true, state: { from: returnTo } })
       return
     }
+
     let cancelled = false
     setLoading(true)
     setError(null)
     setPlayError(null)
     setEpisodes([])
     setSynopsis('')
-    void resolveShowEpisodes(item, items).then((result) => {
-      if (cancelled) return
-      setEpisodes(result.episodes)
-      setError(result.episodes.length === 0 ? result.error || 'No episodes found.' : null)
-      const patch: Partial<StreamItem> = {}
-      if (result.description?.trim() && result.description.trim() !== item.description) {
-        setSynopsis(result.description.trim())
-        patch.description = result.description.trim()
-      } else if (result.description?.trim()) {
-        setSynopsis(result.description.trim())
-      }
-      if (isM2BoxCatalogItem(item) && result.m2boxSubjectId && result.m2boxSubjectId !== item.m2boxSubjectId) {
-        patch.m2boxSubjectId = result.m2boxSubjectId
-      }
-      if (isNetMirrorCatalogItem(item)) {
-        if (result.netmirrorPostId && result.netmirrorPostId !== item.netmirrorPostId) {
-          patch.netmirrorPostId = result.netmirrorPostId
+
+    if (item.category === 'movies' && !isShowBrowseItem(item)) {
+      const local = String(item.description || '').trim()
+      if (local && !/^https?:\/\//i.test(local)) setSynopsis(local)
+      void (async () => {
+        if (!needsRicherMovieSynopsis(item.description)) {
+          if (!cancelled) setLoading(false)
+          return
         }
-        if (result.netmirrorTmdbId && result.netmirrorTmdbId !== item.netmirrorTmdbId) {
-          patch.netmirrorTmdbId = result.netmirrorTmdbId
+        const detail = await fetchYtsMovieSynopsis(item.detailUrl || item.url)
+        if (cancelled) return
+        if (detail?.synopsis) {
+          setSynopsis(detail.synopsis)
+          const patch: Partial<StreamItem> = { description: detail.synopsis }
+          if (detail.runtimeSeconds && detail.runtimeSeconds !== item.runtimeSeconds) {
+            patch.runtimeSeconds = detail.runtimeSeconds
+          }
+          void upsertTorrentItems([{ ...item, ...patch }])
         }
+        setLoading(false)
+      })()
+      return () => {
+        cancelled = true
       }
-      if (Object.keys(patch).length > 0) {
-        void upsertTorrentItems([{ ...item, ...patch }])
-      }
-      setLoading(false)
-    })
+    }
+
+    // Depend on item.id only — catalog array identity changes during sync and
+    // was re-fetching episodes (and fighting Back navigation) on every upsert.
+    void resolveShowEpisodes(item, items)
+      .then((result) => {
+        if (cancelled) return
+        setEpisodes(result.episodes)
+        setError(result.episodes.length === 0 ? result.error || 'No episodes found.' : null)
+        const patch: Partial<StreamItem> = {}
+        if (result.description?.trim() && result.description.trim() !== item.description) {
+          setSynopsis(result.description.trim())
+          patch.description = result.description.trim()
+        } else if (result.description?.trim()) {
+          setSynopsis(result.description.trim())
+        }
+        if (isM2BoxCatalogItem(item) && result.m2boxSubjectId && result.m2boxSubjectId !== item.m2boxSubjectId) {
+          patch.m2boxSubjectId = result.m2boxSubjectId
+        }
+        if (isNetMirrorCatalogItem(item)) {
+          if (result.netmirrorPostId && result.netmirrorPostId !== item.netmirrorPostId) {
+            patch.netmirrorPostId = result.netmirrorPostId
+          }
+          if (result.netmirrorTmdbId && result.netmirrorTmdbId !== item.netmirrorTmdbId) {
+            patch.netmirrorTmdbId = result.netmirrorTmdbId
+          }
+        }
+        if (isYmoviesCatalogItem(item) && result.ymoviesId && result.ymoviesId !== item.ymoviesId) {
+          patch.ymoviesId = result.ymoviesId
+        }
+        if (isCinetaroCatalogItem(item)) {
+          if (result.cinetaroTmdbId && result.cinetaroTmdbId !== item.cinetaroTmdbId) {
+            patch.cinetaroTmdbId = result.cinetaroTmdbId
+          }
+          if (result.rivestreamTmdbId && result.rivestreamTmdbId !== item.rivestreamTmdbId) {
+            patch.rivestreamTmdbId = result.rivestreamTmdbId
+          }
+        }
+        if (
+          isTmdbTvCatalogItem(item) &&
+          result.rivestreamTmdbId &&
+          result.rivestreamTmdbId !== item.rivestreamTmdbId
+        ) {
+          patch.rivestreamTmdbId = result.rivestreamTmdbId
+        }
+        if (Object.keys(patch).length > 0) {
+          void upsertTorrentItems([{ ...item, ...patch }])
+        }
+        setLoading(false)
+      })
+      .catch((err) => {
+        if (cancelled) return
+        setEpisodes([])
+        setError(err instanceof Error ? err.message : 'Could not load episodes.')
+        setLoading(false)
+      })
     return () => {
       cancelled = true
     }
-  }, [item, items, navigate, returnTo])
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only re-fetch when the show id changes
+  }, [item?.id, navigate, returnTo])
 
   useEffect(() => {
     if (!item || catalogPoster) {
@@ -141,6 +242,190 @@ export function ShowPage() {
     const keepOthers = awaitingAdd || slots.length > 1 || mode === 'multi'
     const isDeadSwarm = (msg: string) =>
       /no peers|no reachable seeds|no seeds found|swarm may be dead|unavailable/i.test(msg)
+
+    const tryPlayFromNyaa = async (season: number, episode: number): Promise<boolean> => {
+      if (!isTorrentPlaybackAvailable()) return false
+      setPrepareStatus('Searching for episode…')
+      const showName = cleanShowDisplayTitle(item.title) || item.title
+      const nyaa = await resolveNyaaEpisodePlay({
+        showTitle: showName,
+        season,
+        episode,
+      })
+      if (!nyaa.ok) return false
+      const candidates = nyaaTorrentCandidates(nyaa.choice)
+      if (candidates.length === 0) return false
+      setPrepareStatus('Starting torrent…')
+      let result: TorrentStreamResult | null = null
+      let usedUri = candidates[0]
+      let lastError = 'Could not start torrent'
+      for (let i = 0; i < candidates.length; i++) {
+        const candidate = candidates[i]
+        usedUri = candidate
+        setPrepareStatus(
+          candidates.length > 1
+            ? `Starting torrent… (${i + 1}/${candidates.length})`
+            : 'Starting torrent…',
+        )
+        try {
+          const attempt = await withTimeout(
+            torrentStream(candidate, { keepOthers }),
+            TORRENT_CANDIDATE_TIMEOUT_MS,
+            'Release took too long to start — trying another source.',
+          )
+          if (attempt.ok && attempt.url) {
+            result = attempt
+            break
+          }
+          lastError = attempt.error || lastError
+        } catch (err) {
+          lastError = err instanceof Error ? err.message : lastError
+        }
+        if (!isDeadSwarm(lastError) && i === candidates.length - 1) break
+      }
+      if (!result?.ok || !result.url) {
+        // Weak Nyaa swarm — fall through so caller can try Zenox / Rivestream.
+        return false
+      }
+      const playlist: StreamPlaylistItem[] = nyaa.episodes.map((ep, i) =>
+        i === nyaa.playIndex
+          ? {
+              title: ep.title,
+              url: result!.url!,
+              torrentUri: usedUri,
+              torrentAlternates: ep.alternates,
+              episodeKey: ep.key,
+              subtitleUrl: result!.subtitleUrl ?? result!.playlist?.[0]?.subtitleUrl,
+              subtitleKind: result!.subtitleKind ?? result!.playlist?.[0]?.subtitleKind,
+              fileName: result!.fileName,
+            }
+          : {
+              title: ep.title,
+              url: '',
+              torrentUri: ep.torrentUri,
+              torrentAlternates: ep.alternates,
+              episodeKey: ep.key,
+            },
+      )
+      play(
+        {
+          ...item,
+          title: `${showName} · ${nyaa.choice.key}`,
+          description: nyaa.choice.title || item.description,
+          url: result.url,
+          playlist,
+          torrentUri: usedUri,
+          transport: 'direct',
+          sourceKind: 'torrent',
+          source: 'Torrent',
+          tags: [...new Set([...(item.tags ?? []), 'nyaa', 'torrent', 'anime'])],
+          torrentInfoHash: result.infoHash,
+          subtitleUrl: result.subtitleUrl ?? result.playlist?.[0]?.subtitleUrl,
+          subtitleKind: result.subtitleKind ?? result.playlist?.[0]?.subtitleKind,
+        },
+        { forceFull: true, returnTo: `/show/${item.id}` },
+      )
+      return true
+    }
+
+    /** TMDB → Movy Direct HLS in native Player; caller falls back to Nyaa. */
+    const tryPlayMovyNative = async (
+      season: number,
+      episode: number,
+    ): Promise<boolean> => {
+      setPrepareStatus('Opening Movy…')
+      let tmdbId = rivestreamTmdbIdFromItem(item)
+      if (!tmdbId) {
+        tmdbId = (await lookupRivestreamTmdbId(item.title)) || ''
+      }
+      if (!tmdbId) return false
+      void upsertTorrentItems([{ ...item, rivestreamTmdbId: tmdbId }])
+      const showName = cleanShowDisplayTitle(item.title) || item.title
+      const yearMatch = /\b(19|20)\d{2}\b/.exec(String(item.description || item.title || ''))
+      let movy: Awaited<ReturnType<typeof resolveMovyPlay>>
+      try {
+        movy = await withTimeout(
+          resolveMovyPlay({
+            tmdbId,
+            title: showName,
+            mediaType: 'tv',
+            season,
+            episode,
+            year: yearMatch?.[0],
+          }),
+          12_000,
+          'Movy lookup timed out.',
+        )
+      } catch {
+        return false
+      }
+      if (!movy.ok) return false
+      if (movy.backend === 'atlantic') setPrepareStatus('Opening alternate stream…')
+      let subtitleUrl = movy.subtitleUrl
+      let subtitleKind = movy.subtitleKind
+      if (!subtitleUrl) {
+        setPrepareStatus('Finding subtitles…')
+        try {
+          const wyzie = await withTimeout(
+            resolveWyzieSubtitle({
+              tmdbId,
+              season,
+              episode,
+            }),
+            12_000,
+            'Subtitle lookup timed out.',
+          )
+          if (wyzie.ok) {
+            subtitleUrl = wyzie.subtitleUrl
+            subtitleKind = wyzie.subtitleKind
+          }
+        } catch {
+          /* play without captions — Player may still try Nyaa */
+        }
+      }
+      if (window.signalDesktop?.setPlaybackHeaders) {
+        void window.signalDesktop.setPlaybackHeaders({
+          url: movy.url,
+          referrer: movy.referer,
+        })
+      }
+      const playlist: StreamPlaylistItem[] = episodes.map((ep, i) =>
+        i === index
+          ? {
+              title: ep.title,
+              url: movy.url,
+              episodeKey: ep.key,
+              subtitleUrl,
+              subtitleKind,
+            }
+          : { title: ep.title, url: '', episodeKey: ep.key },
+      )
+      play(
+        {
+          ...item,
+          rivestreamTmdbId: tmdbId,
+          title: `${showName} · ${chosen.key}`,
+          description: chosen.title || item.description,
+          url: movy.url,
+          httpReferrer: movy.referer,
+          playlist,
+          subtitleUrl,
+          subtitleKind,
+          transport: 'direct',
+          tags: [
+            ...new Set([
+              ...(item.tags ?? []),
+              movy.backend === 'atlantic' ? 'atlantic' : 'movy',
+              'hls',
+              movy.provider,
+              ...(subtitleUrl ? ['softsub'] : []),
+            ]),
+          ],
+        },
+        { forceFull: true, returnTo: `/show/${item.id}` },
+      )
+      return true
+    }
 
     try {
       if (isM2BoxCatalogItem(item)) {
@@ -194,6 +479,60 @@ export function ShowPage() {
         return
       }
 
+      if (
+        isTmdbTvCatalogItem(item) ||
+        isNetMirrorCatalogItem(item) ||
+        isYmoviesCatalogItem(item)
+      ) {
+        const seMatch = /^S(\d{1,2})E(\d{1,3})$/i.exec(chosen.key)
+        const season = seMatch ? Number(seMatch[1]) : 1
+        const episode = seMatch ? Number(seMatch[2]) : index + 1
+        let tmdbId = rivestreamTmdbIdFromItem(item)
+        if (!tmdbId && isYmoviesCatalogItem(item)) {
+          setPrepareStatus('Looking up show…')
+          tmdbId = (await lookupRivestreamTmdbId(item.title)) || ''
+          if (tmdbId) {
+            void upsertTorrentItems([{ ...item, rivestreamTmdbId: tmdbId }])
+          }
+        }
+        if (tmdbId) {
+          const tmdbPatch = {
+            rivestreamTmdbId: tmdbId,
+            ...(item.netmirrorTmdbId || isTmdbTvCatalogItem(item)
+              ? {}
+              : { netmirrorTmdbId: tmdbId }),
+          }
+          if (!item.rivestreamTmdbId) {
+            void upsertTorrentItems([{ ...item, ...tmdbPatch }])
+          }
+          const movyOk = await tryPlayMovyNative(season, episode)
+          if (movyOk) return
+          if (shouldTryNyaaForItem(item)) {
+            const played = await tryPlayFromNyaa(season, episode)
+            if (played) return
+          }
+          setPlayError('No Movy stream for this episode.')
+          return
+        } else if (shouldTryNyaaForItem(item)) {
+          const seMatch = /^S(\d{1,2})E(\d{1,3})$/i.exec(chosen.key)
+          const season = seMatch ? Number(seMatch[1]) : 1
+          const episode = seMatch ? Number(seMatch[2]) : index + 1
+          const played = await tryPlayFromNyaa(season, episode)
+          if (played) return
+        }
+        if (isTmdbTvCatalogItem(item)) {
+          if (shouldTryNyaaForItem(item)) {
+            const seMatch = /^S(\d{1,2})E(\d{1,3})$/i.exec(chosen.key)
+            const season = seMatch ? Number(seMatch[1]) : 1
+            const episode = seMatch ? Number(seMatch[2]) : index + 1
+            const played = await tryPlayFromNyaa(season, episode)
+            if (played) return
+          }
+          setPlayError('Could not resolve a stream for this episode.')
+          return
+        }
+      }
+
       if (isNetMirrorCatalogItem(item)) {
         const seMatch = /^S(\d{1,2})E(\d{1,3})$/i.exec(chosen.key)
         const season = seMatch ? Number(seMatch[1]) : 1
@@ -219,14 +558,180 @@ export function ShowPage() {
           ])
         }
         navigate(`/web?url=${encodeURIComponent(resolved.url)}`, {
-          state: { from: `/show/${item.id}` },
+          state: {
+            from: `/show/${item.id}`,
+            playerMode: 'embed',
+            pipOnBack: item.category === 'series',
+            continueWatch: {
+              id: item.id,
+              title: cleanShowDisplayTitle(item.title) || item.title,
+              poster: item.poster,
+              category: item.category,
+              playlistIndex: index,
+              episodeTitle: chosen.key,
+              detailUrl: item.detailUrl || item.url,
+              playUrl: resolved.url,
+              transport: item.transport,
+              sourceKind: item.sourceKind,
+              source: item.source,
+            },
+          },
+        })
+        recordWebEmbedContinue({
+          id: item.id,
+          title: cleanShowDisplayTitle(item.title) || item.title,
+          poster: item.poster,
+          category: item.category,
+          playlistIndex: index,
+          episodeTitle: chosen.key,
+          detailUrl: item.detailUrl || item.url,
+          playUrl: resolved.url,
+          transport: item.transport,
+          sourceKind: item.sourceKind,
+          source: item.source,
         })
         return
       }
 
-      if (!window.signalDesktop?.torrentStream) {
-        setPlayError('Playback needs the Jiyu desktop app.')
+      if (isYmoviesCatalogItem(item)) {
+        const seMatch = /^S(\d{1,2})E(\d{1,3})$/i.exec(chosen.key)
+        const season = seMatch ? Number(seMatch[1]) : 1
+        const episode = seMatch ? Number(seMatch[2]) : index + 1
+        setPrepareStatus('Opening player…')
+        const resolved = await resolveYmoviesPlay(item.detailUrl || item.url, {
+          ymoviesId: item.ymoviesId,
+          season,
+          episode,
+        })
+        if (!resolved.ok) {
+          setPlayError(resolved.error || 'Could not resolve YMovies player')
+          return
+        }
+        if (resolved.ymoviesId && resolved.ymoviesId !== item.ymoviesId) {
+          void upsertTorrentItems([
+            {
+              ...item,
+              ymoviesId: resolved.ymoviesId,
+            },
+          ])
+        }
+        // Embed player — no M2Box-style direct HLS; maximize in-app chrome like native.
+        navigate(`/web?url=${encodeURIComponent(resolved.url)}`, {
+          state: {
+            from: `/show/${item.id}`,
+            playerMode: 'embed',
+            pipOnBack: item.category === 'series',
+            continueWatch: {
+              id: item.id,
+              title: cleanShowDisplayTitle(item.title) || item.title,
+              poster: item.poster,
+              category: item.category,
+              playlistIndex: index,
+              episodeTitle: chosen.key,
+              detailUrl: item.detailUrl || item.url,
+              playUrl: resolved.url,
+              transport: item.transport,
+              sourceKind: item.sourceKind,
+              source: item.source,
+            },
+          },
+        })
+        recordWebEmbedContinue({
+          id: item.id,
+          title: cleanShowDisplayTitle(item.title) || item.title,
+          poster: item.poster,
+          category: item.category,
+          playlistIndex: index,
+          episodeTitle: chosen.key,
+          detailUrl: item.detailUrl || item.url,
+          playUrl: resolved.url,
+          transport: item.transport,
+          sourceKind: item.sourceKind,
+          source: item.source,
+        })
         return
+      }
+
+      if (isCinetaroCatalogItem(item)) {
+        const seMatch = /^S(\d{1,2})E(\d{1,3})$/i.exec(chosen.key)
+        const season = seMatch ? Number(seMatch[1]) : 1
+        const episode = seMatch ? Number(seMatch[2]) : index + 1
+        setPrepareStatus('Opening player…')
+        const resolved = await resolveCinetaroPlay(item.detailUrl || item.url, {
+          tmdbId: item.cinetaroTmdbId || item.rivestreamTmdbId,
+          season,
+          episode,
+        })
+        if (!resolved.ok) {
+          setPlayError(resolved.error || 'Could not resolve Cinetaro player')
+          return
+        }
+        if (resolved.tmdbId && resolved.tmdbId !== item.cinetaroTmdbId) {
+          void upsertTorrentItems([
+            {
+              ...item,
+              cinetaroTmdbId: resolved.tmdbId,
+              rivestreamTmdbId: item.rivestreamTmdbId || resolved.tmdbId,
+            },
+          ])
+        }
+        navigate(`/web?url=${encodeURIComponent(resolved.url)}`, {
+          state: {
+            from: `/show/${item.id}`,
+            playerMode: 'embed',
+            pipOnBack: item.category === 'series',
+            continueWatch: {
+              id: item.id,
+              title: cleanShowDisplayTitle(item.title) || item.title,
+              poster: item.poster,
+              category: item.category,
+              playlistIndex: index,
+              episodeTitle: chosen.key,
+              detailUrl: item.detailUrl || item.url,
+              playUrl: resolved.url,
+              transport: item.transport,
+              sourceKind: item.sourceKind,
+              source: item.source,
+            },
+          },
+        })
+        recordWebEmbedContinue({
+          id: item.id,
+          title: cleanShowDisplayTitle(item.title) || item.title,
+          poster: item.poster,
+          category: item.category,
+          playlistIndex: index,
+          episodeTitle: chosen.key,
+          detailUrl: item.detailUrl || item.url,
+          playUrl: resolved.url,
+          transport: item.transport,
+          sourceKind: item.sourceKind,
+          source: item.source,
+        })
+        return
+      }
+
+      if (!isTorrentPlaybackAvailable()) {
+        setPlayError('Torrent playback needs the Jiyu desktop app or Android torrent engine.')
+        return
+      }
+
+      {
+        const seMatch = /^S(\d{1,2})E(\d{1,3})$/i.exec(chosen.key)
+        const season = seMatch ? Number(seMatch[1]) : 1
+        const episode = seMatch ? Number(seMatch[2]) : index + 1
+        // Anime / Nyaa-eligible: Movy Direct before magnets.
+        if (
+          shouldTryNyaaForItem(item) ||
+          item.torrentSourceId === NYAA_SEARCH_SOURCE_ID ||
+          /^nyaa$/i.test(String(item.source || '')) ||
+          item.tags?.some((t) => /^nyaa$/i.test(String(t)))
+        ) {
+          const movyOk = await tryPlayMovyNative(season, episode)
+          if (movyOk) return
+          const played = await tryPlayFromNyaa(season, episode)
+          if (played) return
+        }
       }
 
       const useTorrentio =
@@ -256,25 +761,41 @@ export function ShowPage() {
           break
         }
         if (candidates.length > 1) {
-          setPrepareStatus(`Connecting to peers (${i + 1}/${candidates.length})…`)
+          setPrepareStatus(`Starting torrent… (${i + 1}/${candidates.length})`)
+        } else {
+          setPrepareStatus('Starting torrent…')
         }
-        const attempt = await window.signalDesktop.torrentStream(candidate, { keepOthers })
-        if (attempt.ok && attempt.url) {
-          result = attempt
-          break
+        try {
+          const attempt = await withTimeout(
+            torrentStream(candidate, { keepOthers }),
+            TORRENT_CANDIDATE_TIMEOUT_MS,
+            'Release took too long to start — trying another source.',
+          )
+          if (attempt.ok && attempt.url) {
+            result = attempt
+            break
+          }
+          lastError = attempt.error || lastError
+        } catch (err) {
+          lastError = err instanceof Error ? err.message : lastError
         }
-        lastError = attempt.error || lastError
         if (isDeadSwarm(lastError)) {
           deadCount += 1
-          if (i < candidates.length - 1) {
-            setPrepareStatus(
-              `No peers — trying another release (${i + 2}/${candidates.length})…`,
-            )
-          }
           continue
         }
       }
       if (!result?.ok || !result.url) {
+        const seMatchFail = /^S(\d{1,2})E(\d{1,3})$/i.exec(chosen.key)
+        const seasonFail = seMatchFail ? Number(seMatchFail[1]) : 1
+        const episodeFail = seMatchFail ? Number(seMatchFail[2]) : index + 1
+        if (
+          item.category === 'anime' ||
+          shouldTryNyaaForItem(item) ||
+          item.tags?.some((t) => /anime|nyaa/i.test(String(t)))
+        ) {
+          const movyOk = await tryPlayMovyNative(seasonFail, episodeFail)
+          if (movyOk) return
+        }
         setPlayError(
           deadCount > 0 && deadCount === candidates.length
             ? candidates.length > 1
@@ -317,6 +838,7 @@ export function ShowPage() {
         playlist,
         torrentUri: usedUri,
         transport: 'direct',
+        sourceKind: item.sourceKind || 'torrent',
         runtimeSeconds: mergeRuntimeSeconds(result.runtimeSeconds, item.runtimeSeconds),
         torrentInfoHash: isDebridHttpPlayUrl(usedUri || '') ? undefined : result.infoHash,
       }
@@ -347,6 +869,8 @@ export function ShowPage() {
   }
 
   const display = item ?? raw!
+  const isMovieDetail =
+    display.category === 'movies' && !isShowBrowseItem(display)
   const displayDescription = synopsis || display.description || ''
   const preparingEpisode =
     playingIndex != null ? episodes[playingIndex] ?? null : null
@@ -355,6 +879,13 @@ export function ShowPage() {
         preparingEpisode.key || formatEpisodeListLabel(preparingEpisode)
       }`
     : cleanShowDisplayTitle(display.title) || display.title
+
+  function startMovieWatch() {
+    if (!item) return
+    navigate(`/watch/${item.id}`, {
+      state: { from: returnTo, autoPlay: true },
+    })
+  }
 
   return (
     <div className="page show-page">
@@ -376,11 +907,24 @@ export function ShowPage() {
                 ? 'Anime'
                 : display.category === 'kids'
                   ? 'Kids'
-                  : 'TV Series'}
+                  : display.category === 'movies'
+                    ? 'Movie'
+                    : 'TV Series'}
             </p>
             <h1>{cleanShowDisplayTitle(display.title) || display.title}</h1>
-            {displayDescription && !/^https?:\/\//i.test(displayDescription.trim()) && (
+            {loading && isMovieDetail ? (
+              <p className="show-page-summary">Loading synopsis…</p>
+            ) : displayDescription && !/^https?:\/\//i.test(displayDescription.trim()) ? (
               <p className="show-page-summary">{displayDescription}</p>
+            ) : isMovieDetail ? (
+              <p className="show-page-summary">No synopsis available for this title.</p>
+            ) : null}
+            {isMovieDetail && (
+              <div className="show-movie-actions">
+                <button type="button" className="primary-btn" onClick={startMovieWatch}>
+                  {continueEntry && continueEntry.currentTime >= 5 ? 'Continue watching' : 'Watch'}
+                </button>
+              </div>
             )}
             {item && canQueueWatchNext(item) && (
               <button
@@ -410,6 +954,7 @@ export function ShowPage() {
         </div>
       </header>
 
+      {isMovieDetail ? null : (
       <section className="section-block show-episode-section">
         <div className="section-head">
           <h2>Episodes</h2>
@@ -480,6 +1025,7 @@ export function ShowPage() {
           </ol>
         )}
       </section>
+      )}
     </div>
   )
 }

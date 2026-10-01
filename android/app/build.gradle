@@ -1,0 +1,200 @@
+apply plugin: 'com.android.application'
+
+android {
+    namespace = "app.jiyu.mediacenter"
+    compileSdk = rootProject.ext.compileSdkVersion
+    defaultConfig {
+        applicationId "app.jiyu.mediacenter"
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode 29
+        versionName "0.3.33"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        // 16 KB page-size devices (Android 15+): only ship 64-bit natives.
+        // libtorrent4j 32-bit builds are still 4 KB-aligned.
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+        aaptOptions {
+             // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
+             // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
+            ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    signingConfigs {
+        release {
+            def ksPropsFile = file('F:/Jiyu/jiyu-release/keystore.properties')
+            def ksProps = new Properties()
+            if (ksPropsFile.exists()) {
+                ksPropsFile.withInputStream { ksProps.load(it) }
+            }
+            storeFile file(ksProps['storeFile'] ?: 'F:/Jiyu/jiyu-release/JIYU-FREEDOM')
+            storePassword ksProps['storePassword'] ?: System.getenv('JIYU_STORE_PASSWORD') ?: ''
+            keyAlias ksProps['keyAlias'] ?: 'jiyu'
+            keyPassword ksProps['keyPassword'] ?: ksProps['storePassword'] ?: System.getenv('JIYU_KEY_PASSWORD') ?: System.getenv('JIYU_STORE_PASSWORD') ?: ''
+        }
+    }
+    buildTypes {
+        release {
+            signingConfig signingConfigs.release
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
+    }
+    androidComponents {
+        onVariants(selector().all()) { variant ->
+            variant.outputs.each { output ->
+                def version = output.versionName.get()
+                output.outputFileName.set("Jiyu-${version}-arm64.apk")
+            }
+        }
+    }
+    packaging {
+        jniLibs {
+            pickFirsts += ['**/libc++_shared.so', '**/libglean_ffi.so']
+            // Load ffmpeg from extracted files. Mapping the .so files straight
+            // out of the APK fails on this phone: GNU RELRO "Out of memory".
+            useLegacyPackaging = true
+        }
+        resources {
+            excludes += [
+                'META-INF/DEPENDENCIES',
+                'META-INF/LICENSE',
+                'META-INF/LICENSE.txt',
+                'META-INF/license.txt',
+                'META-INF/NOTICE',
+                'META-INF/NOTICE.txt',
+                'META-INF/notice.txt',
+                'META-INF/*.kotlin_module',
+            ]
+        }
+    }
+}
+
+repositories {
+    flatDir{
+        dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
+    }
+    maven { url 'https://maven.mozilla.org/maven2/' }
+}
+
+dependencies {
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+    implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
+    implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
+    implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
+    implementation "androidx.webkit:webkit:$androidxWebkitVersion"
+    implementation "androidx.browser:browser:1.8.0"
+    implementation "androidx.mediarouter:mediarouter:1.7.0"
+    implementation "com.google.android.gms:play-services-cast-framework:21.5.0"
+    // In-app browser overlay only — Capacitor UI stays on System WebView.
+    implementation "org.mozilla.geckoview:geckoview:$geckoviewVersion"
+    implementation project(':capacitor-android')
+    testImplementation "junit:junit:$junitVersion"
+    androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
+    androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
+    implementation project(':capacitor-cordova-android-plugins')
+
+    // Native torrent engine (Android only — desktop still uses Electron WebTorrent)
+    def libtorrent4j = '2.1.0-39'
+    implementation "org.libtorrent4j:libtorrent4j:$libtorrent4j"
+    implementation "org.libtorrent4j:libtorrent4j-android-arm64:$libtorrent4j"
+    implementation 'org.nanohttpd:nanohttpd:2.3.1'
+    // Remux torrent MKV/HEVC/AC3 into fragmented MP4 the WebView can play.
+    // Same job desktop does with ffmpeg. https build can read the local HTTP file.
+    implementation 'dev.ffmpegkit-maintained:ffmpeg-kit-https:6.0.3'
+    implementation 'com.arthenica:smart-exception-java:0.2.1'
+}
+
+apply from: 'capacitor.build.gradle'
+
+// ffmpeg-kit 6.0.3 is linked for 16 KB pages, but GNU_RELRO is longer than
+// the load segment. On this phone's 4 KB pages, dlopen then fails with
+// "can't enable GNU RELRO protection ... Out of memory". Clamp RELRO to the
+// load segment. 16 KB devices still cover that range with one page.
+def readU16 = { byte[] b, int o ->
+    (b[o] & 0xff) | ((b[o + 1] & 0xff) << 8)
+}
+def readU32 = { byte[] b, int o ->
+    long v = 0
+    for (int i = 0; i < 4; i++) v |= ((long) (b[o + i] & 0xff)) << (8 * i)
+    return v
+}
+def readU64 = { byte[] b, int o ->
+    long v = 0
+    for (int i = 0; i < 8; i++) v |= ((long) (b[o + i] & 0xff)) << (8 * i)
+    return v
+}
+def writeU64 = { byte[] b, int o, long v ->
+    for (int i = 0; i < 8; i++) b[o + i] = (byte) ((v >>> (8 * i)) & 0xff)
+}
+def clampRelro = { File so ->
+    byte[] b = so.bytes
+    if (b.length < 64 || b[0] != 0x7f || b[1] != 0x45 || b[4] != 2 || b[5] != 1) return
+    long phoff = readU64(b, 32)
+    int phentsize = readU16(b, 54)
+    int phnum = readU16(b, 56)
+    List<long[]> loads = []
+    List<Integer> relros = []
+    for (int i = 0; i < phnum; i++) {
+        int o = (int) (phoff + (long) i * phentsize)
+        long type = readU32(b, o)
+        if (type == 1L) {
+            long va = readU64(b, o + 16)
+            long memsz = readU64(b, o + 40)
+            loads.add([va, va + memsz] as long[])
+        } else if (type == 0x6474e552L) {
+            relros.add(o)
+        }
+    }
+    boolean changed = false
+    relros.each { int o ->
+        long va = readU64(b, o + 16)
+        long memsz = readU64(b, o + 40)
+        long end = va + memsz
+        long coverEnd = -1
+        loads.each { long[] load ->
+            if (va >= load[0] && va < load[1]) coverEnd = load[1]
+        }
+        if (coverEnd > va && end > coverEnd) {
+            writeU64(b, o + 40, coverEnd - va)
+            changed = true
+            logger.lifecycle("Clamped RELRO in ${so.name}: 0x${Long.toHexString(memsz)} -> 0x${Long.toHexString(coverEnd - va)}")
+        }
+    }
+    if (changed) so.bytes = b
+}
+
+afterEvaluate {
+    ['Debug', 'Release'].each { String cap ->
+        String stripTask = "strip${cap}DebugSymbols"
+        String patchTask = "patch${cap}FfmpegRelro"
+        if (tasks.findByName(stripTask) == null) return
+        tasks.register(patchTask) {
+            dependsOn stripTask
+            doLast {
+                File root = file("${buildDir}/intermediates/stripped_native_libs/${cap.toLowerCase()}/${stripTask}/out/lib")
+                if (!root.exists()) return
+                root.eachFileRecurse { File so ->
+                    if (so.name.endsWith('.so')) clampRelro(so)
+                }
+            }
+        }
+        tasks.matching { it.name == "package${cap}" }.configureEach {
+            dependsOn patchTask
+        }
+    }
+}
+
+try {
+    def servicesJSON = file('google-services.json')
+    if (servicesJSON.text) {
+        apply plugin: 'com.google.gms.google-services'
+    }
+} catch(Exception e) {
+    logger.info("google-services.json not found, google-services plugin not applied. Push Notifications won't work")
+}

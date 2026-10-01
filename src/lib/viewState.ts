@@ -4,6 +4,8 @@ interface SectionViewState {
   query: string
   visible: number
   autoCheck: boolean
+  /** Card to scroll back to after opening a title (Back from Show). */
+  focusItemId?: string
 }
 
 interface ViewBag {
@@ -52,6 +54,23 @@ export function setSectionView(sectionId: string, state: SectionViewState) {
   const bag = readBag()
   bag.sections[sectionId] = state
   writeBag(bag)
+}
+
+/** Remember which shelf card was opened so Back can land on it. */
+export function setSectionFocusItem(sectionId: string, itemId: string) {
+  const prev = getSectionView(sectionId)
+  setSectionView(sectionId, {
+    query: prev?.query ?? '',
+    visible: prev?.visible ?? 120,
+    autoCheck: prev?.autoCheck ?? true,
+    focusItemId: itemId,
+  })
+}
+
+export function clearSectionFocusItem(sectionId: string) {
+  const prev = getSectionView(sectionId)
+  if (!prev?.focusItemId) return
+  setSectionView(sectionId, { ...prev, focusItemId: undefined })
 }
 
 export function getMainStage(): HTMLElement | null {

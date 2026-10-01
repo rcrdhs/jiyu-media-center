@@ -4,6 +4,8 @@
  * for playback, torrents, and catalog sync — ready for phones/TVs later.
  */
 
+import { Capacitor } from '@capacitor/core'
+
 export type PerformanceMode = 'auto' | 'high' | 'balanced' | 'lite'
 export type DeviceClass = 'high' | 'balanced' | 'lite'
 
@@ -165,13 +167,21 @@ function browserCapabilities(): DeviceCapabilities {
   const totalMemGB =
     typeof nav.deviceMemory === 'number' && nav.deviceMemory > 0 ? nav.deviceMemory : 0
   const saveData = Boolean(nav.connection?.saveData)
+  let platform = nav.platform || 'web'
+  try {
+    if (Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android') {
+      platform = 'android'
+    }
+  } catch {
+    /* ignore */
+  }
   return {
-    platform: nav.platform || 'web',
+    platform,
     arch: 'unknown',
-    cpuCount,
-    totalMemGB,
+    cpuCount: platform === 'android' ? Math.min(cpuCount, 4) : cpuCount,
+    totalMemGB: platform === 'android' && totalMemGB <= 0 ? 4 : totalMemGB,
     freeMemGB: 0,
-    onBattery: saveData ? true : null,
+    onBattery: platform === 'android' ? true : saveData ? true : null,
     gpuAccelerated: null,
     source: totalMemGB > 0 || nav.hardwareConcurrency ? 'browser' : 'fallback',
   }
@@ -185,7 +195,9 @@ function summarize(caps: DeviceCapabilities, deviceClass: DeviceClass): string {
         ? 'macOS'
         : caps.platform === 'linux'
           ? 'Linux'
-          : caps.platform || 'Device'
+          : caps.platform === 'android'
+            ? 'Android'
+            : caps.platform || 'Device'
   const parts = [
     platform,
     `${caps.cpuCount} core${caps.cpuCount === 1 ? '' : 's'}`,

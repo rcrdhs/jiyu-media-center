@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import Hls from 'hls.js'
+import { androidHlsConfig } from '../lib/hlsAndroid'
 
 interface CardPreviewProps {
   url: string
@@ -42,6 +43,7 @@ export function CardPreview({ url, onEnd, durationMs = 5000 }: CardPreviewProps)
         fragLoadingMaxRetry: 1,
         manifestLoadingMaxRetry: 1,
         levelLoadingMaxRetry: 1,
+        ...androidHlsConfig(),
       })
       hls.loadSource(url)
       hls.attachMedia(video)

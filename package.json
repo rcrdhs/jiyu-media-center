@@ -1,9 +1,13 @@
 {
   "name": "jiyu-media-center",
   "private": true,
-  "version": "0.3.4",
+  "version": "0.3.33",
   "description": "Jiyu — freedom-focused media center for sports, movies, anime, series, and news streams",
   "author": "Jiyu",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rcrdhs/jiyu-media-center.git"
+  },
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -13,9 +17,16 @@
     "lint": "oxlint",
     "preview": "vite preview",
     "pack:win": "npm run build && electron-builder --win nsis portable",
-    "pack:linux": "npm run build && electron-builder --linux AppImage deb"
+    "pack:linux": "npm run build && electron-builder --linux AppImage deb",
+    "pack:tizen": "npm run build && node scripts/pack-tizen.mjs",
+    "release:win": "npm run build && electron-builder --win nsis portable --publish always",
+    "release:linux": "npm run build && electron-builder --linux AppImage deb --publish always"
   },
   "dependencies": {
+    "@capacitor/android": "^8.5.2",
+    "@capacitor/core": "^8.5.2",
+    "@capacitor/local-notifications": "^8.3.1",
+    "electron-updater": "^6.8.9",
     "ffmpeg-static": "^5.3.0",
     "hls.js": "^1.6.16",
     "puppeteer-core": "^25.3.0",
@@ -25,6 +36,7 @@
     "webtorrent": "^3.0.16"
   },
   "devDependencies": {
+    "@capacitor/cli": "^8.5.2",
     "@types/node": "^24.13.2",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
@@ -71,6 +83,14 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
-    }
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "rcrdhs",
+        "repo": "jiyu-media-center",
+        "releaseType": "release"
+      }
+    ]
   }
 }

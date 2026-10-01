@@ -4,6 +4,8 @@
  * first — cancel never mid-wipe of IndexedDB.
  */
 
+import { clearSyncJob, holdBackgroundSync, releaseBackgroundSync } from './backgroundSync'
+
 type Listener = () => void
 
 export type TorrentSyncControlState = {
@@ -20,9 +22,22 @@ export class TorrentSyncCancelledError extends Error {
   }
 }
 
+/** Another sync took the session — not a user cancel; callers should stay quiet. */
+export class TorrentSyncSupersededError extends Error {
+  constructor(message = 'Catalog sync superseded') {
+    super(message)
+    this.name = 'TorrentSyncSupersededError'
+  }
+}
+
 let sessionId = 0
 let pauseWaiters: Array<() => void> = []
 const listeners = new Set<Listener>()
+
+/** Serialize catalog syncs so auto-refresh cannot cancel an in-flight run. */
+let syncQueueTail: Promise<unknown> = Promise.resolve()
+/** Bumped on user cancel so queued auto-syncs after Cancel are dropped. */
+let syncQueueEpoch = 0
 
 /** Stable snapshot for useSyncExternalStore — never return a fresh object each read. */
 let state: TorrentSyncControlState = {
@@ -77,6 +92,7 @@ export function beginTorrentSyncSession(): number {
   sessionId += 1
   wakePauseWaiters()
   notifyDesktopTmdbControl('reset')
+  holdBackgroundSync()
   setState({ active: true, paused: false, cancelling: false })
   return sessionId
 }
@@ -85,6 +101,7 @@ export function endTorrentSyncSession(id: number): void {
   if (id !== sessionId) return
   wakePauseWaiters()
   notifyDesktopTmdbControl('reset')
+  releaseBackgroundSync()
   setState({ active: false, paused: false, cancelling: false })
 }
 
@@ -102,10 +119,55 @@ export function resumeTorrentSync(): void {
 }
 
 export function cancelTorrentSync(): void {
+  syncQueueEpoch += 1
+  clearSyncJob()
   if (!state.active) return
   notifyDesktopTmdbControl('cancel')
   setState({ active: true, paused: false, cancelling: true })
   wakePauseWaiters()
+  // Unblock sync stuck inside Cloudflare unlock / system Chrome wait.
+  try {
+    void window.signalDesktop?.closeCfBrowser?.({
+      soon: false,
+      reason: 'catalog-sync-cancelled',
+    })
+  } catch {
+    /* ignore */
+  }
+  // Android: dismiss Verify / in-app browser so Cancel isn't stuck behind it.
+  try {
+    void import('./androidBrowser').then((m) => {
+      if (m.isAndroidInAppBrowser()) {
+        void m.androidBrowserHide({ blank: false, pause: false })
+      }
+    })
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Run catalog sync work one-at-a-time. Prevents overlapping
+ * beginTorrentSyncSession() calls from auto-cancelling each other.
+ * Returns null when this task was dropped after a user Cancel.
+ */
+export function enqueueTorrentSyncTask<T>(task: () => Promise<T>): Promise<T | null> {
+  const epoch = syncQueueEpoch
+  const run = syncQueueTail.then(
+    async () => {
+      if (epoch !== syncQueueEpoch) return null
+      return task()
+    },
+    async () => {
+      if (epoch !== syncQueueEpoch) return null
+      return task()
+    },
+  )
+  syncQueueTail = run.then(
+    () => undefined,
+    () => undefined,
+  )
+  return run
 }
 
 /**
@@ -114,7 +176,10 @@ export function cancelTorrentSync(): void {
  */
 export async function torrentSyncCheckpoint(id: number): Promise<void> {
   for (;;) {
-    if (id !== sessionId || state.cancelling) {
+    if (id !== sessionId) {
+      throw new TorrentSyncSupersededError()
+    }
+    if (state.cancelling) {
       throw new TorrentSyncCancelledError()
     }
     if (!state.paused) return
@@ -128,5 +193,12 @@ export function isTorrentSyncCancelledError(err: unknown): boolean {
   return (
     err instanceof TorrentSyncCancelledError ||
     (err instanceof Error && err.name === 'TorrentSyncCancelledError')
+  )
+}
+
+export function isTorrentSyncSupersededError(err: unknown): boolean {
+  return (
+    err instanceof TorrentSyncSupersededError ||
+    (err instanceof Error && err.name === 'TorrentSyncSupersededError')
   )
 }

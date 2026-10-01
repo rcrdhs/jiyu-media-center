@@ -8,6 +8,10 @@ import {
   type ReactNode,
 } from 'react'
 import type { StreamItem } from '../types'
+import {
+  androidBrowserMultiSpotlight,
+  isAndroidInAppBrowser,
+} from '../lib/androidBrowser'
 
 export type PlaybackMode = 'off' | 'full' | 'pip' | 'multi'
 
@@ -30,6 +34,8 @@ export interface PlayOptions {
   forceFull?: boolean
   /** Where Back should go after full playback */
   returnTo?: string | null
+  /** Replace all slots (ignore armed multi-view / existing grid) */
+  replace?: boolean
 }
 
 interface PlaybackContextValue {
@@ -110,7 +116,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
     setState((prev) => {
       const { slots: current, primaryId: pid, mode: m, awaitingAdd } = prev
       const inMultiview = current.length > 1 || m === 'multi'
-      const shouldAdd = awaitingAdd || inMultiview
+      const shouldAdd = !options?.replace && (awaitingAdd || inMultiview)
       const returnTo = options?.returnTo !== undefined ? options.returnTo : prev.returnTo
       const prevPrimary = primaryOf(current, pid)
 
@@ -233,6 +239,9 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
   const minimizeToPip = useCallback(() => {
     setState((prev) => {
       if (prev.mode === 'off' || prev.slots.length === 0) return prev
+      // Multi-view grid must stay intact — collapsing here dropped the 2nd stream
+      // when /watch → /multiview fired the navigation PiP bridge.
+      if (prev.mode === 'multi' || prev.slots.length > 1) return prev
       const keep = prev.slots.find((s) => s.id === prev.primaryId) ?? prev.slots[0]
       return {
         slots: [keep],
@@ -261,8 +270,11 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
   const spotlight = useCallback((id: string) => {
     setState((prev) => {
       if (!prev.slots.some((s) => s.id === id)) return prev
+      if (prev.primaryId === id) return prev
       return { ...prev, primaryId: id }
     })
+    void window.signalDesktop?.browserMultiSpotlight?.({ id })
+    if (isAndroidInAppBrowser()) void androidBrowserMultiSpotlight({ id })
   }, [])
 
   const removeSlot = useCallback((id: string) => {

@@ -125,5 +125,11 @@ export function isMpegTsUrl(url: string): boolean {
 }
 
 export function isHlsUrl(url: string): boolean {
-  return /\.m3u8(\?|$)/i.test(url) || /[?&]output=hls\b/i.test(url)
+  // Aphrodite/totallyacdn uses `/cdn-m3u8?payload=` (no ".m3u8" extension).
+  return (
+    /\.m3u8(\?|$)/i.test(url) ||
+    /\/cdn-m3u8(?:\?|$)/i.test(url) ||
+    /[?&]output=hls\b/i.test(url) ||
+    /totallyacdn\.|cdn\.hls\.lol|stream\.hls\.lol|transcode\.cfd/i.test(url)
+  )
 }
