@@ -5042,7 +5042,8 @@ html.is-android .player-shell:-webkit-full-screen .player-video {
 }
 
 /* Fallback when picture size isn’t known yet — keep modest so portrait
-   letterbox doesn’t park cues mid–black-bar. Prefer .is-picture-anchored. */
+   letterbox doesn’t park cues mid–black-bar. Prefer .is-picture-anchored.
+   (html.is-android adds an element to specificity — PiP rules below must beat this.) */
 html.is-android .player-subtitles {
   bottom: clamp(3rem, 7vh, 5rem);
   padding-bottom: env(safe-area-inset-bottom, 0px);
@@ -5060,7 +5061,7 @@ html.is-android .player-shell.chrome-hidden .player-subtitles {
 
 /*
  * Picture-anchored: bottom of contain-fitted frame + small inset into the picture.
- * Keep cues near the lower edge of the stream (user feedback: too high before).
+ * Keep cues on the lower edge of the stream (not mid-frame, not in letterbox).
  */
 .player-subtitles.is-picture-anchored {
   bottom: calc((100% - var(--picture-h)) / 2 + max(0.35rem, var(--picture-h) * 0.02));
@@ -5128,9 +5129,18 @@ html.is-android .player-shell.chrome-hidden .player-subtitles.is-picture-anchore
   white-space: pre-wrap;
 }
 
-/* Corner / in-app PiP — keep cues readable without covering the bar */
-.player-shell-pip .player-subtitles {
-  bottom: 0.4rem;
+/*
+ * Corner / in-app PiP — always pin cues to the bottom of the video stage.
+ * Must beat html.is-android .player-subtitles (vh clamp parks mid-frame in a short PiP).
+ */
+.player-shell-pip .player-subtitles,
+.player-shell-pip .player-subtitles.is-picture-anchored,
+html.is-android .player-shell-pip .player-subtitles,
+html.is-android .player-shell-pip .player-subtitles.is-picture-anchored,
+html.is-android .player-shell-pip.chrome-visible .player-subtitles,
+html.is-android .player-shell-pip.chrome-hidden .player-subtitles {
+  bottom: 0.35rem;
+  padding-bottom: 0;
   width: min(96%, 19rem);
   gap: 0.06rem;
 }
@@ -5142,10 +5152,18 @@ html.is-android .player-shell.chrome-hidden .player-subtitles.is-picture-anchore
   border-radius: 3px;
 }
 
-/* Android Home → system PiP: video fills the window; sit cues on the frame */
-html.is-system-pip .player-subtitles {
+/* Android Home → system PiP: video fills the window; sit cues on the lower edge */
+html.is-system-pip .player-subtitles,
+html.is-system-pip .player-subtitles.is-picture-anchored,
+html.is-android.is-system-pip .player-subtitles,
+html.is-android.is-system-pip .player-subtitles.is-picture-anchored,
+html.is-android.is-system-pip .player-shell .player-subtitles,
+html.is-android.is-system-pip .player-shell .player-subtitles.is-picture-anchored,
+html.is-android.is-system-pip .player-shell.chrome-hidden .player-subtitles,
+html.is-android.is-system-pip .player-shell.is-os-fullscreen .player-subtitles {
   display: grid !important;
-  bottom: 0.45rem;
+  bottom: 0.35rem !important;
+  padding-bottom: 0 !important;
   width: min(94%, 22rem);
   z-index: 40;
 }

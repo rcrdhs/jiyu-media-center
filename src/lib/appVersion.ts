@@ -12,6 +12,11 @@ export const APP_VERSION_LABEL = `v${APP_VERSION}`
 /** Short milestone log — newest first — so progress is visible in-app. */
 export const APP_RELEASES: ReadonlyArray<{ version: string; summary: string }> = [
   {
+    version: '0.3.34',
+    summary:
+      'Android PiP: keep softsubs pinned to the bottom of the player (vh clamp no longer parks cues mid-frame)',
+  },
+  {
     version: '0.3.33',
     summary:
       'Anime/TV: Movy stall falls back to Atlantic Helios HLS; skip Aphrodite Warp bumper streams; paleoak CDN + Android AES/cdn-m3u8 loader fixes',

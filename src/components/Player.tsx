@@ -4943,9 +4943,9 @@ export function Player({
         )}
         {subsEnabled && subtitleLine && (
           <div
-            className={`player-subtitles${fittedVideo ? ' is-picture-anchored' : ''}`}
+            className={`player-subtitles${fittedVideo && !isPip ? ' is-picture-anchored' : ''}`}
             style={
-              fittedVideo
+              fittedVideo && !isPip
                 ? ({ ['--picture-h' as string]: `${fittedVideo.height}px` } as CSSProperties)
                 : undefined
             }
