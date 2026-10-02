@@ -118,6 +118,8 @@ export function isWebBrowserOnlyUrl(url: string): boolean {
     if (host === 'livextv.hybrows.workers.dev') return true
     if (host === 'livextv.com' || host.endsWith('.livextv.com')) return true
     if (host === 'livextv.pro' || host.endsWith('.livextv.pro')) return true
+    if (host === 'livextv.live' || host.endsWith('.livextv.live')) return true
+    if (host.includes('livextv')) return true
     if (host === 'footreplays.com' || host.endsWith('.footreplays.com')) return true
     if (host === 'ok.ru' || host.endsWith('.ok.ru')) return true
     // DoodStream-style rotating hosts: /e/{id} or /d/{id}
@@ -237,6 +239,11 @@ export function isEmbedPlayerHost(url: string): boolean {
         host === 'soccerfull.net' ||
         host.endsWith('.soccerfull.net') ||
         host === 'livextv.hybrows.workers.dev' ||
+        host === 'livextv.pro' ||
+        host.endsWith('.livextv.pro') ||
+        host === 'livextv.live' ||
+        host.endsWith('.livextv.live') ||
+        host.includes('livextv') ||
         host.includes('netmirror') ||
         host.includes('mcloud') ||
         // Local Nationwide / YouTube live embeds opened as player tiles.

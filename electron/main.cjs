@@ -2497,7 +2497,15 @@ function httpReferrerForBrowserUrl(targetUrl) {
     if (host === 'soccerfull.net' || host.endsWith('.soccerfull.net')) {
       return 'https://livextv.hybrows.workers.dev/'
     }
-    if (host === 'livextv.hybrows.workers.dev' || /livextv/i.test(host)) {
+    if (
+      host === 'livextv.hybrows.workers.dev' ||
+      host === 'livextv.pro' ||
+      host.endsWith('.livextv.pro') ||
+      host === 'livextv.live' ||
+      host.endsWith('.livextv.live') ||
+      /livextv/i.test(host)
+    ) {
+      // Prefer the workers mirror as Referer; SPA mirrors share the same catalog.
       return 'https://livextv.hybrows.workers.dev/'
     }
     // YouTube embeds (Error 153): top-level /embed loads in WebContentsView often

@@ -3,17 +3,117 @@
  * Catalog: livextv-backend.onrender.com/api/replays
  * Play: unwrap soccerfull → prefer native HLS when present, else Web Browser
  * embed (DoodStream-style), same sports path as Streamed / PPV.st.
+ *
+ * Site mirrors (banner on LiveXTV): try each when a host is down / gated.
  */
 
 import type { StreamItem, StreamPlaylistItem } from '../types'
 
+/** Preferred frontend origin (workers mirror). */
 export const LIVEXTV_ORIGIN = 'https://livextv.hybrows.workers.dev'
+
+/**
+ * LiveXTV frontend mirrors from the site banner + known alts.
+ * First entry is preferred; the rest are fallbacks for watch pages / Referer.
+ */
+export const LIVEXTV_MIRRORS: readonly string[] = [
+  'https://livextv.hybrows.workers.dev',
+  'https://livextv.pro',
+  'https://livextv.live',
+  'https://livextv.com',
+]
+
 export const LIVEXTV_API_ORIGIN = 'https://livextv-backend.onrender.com/api'
 export const LIVEXTV_REPLAY_ID_PREFIX = 'livextv-replay-'
 
 /** Keep the Replay shelf recent — ~3 days of completed matches. */
 export const LIVEXTV_REPLAY_MAX_AGE_MS = 3 * 24 * 60 * 60 * 1000
 
+function normalizeOrigin(raw: string): string {
+  return String(raw || '')
+    .trim()
+    .replace(/\/+$/, '')
+    .toLowerCase()
+}
+
+export function livextvMirrorOrigins(): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const raw of [LIVEXTV_ORIGIN, ...LIVEXTV_MIRRORS]) {
+    const origin = normalizeOrigin(raw)
+    if (!origin || seen.has(origin)) continue
+    seen.add(origin)
+    out.push(origin)
+  }
+  return out
+}
+
+export function isLivextvFrontendHost(hostname: string): boolean {
+  const host = hostname.replace(/^www\./, '').toLowerCase()
+  if (host === 'livextv.hybrows.workers.dev') return true
+  if (host === 'livextv.com' || host.endsWith('.livextv.com')) return true
+  if (host === 'livextv.pro' || host.endsWith('.livextv.pro')) return true
+  if (host === 'livextv.live' || host.endsWith('.livextv.live')) return true
+  return /(?:^|\.)livextv\./i.test(host)
+}
+
+/** Rewrite a LiveXTV URL onto another mirror, preserving path/query/hash. */
+export function rewriteLivextvMirrorUrl(url: string, mirrorOrigin: string): string | null {
+  try {
+    const parsed = new URL(url)
+    if (!isLivextvFrontendHost(parsed.hostname)) return null
+    const base = new URL(normalizeOrigin(mirrorOrigin) + '/')
+    parsed.protocol = base.protocol
+    parsed.host = base.host
+    return parsed.toString()
+  } catch {
+    return null
+  }
+}
+
+/** All mirror variants of a LiveXTV URL (preferred first). */
+export function expandLivextvMirrorUrls(url: string): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  const push = (raw: string) => {
+    const trimmed = String(raw || '').trim()
+    if (!trimmed || seen.has(trimmed)) return
+    seen.add(trimmed)
+    out.push(trimmed)
+  }
+  push(url)
+  try {
+    if (!isLivextvFrontendHost(new URL(url).hostname)) return out
+  } catch {
+    return out
+  }
+  for (const origin of livextvMirrorOrigins()) {
+    const rewritten = rewriteLivextvMirrorUrl(url, origin)
+    if (rewritten) push(rewritten)
+  }
+  return out
+}
+
+function livextvWatchPageUrl(replayId: string, origin = LIVEXTV_ORIGIN): string {
+  return `${normalizeOrigin(origin)}/replays/watch/${encodeURIComponent(replayId)}`
+}
+
+function livextvReplayIdFromItem(
+  item: Pick<StreamItem, 'id' | 'detailUrl'>,
+): string | null {
+  const id = String(item.id || '')
+  if (id.startsWith(LIVEXTV_REPLAY_ID_PREFIX)) {
+    return id.slice(LIVEXTV_REPLAY_ID_PREFIX.length) || null
+  }
+  try {
+    const path = item.detailUrl ? new URL(item.detailUrl).pathname : ''
+    const m = path.match(/\/replays\/watch\/([^/?#]+)/i)
+    if (m?.[1]) return decodeURIComponent(m[1])
+  } catch {
+    /* ignore */
+  }
+  return null
+}
 export interface LivextvReplayServer {
   name?: string
   type?: string
@@ -58,9 +158,7 @@ export function isLivextvReplayCatalogItem(item: {
     for (const raw of [item.url, item.detailUrl]) {
       if (!raw) continue
       const host = new URL(raw).hostname.replace(/^www\./, '').toLowerCase()
-      if (host === 'livextv.hybrows.workers.dev') return true
-      if (host === 'livextv.com' || host.endsWith('.livextv.com')) return true
-      if (host === 'livextv.pro' || host.endsWith('.livextv.pro')) return true
+      if (isLivextvFrontendHost(host)) return true
     }
   } catch {
     /* ignore */
@@ -248,38 +346,46 @@ async function fetchJson<T>(
 ): Promise<{ ok: true; data: T } | { ok: false; error: string }> {
   const url = path.startsWith('http') ? path : `${LIVEXTV_API_ORIGIN}${path}`
   const { nativeFetchJson, isNativeHttpPlatform } = await import('./nativeHttp')
+  const mirrors = livextvMirrorOrigins()
+  let lastError = 'LiveXTV replays unavailable'
 
   // Desktop Electron + Android CapacitorHttp (3MB+ JSON fails CORS/plain fetch on Android).
-  if (window.signalDesktop?.fetchJsonGet || isNativeHttpPlatform()) {
-    const result = await nativeFetchJson<T>(url, {
-      referer: `${LIVEXTV_ORIGIN}/replays`,
-      headers: {
-        Accept: 'application/json',
-        Origin: LIVEXTV_ORIGIN,
-      },
-    })
-    if (!result.ok || result.data == null) {
-      return { ok: false, error: result.error || 'LiveXTV replays unavailable' }
+  // Rotate Origin/Referer across mirrors when one frontend is gated.
+  for (const origin of mirrors) {
+    if (window.signalDesktop?.fetchJsonGet || isNativeHttpPlatform()) {
+      const result = await nativeFetchJson<T>(url, {
+        referer: `${origin}/replays`,
+        headers: {
+          Accept: 'application/json',
+          Origin: origin,
+        },
+      })
+      if (result.ok && result.data != null) {
+        return { ok: true, data: result.data }
+      }
+      lastError = result.error || lastError
+      continue
     }
-    return { ok: true, data: result.data }
+
+    try {
+      const res = await fetch(url, {
+        headers: {
+          Accept: 'application/json',
+          Referer: `${origin}/replays`,
+          Origin: origin,
+        },
+      })
+      if (!res.ok) {
+        lastError = `HTTP ${res.status}`
+        continue
+      }
+      return { ok: true, data: (await res.json()) as T }
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : 'Network error'
+    }
   }
 
-  try {
-    const res = await fetch(url, {
-      headers: {
-        Accept: 'application/json',
-        Referer: `${LIVEXTV_ORIGIN}/replays`,
-        Origin: LIVEXTV_ORIGIN,
-      },
-    })
-    if (!res.ok) return { ok: false, error: `HTTP ${res.status}` }
-    return { ok: true, data: (await res.json()) as T }
-  } catch (err) {
-    return {
-      ok: false,
-      error: err instanceof Error ? err.message : 'Network error',
-    }
-  }
+  return { ok: false, error: lastError }
 }
 
 /** Fetch + filter Replay shelf (football / boxing / cricket / motorsport, ~3 days). */
@@ -309,11 +415,13 @@ export type LivextvReplayPlayResult =
 
 async function fetchReplayHtml(
   url: string,
+  refererOrigin = LIVEXTV_ORIGIN,
 ): Promise<{ ok: boolean; content: string; status?: number }> {
+  const referer = `${normalizeOrigin(refererOrigin)}/replays`
   if (window.signalDesktop?.fetchHtml) {
     const result = await window.signalDesktop.fetchHtml(url, {
       quiet: true,
-      referer: `${LIVEXTV_ORIGIN}/replays`,
+      referer,
     })
     return {
       ok: Boolean(result.ok && result.content),
@@ -329,7 +437,7 @@ async function fetchReplayHtml(
         quiet: true,
         headers: {
           Accept: 'text/html',
-          Referer: `${LIVEXTV_ORIGIN}/replays`,
+          Referer: referer,
         },
       })
       return {
@@ -345,7 +453,7 @@ async function fetchReplayHtml(
     const res = await fetch(url, {
       headers: {
         Accept: 'text/html',
-        Referer: `${LIVEXTV_ORIGIN}/replays`,
+        Referer: referer,
       },
     })
     const content = await res.text()
@@ -353,6 +461,38 @@ async function fetchReplayHtml(
   } catch {
     return { ok: false, content: '' }
   }
+}
+
+/** Soccerfull often keys off the LiveXTV Referer — rotate mirrors if one is gated. */
+async function fetchSoccerfullWithMirrorReferers(
+  url: string,
+): Promise<{ ok: boolean; content: string; status?: number }> {
+  let best: { ok: boolean; content: string; status?: number } = {
+    ok: false,
+    content: '',
+  }
+  for (const origin of livextvMirrorOrigins()) {
+    const page = await fetchReplayHtml(url, origin)
+    if (page.ok && page.content && !looksLikeNginx404(page.content, page.status)) {
+      return page
+    }
+    if ((page.content?.length || 0) > (best.content?.length || 0)) {
+      best = page
+    }
+  }
+  return best
+}
+
+async function pickReachableLivextvWatchPage(urls: string[]): Promise<string | null> {
+  for (const url of urls) {
+    const page = await fetchReplayHtml(url)
+    // SPA shells are small HTML that still boot the watch UI — accept 200 HTML.
+    if (page.ok && page.content && !looksLikeNginx404(page.content, page.status)) {
+      return url
+    }
+  }
+  // If probes fail (CORS / offline probe), still hand the preferred URL to the WebView.
+  return urls[0] || null
 }
 
 function looksLikeNginx404(html: string, status?: number): boolean {
@@ -396,6 +536,7 @@ async function embedLooksPlayable(url: string): Promise<boolean> {
 /**
  * Unwrap a catalog replay into a playable HLS or embed URL.
  * Tries each part until one resolves (soccerfull pages often wrap DoodStream / Videas).
+ * LiveXTV watch-page fallbacks rotate across site mirrors (pro / workers / live).
  */
 export async function resolveLivextvReplayPlay(
   item: Pick<StreamItem, 'url' | 'detailUrl' | 'playlist' | 'id'>,
@@ -435,9 +576,9 @@ export async function resolveLivextvReplayPlay(
       /* ignore */
     }
 
-    // Soccerfull wrapper — unwrap nested player / HLS.
+    // Soccerfull wrapper — unwrap nested player / HLS (Referer via each LiveXTV mirror).
     if (/soccerfull\.net\/play\//i.test(candidate)) {
-      const page = await fetchReplayHtml(candidate)
+      const page = await fetchSoccerfullWithMirrorReferers(candidate)
       if (looksLikeNginx404(page.content, page.status) || !page.ok) {
         continue
       }
@@ -456,9 +597,27 @@ export async function resolveLivextvReplayPlay(
     }
   }
 
-  // Last resort: LiveXTV watch page (has their own multi-part UI).
+  // Last resort: LiveXTV watch page — try every site mirror before giving up.
+  const replayId = livextvReplayIdFromItem(item)
+  const watchCandidates: string[] = []
   if (item.detailUrl && /livextv/i.test(item.detailUrl)) {
-    return { ok: true, mode: 'embed', url: item.detailUrl }
+    watchCandidates.push(...expandLivextvMirrorUrls(item.detailUrl))
+  }
+  if (replayId) {
+    for (const origin of livextvMirrorOrigins()) {
+      watchCandidates.push(livextvWatchPageUrl(replayId, origin))
+    }
+  }
+  const uniqueWatch: string[] = []
+  const seenWatch = new Set<string>()
+  for (const url of watchCandidates) {
+    if (!url || seenWatch.has(url)) continue
+    seenWatch.add(url)
+    uniqueWatch.push(url)
+  }
+  const watch = await pickReachableLivextvWatchPage(uniqueWatch)
+  if (watch) {
+    return { ok: true, mode: 'embed', url: watch }
   }
 
   return { ok: false, error: 'No working replay source for this match' }
