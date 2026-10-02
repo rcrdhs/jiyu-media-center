@@ -81,6 +81,10 @@ import {
 } from '../lib/streamed'
 import { fetchPpvStLiveCatalog } from '../lib/ppvSt'
 import { fetchLivextvReplayCatalog, isLivextvReplayCatalogItem } from '../lib/livextvReplays'
+import {
+  fetchFullmatchShowsReplayCatalog,
+  isFullmatchShowsCatalogItem,
+} from '../lib/fullmatchShows'
 
 function setSyncProgressMessage(message: string, percent: number | null): void {
   // Keep the frozen "Paused · …" line — don't advance counts while parked.
@@ -138,6 +142,7 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
   const [streamedItems, setStreamedItems] = useState<StreamItem[]>([])
   const [ppvStItems, setPpvStItems] = useState<StreamItem[]>([])
   const [livextvReplayItems, setLivextvReplayItems] = useState<StreamItem[]>([])
+  const [fullmatchShowsItems, setFullmatchShowsItems] = useState<StreamItem[]>([])
   const [streamedSports, setStreamedSports] = useState<StreamedSport[]>([])
   const [englishOnly, setEnglishOnlyState] = useState(() => getEnglishOnlyPref())
   const [hideDuplicates, setHideDuplicatesState] = useState(() => getHideDuplicatesPref())
@@ -313,11 +318,28 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
       sourceKind: item.sourceKind ?? ('builtin' as const),
       transport: item.transport ?? ('direct' as const),
     }))
-    const merged = [...builtins, ...streamedItems, ...ppvStItems, ...livextvReplayItems, ...torrentItems, ...imported]
+    const merged = [
+      ...builtins,
+      ...streamedItems,
+      ...ppvStItems,
+      ...livextvReplayItems,
+      ...fullmatchShowsItems,
+      ...torrentItems,
+      ...imported,
+    ]
     const deduped = hideDuplicates ? dedupeStreams(merged) : merged
     if (!kidsMode) return deduped
     return deduped.filter((item) => item.category === 'kids')
-  }, [imported, torrentItems, streamedItems, ppvStItems, livextvReplayItems, hideDuplicates, kidsMode])
+  }, [
+    imported,
+    torrentItems,
+    streamedItems,
+    ppvStItems,
+    livextvReplayItems,
+    fullmatchShowsItems,
+    hideDuplicates,
+    kidsMode,
+  ])
 
   // Precompute TV Series shelf once — switching Movies → Series was re-filtering
   // and re-sorting ~20k YMovies rows on every visit.
@@ -340,7 +362,10 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
       if (!englishOnly || !shouldApplyEnglishFilter(id)) return base
       // Match titles / leagues aren't "English streams" — don't hide LiveXTV Replay.
       return base.filter(
-        (item) => isLivextvReplayCatalogItem(item) || isLikelyEnglish(item),
+        (item) =>
+          isLivextvReplayCatalogItem(item) ||
+          isFullmatchShowsCatalogItem(item) ||
+          isLikelyEnglish(item),
       )
     },
     [items, englishOnly, torrentSourceRevision, seriesShelfItems],
@@ -868,17 +893,20 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
     }
   }, [ready, kidsMode])
 
-  // LiveXTV full-match replays — heavier payload; refresh less often than live.
+  // LiveXTV + FullMatchShows full-match replays — heavier payload; refresh less often than live.
   useEffect(() => {
     if (!ready || kidsMode) return
     let cancelled = false
     let failStreak = 0
     let retryTimer: number | undefined
     const refresh = async () => {
-      const result = await fetchLivextvReplayCatalog()
+      const [livextv, fms] = await Promise.all([
+        fetchLivextvReplayCatalog(),
+        fetchFullmatchShowsReplayCatalog(),
+      ])
       if (cancelled) return
-      if (!result.ok) {
-        console.warn('LiveXTV replays unavailable:', result.error)
+      if (!livextv.ok && !fms.ok) {
+        console.warn('Sports replays unavailable:', livextv.error || fms.error)
         failStreak += 1
         const delay = Math.min(45_000, 3_000 * failStreak)
         window.clearTimeout(retryTimer)
@@ -889,7 +917,10 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
       }
       failStreak = 0
       startTransition(() => {
-        setLivextvReplayItems(result.items)
+        if (livextv.ok) setLivextvReplayItems(livextv.items)
+        if (fms.ok) setFullmatchShowsItems(fms.items)
+        else if (!fms.ok) console.warn('FullMatchShows replays unavailable:', fms.error)
+        if (!livextv.ok) console.warn('LiveXTV replays unavailable:', livextv.error)
       })
     }
     void refresh()

@@ -12,6 +12,11 @@ export const APP_VERSION_LABEL = `v${APP_VERSION}`
 /** Short milestone log — newest first — so progress is visible in-app. */
 export const APP_RELEASES: ReadonlyArray<{ version: string; summary: string }> = [
   {
+    version: '0.3.37',
+    summary:
+      'Sports Replay: add FullMatchShows.com football VODs (Playmate/Playmogo) alongside LiveXTV',
+  },
+  {
     version: '0.3.36',
     summary:
       'Sports Replay: fall back across LiveXTV mirrors (hybrows / .pro / .live) for catalog Referer, soccerfull unwrap, and watch pages',

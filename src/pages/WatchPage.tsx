@@ -40,6 +40,10 @@ import {
   isLivextvReplayCatalogItem,
   resolveLivextvReplayPlay,
 } from '../lib/livextvReplays'
+import {
+  isFullmatchShowsCatalogItem,
+  resolveFullmatchShowsPlay,
+} from '../lib/fullmatchShows'
 import { isWebBrowserOnlyUrl, isYouTubeUrl } from '../lib/webBrowser'
 import { isVimeoLiveEventUrl, resolveVimeoLiveHls } from '../lib/vimeoLive'
 import { resolveYouTubeLivePlay } from '../lib/youtubeLive'
@@ -257,6 +261,7 @@ export function WatchPage() {
         if (guard.mode === 'multi' || guard.awaitingAdd) return
         if (
           isLivextvReplayCatalogItem(item!) ||
+          isFullmatchShowsCatalogItem(item!) ||
           isStreamedCatalogItem(item!) ||
           (isYouTubeUrl(item!.url) &&
             (item!.tags?.includes('local') || item!.id?.startsWith('local-')))
@@ -416,6 +421,55 @@ export function WatchPage() {
         const keepOthers =
           guard.awaitingAdd || guard.slotsLen > 1 || guard.mode === 'multi'
         if (!keepOthers) clearWebSurfacesForWatch()
+        play(webItem, {
+          forceFull: true,
+          replace: !keepOthers,
+          returnTo: returnTo || '/section/sports',
+        })
+        if (keepOthers) {
+          navigate('/multiview', { replace: true })
+          return
+        }
+        navigate(`/web?url=${encodeURIComponent(resolved.url)}`, {
+          replace: true,
+          state: {
+            from: returnTo || '/section/sports',
+            playerMode: 'embed',
+            pipOnBack: true,
+            continueWatch: {
+              id: item!.id,
+              title: item!.title,
+              poster: item!.poster,
+              category: item!.category,
+              playlistIndex: 0,
+              detailUrl: item!.detailUrl || item!.url,
+              playUrl: resolved.url,
+              transport: item!.transport,
+              sourceKind: item!.sourceKind,
+              source: item!.source,
+            },
+          },
+        })
+        return
+      }
+
+      // FullMatchShows football replays → playmate / playmogo embeds.
+      if (isFullmatchShowsCatalogItem(item!)) {
+        const resolved = await resolveFullmatchShowsPlay(item!)
+        if (cancelled) return
+        if (!resolved.ok) {
+          setError(resolved.error || 'Could not load replay')
+          return
+        }
+        const guard = multiviewGuardRef.current
+        const keepOthers =
+          guard.awaitingAdd || guard.slotsLen > 1 || guard.mode === 'multi'
+        if (!keepOthers) clearWebSurfacesForWatch()
+        const webItem = {
+          ...item!,
+          url: resolved.url,
+          tags: [...new Set([...(item!.tags ?? []), 'web-embed', 'replay'])],
+        }
         play(webItem, {
           forceFull: true,
           replace: !keepOthers,

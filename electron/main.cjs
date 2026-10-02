@@ -936,6 +936,12 @@ function isPlayerEmbedHost(url) {
       host.endsWith('.soccerfull.net') ||
       host === 'livextv.hybrows.workers.dev' ||
       host.includes('livextv') ||
+      host === 'fullmatchshows.com' ||
+      host.endsWith('.fullmatchshows.com') ||
+      host === 'playmate.to' ||
+      host.endsWith('.playmate.to') ||
+      host === 'playmogo.com' ||
+      host.endsWith('.playmogo.com') ||
       // DoodStream-style VOD mirrors used by LiveXTV replays.
       /^\/[de]\/[a-z0-9]{6,}/i.test(path) ||
       host.includes('netmirror') ||
@@ -1170,6 +1176,9 @@ function isReplayAdSensitiveUrl(url) {
     if (host === 'soccerfull.net' || host.endsWith('.soccerfull.net')) return true
     if (host.includes('livextv')) return true
     if (host === 'footreplays.com' || host.endsWith('.footreplays.com')) return true
+    if (host === 'fullmatchshows.com' || host.endsWith('.fullmatchshows.com')) return true
+    if (host === 'playmate.to' || host.endsWith('.playmate.to')) return true
+    if (host === 'playmogo.com' || host.endsWith('.playmogo.com')) return true
     // DoodStream mirrors: /d/{id} or /e/{id} short paths on rotating hosts.
     if (/^\/[de]\/[a-z0-9]{6,}/i.test(parsed.pathname || '')) return true
     return false
@@ -1291,6 +1300,9 @@ const BROWSER_AD_SHIELD_SCRIPT = `(() => {
       /(^|\\.)soccerfull\\.net$/i.test(host) ||
       /livextv/i.test(host) ||
       /(^|\\.)footreplays\\.com$/i.test(host) ||
+      /(^|\\.)fullmatchshows\\.com$/i.test(host) ||
+      /(^|\\.)playmate\\.to$/i.test(host) ||
+      /(^|\\.)playmogo\\.com$/i.test(host) ||
       /^\\/[de]\\/[a-z0-9]{6,}/i.test(path);
     // Always re-assert — early-return must not skip FS block on later injects.
     try {
@@ -2496,6 +2508,18 @@ function httpReferrerForBrowserUrl(targetUrl) {
     }
     if (host === 'soccerfull.net' || host.endsWith('.soccerfull.net')) {
       return 'https://livextv.hybrows.workers.dev/'
+    }
+    if (host === 'playmate.to' || host.endsWith('.playmate.to')) {
+      return 'https://fullmatchshows.com/'
+    }
+    if (host === 'playmogo.com' || host.endsWith('.playmogo.com')) {
+      return 'https://fullmatchshows.com/'
+    }
+    if (
+      host === 'fullmatchshows.com' ||
+      host.endsWith('.fullmatchshows.com')
+    ) {
+      return 'https://fullmatchshows.com/'
     }
     if (
       host === 'livextv.hybrows.workers.dev' ||

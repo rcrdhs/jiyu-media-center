@@ -7,7 +7,7 @@ import {
   readFavoriteTeams,
   type FavoriteTeam,
 } from './favoriteTeams'
-import { isLivextvReplayCatalogItem } from './livextvReplays'
+import { isSportsReplayCatalogItem } from './fullmatchShows'
 
 const SENT_KEY = 'jiyu.sports.favorite-notified'
 const CHANNEL_ID = 'favorite-matches'
@@ -233,7 +233,7 @@ function matchedTeam(item: StreamItem, teams: FavoriteTeam[]): FavoriteTeam | un
 }
 
 function isReplayItem(item: StreamItem): boolean {
-  return isLivextvReplayCatalogItem(item) || Boolean(item.tags?.includes('replay'))
+  return isSportsReplayCatalogItem(item) || Boolean(item.tags?.includes('replay'))
 }
 
 /** Notify once before kickoff and once when a favorite match is live (not for replays). */

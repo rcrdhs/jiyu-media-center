@@ -56,10 +56,10 @@ import {
 } from '../lib/streamed'
 import { isPpvStCatalogItem, ppvStSportChipsFromItems } from '../lib/ppvSt'
 import {
-  isLivextvReplayCatalogItem,
-  livextvReplaySportChipsFromItems,
-  livextvReplaySportId,
-} from '../lib/livextvReplays'
+  isSportsReplayCatalogItem,
+  sportsReplaySportChipsFromItems,
+  sportsReplaySportId,
+} from '../lib/fullmatchShows'
 import { groupFootballByLeague } from '../lib/sportsLeagues'
 import {
   readSelectedSportsFilter,
@@ -634,8 +634,8 @@ export function SectionPage() {
     if (categoryId === 'sports') {
       const sportOk = (item: StreamItem) => {
         if (sportsSportFilter === 'all') return true
-        if (isLivextvReplayCatalogItem(item)) {
-          return livextvReplaySportId(item) === sportsSportFilter
+        if (isSportsReplayCatalogItem(item)) {
+          return sportsReplaySportId(item) === sportsSportFilter
         }
         if (isStreamedCatalogItem(item)) {
           return streamedItemSportId(item) === sportsSportFilter
@@ -666,7 +666,7 @@ export function SectionPage() {
       )
       const replay = prepareShelfList(
         items.filter(
-          (item) => isLivextvReplayCatalogItem(item) && sportOk(item) && match(item),
+          (item) => isSportsReplayCatalogItem(item) && sportOk(item) && match(item),
         ),
         { ...shelfOpts, newestFirst: true, collapseEpisodes: false },
       )
@@ -676,7 +676,7 @@ export function SectionPage() {
             (item) =>
               !isStreamedCatalogItem(item) &&
               !isPpvStCatalogItem(item) &&
-              !isLivextvReplayCatalogItem(item) &&
+              !isSportsReplayCatalogItem(item) &&
               match(item),
           ),
           shelfOpts,
@@ -1058,7 +1058,7 @@ export function SectionPage() {
   const sportsFilterChips = useMemo(() => {
     if (categoryId !== 'sports') return []
     if (shelfTab === 'replay') {
-      return livextvReplaySportChipsFromItems(items)
+      return sportsReplaySportChipsFromItems(items)
     }
     const byId = new Map<string, string>()
     const liveSportIds = new Set(

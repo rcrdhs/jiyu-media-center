@@ -1,9 +1,7 @@
 import type { StreamItem } from '../types'
 import { isFootballSportsItem } from './sportsLeagues'
-import {
-  isLivextvReplayCatalogItem,
-  LIVEXTV_REPLAY_MAX_AGE_MS,
-} from './livextvReplays'
+import { LIVEXTV_REPLAY_MAX_AGE_MS } from './livextvReplays'
+import { isSportsReplayCatalogItem } from './fullmatchShows'
 
 export type FavoriteSport = 'football' | 'basketball' | 'cricket' | 'american-football'
 
@@ -210,7 +208,7 @@ function replayAgeMs(item: StreamItem, now: number): number {
 }
 
 function isFavoriteReplay(item: StreamItem): boolean {
-  return isLivextvReplayCatalogItem(item) || Boolean(item.tags?.includes('replay'))
+  return isSportsReplayCatalogItem(item) || Boolean(item.tags?.includes('replay'))
 }
 
 /** Live, upcoming, and recent replays for saved teams — live first, then upcoming, then replay. */

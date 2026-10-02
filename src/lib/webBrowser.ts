@@ -121,6 +121,9 @@ export function isWebBrowserOnlyUrl(url: string): boolean {
     if (host === 'livextv.live' || host.endsWith('.livextv.live')) return true
     if (host.includes('livextv')) return true
     if (host === 'footreplays.com' || host.endsWith('.footreplays.com')) return true
+    if (host === 'fullmatchshows.com' || host.endsWith('.fullmatchshows.com')) return true
+    if (host === 'playmate.to' || host.endsWith('.playmate.to')) return true
+    if (host === 'playmogo.com' || host.endsWith('.playmogo.com')) return true
     if (host === 'ok.ru' || host.endsWith('.ok.ru')) return true
     // DoodStream-style rotating hosts: /e/{id} or /d/{id}
     if (/^\/[de]\/[a-z0-9]{6,}/i.test(u.pathname || '')) return true
@@ -143,6 +146,9 @@ export function isSportsOrReplayEmbedUrl(url: string): boolean {
     if (host === 'soccerfull.net' || host.endsWith('.soccerfull.net')) return true
     if (host.includes('livextv')) return true
     if (host === 'footreplays.com' || host.endsWith('.footreplays.com')) return true
+    if (host === 'fullmatchshows.com' || host.endsWith('.fullmatchshows.com')) return true
+    if (host === 'playmate.to' || host.endsWith('.playmate.to')) return true
+    if (host === 'playmogo.com' || host.endsWith('.playmogo.com')) return true
     if (/^\/[de]\/[a-z0-9]{6,}/i.test(parsed.pathname || '')) return true
   } catch {
     /* ignore */
@@ -159,8 +165,9 @@ export function isWebEmbedPlaybackItem(item: {
 }): boolean {
   if (item.tags?.includes('web-embed')) return true
   if (item.tags?.includes('replay') && item.tags?.includes('livextv')) return true
+  if (item.tags?.includes('replay') && item.tags?.includes('fullmatchshows')) return true
   if (item.streamedMatchId) return true
-  if (/^(streamed|ppv\.st|livextv)$/i.test(String(item.source || ''))) return true
+  if (/^(streamed|ppv\.st|livextv|fullmatchshows)$/i.test(String(item.source || ''))) return true
   return Boolean(item.url && isWebBrowserOnlyUrl(item.url))
 }
 
