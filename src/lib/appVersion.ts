@@ -12,6 +12,11 @@ export const APP_VERSION_LABEL = `v${APP_VERSION}`
 /** Short milestone log — newest first — so progress is visible in-app. */
 export const APP_RELEASES: ReadonlyArray<{ version: string; summary: string }> = [
   {
+    version: '0.3.35',
+    summary:
+      'Sports/live: deeper HLS buffers, disable edge-chasing MPEG-TS stash-off; Android Auto profile no longer self-classifies as Lite',
+  },
+  {
     version: '0.3.34',
     summary:
       'Android PiP: keep softsubs pinned to the bottom of the player (vh clamp no longer parks cues mid-frame)',

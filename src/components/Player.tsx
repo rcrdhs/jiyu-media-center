@@ -3827,10 +3827,17 @@ export function Player({
         setEngineLabel('hls')
         setStatus('Loading HLS…')
         const perf = getPerformanceKnobs()
+        const isLiveSports =
+          item.category === 'sports' ||
+          item.sourceKind === 'iptv' ||
+          item.tags?.some((t) =>
+            /^(iptv|local|live|live-now|ppv\.st|streamed|always-live)$/i.test(t),
+          )
         const isIptv =
           item.sourceKind === 'iptv' ||
           item.tags?.some((t) => /^iptv$/i.test(t)) ||
           item.tags?.some((t) => /^local$/i.test(t))
+        const liveMode = isLiveSports || isIptv
         const playbackHeaders = {
           url: activePlaylistItem.url || item.url,
           userAgent: item.httpUserAgent,
@@ -3841,13 +3848,26 @@ export function Player({
         }
         hls = new Hls({
           enableWorker: perf.enableMediaWorkers,
-          // Low-latency mode fights unstable public IPTV feeds (sports M3U).
-          lowLatencyMode: isIptv ? false : perf.hlsLowLatency,
-          maxBufferLength: isIptv ? Math.max(perf.hlsMaxBufferLength, 30) : perf.hlsMaxBufferLength,
-          liveSyncDurationCount: isIptv ? 3 : undefined,
-          fragLoadingMaxRetry: 6,
-          manifestLoadingMaxRetry: 5,
-          levelLoadingMaxRetry: 5,
+          // Low-latency mode fights unstable public IPTV / sports feeds.
+          lowLatencyMode: liveMode ? perf.liveHlsLowLatency : perf.hlsLowLatency,
+          maxBufferLength: liveMode
+            ? Math.max(perf.liveHlsMaxBufferLength, perf.hlsMaxBufferLength, 36)
+            : perf.hlsMaxBufferLength,
+          maxMaxBufferLength: liveMode
+            ? Math.max(perf.liveHlsMaxBufferLength + 24, 72)
+            : undefined,
+          // Stay several segments behind the edge so jitter doesn't empty the buffer.
+          liveSyncDurationCount: liveMode ? perf.liveHlsSyncSegments : undefined,
+          liveMaxLatencyDurationCount: liveMode
+            ? Math.max(perf.liveHlsSyncSegments + 4, 10)
+            : undefined,
+          fragLoadingTimeOut: liveMode ? 20_000 : 15_000,
+          manifestLoadingTimeOut: liveMode ? 15_000 : 10_000,
+          levelLoadingTimeOut: liveMode ? 15_000 : 10_000,
+          fragLoadingMaxRetry: liveMode ? 8 : 6,
+          manifestLoadingMaxRetry: liveMode ? 6 : 5,
+          levelLoadingMaxRetry: liveMode ? 6 : 5,
+          fragLoadingRetryDelay: liveMode ? 800 : 1000,
           xhrSetup(xhr) {
             xhr.withCredentials = false
             const referrer = playbackHeaders.referrer
@@ -3885,7 +3905,7 @@ export function Player({
           Boolean(meta) &&
           !meta!.tried &&
           (isMovyStreamUrl(activePlaylistItem.url) || meta!.tmdbId.length > 0)
-        const hlsLoadBudgetMs = canAtlanticSoon ? 8_000 : isIptv ? 45_000 : 28_000
+        const hlsLoadBudgetMs = canAtlanticSoon ? 8_000 : liveMode ? 55_000 : 28_000
         const loadTimer = window.setTimeout(() => {
           if (settled || cancelled) return
           settled = true
@@ -3977,12 +3997,18 @@ export function Player({
         setEngineLabel('mpeg-ts')
         setStatus('Loading MPEG-TS…')
         let settled = false
+        const perf = getPerformanceKnobs()
+        // Stash absorbs jitter on public sports TS; latency chasing emptied the
+        // buffer and stalled while other apps on the same network kept playing.
         tsPlayer = mpegts.createPlayer(
           { type: 'mse', isLive: true, url: activePlaylistItem.url },
           {
-            enableWorker: getPerformanceKnobs().enableMediaWorkers,
-            enableStashBuffer: false,
-            liveBufferLatencyChasing: true,
+            enableWorker: perf.enableMediaWorkers,
+            enableStashBuffer: perf.mpegTsEnableStashBuffer,
+            stashInitialSize: perf.mpegTsStashInitialSize,
+            liveBufferLatencyChasing: perf.mpegTsLiveLatencyChasing,
+            liveBufferLatencyMaxLatency: perf.mpegTsLiveLatencyMaxLatency,
+            liveBufferLatencyMinRemain: Math.min(2, perf.mpegTsLiveLatencyMaxLatency / 3),
             autoCleanupSourceBuffer: true,
           },
         )

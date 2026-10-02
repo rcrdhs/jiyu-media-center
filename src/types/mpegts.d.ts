@@ -12,6 +12,8 @@ declare module 'mpegts.js' {
     enableStashBuffer?: boolean
     stashInitialSize?: number
     liveBufferLatencyChasing?: boolean
+    liveBufferLatencyMaxLatency?: number
+    liveBufferLatencyMinRemain?: number
     autoCleanupSourceBuffer?: boolean
   }
 

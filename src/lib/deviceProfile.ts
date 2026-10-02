@@ -27,6 +27,18 @@ export interface PerformanceKnobs {
   maxQuality: 720 | 1080 | 2160
   hlsMaxBufferLength: number
   hlsLowLatency: boolean
+  /**
+   * Live sports / IPTV HLS — keep farther behind the live edge than VOD.
+   * Public match feeds jitter; low-latency ABR is the usual stall source.
+   */
+  liveHlsMaxBufferLength: number
+  liveHlsSyncSegments: number
+  liveHlsLowLatency: boolean
+  /** MPEG-TS / FLV live (mpegts.js): stash absorbs jitter; chasing the edge removes it. */
+  mpegTsEnableStashBuffer: boolean
+  mpegTsStashInitialSize: number
+  mpegTsLiveLatencyChasing: boolean
+  mpegTsLiveLatencyMaxLatency: number
   enableMediaWorkers: boolean
   torrentMaxConns: number
   torrentPrefetchPieces: number
@@ -51,6 +63,13 @@ const CLASS_KNOBS: Record<DeviceClass, Omit<PerformanceKnobs, 'mode' | 'deviceCl
     maxQuality: 2160,
     hlsMaxBufferLength: 45,
     hlsLowLatency: true,
+    liveHlsMaxBufferLength: 60,
+    liveHlsSyncSegments: 5,
+    liveHlsLowLatency: false,
+    mpegTsEnableStashBuffer: true,
+    mpegTsStashInitialSize: 384 * 1024,
+    mpegTsLiveLatencyChasing: false,
+    mpegTsLiveLatencyMaxLatency: 8,
     enableMediaWorkers: true,
     torrentMaxConns: 100,
     torrentPrefetchPieces: 160,
@@ -66,8 +85,15 @@ const CLASS_KNOBS: Record<DeviceClass, Omit<PerformanceKnobs, 'mode' | 'deviceCl
   },
   balanced: {
     maxQuality: 1080,
-    hlsMaxBufferLength: 30,
-    hlsLowLatency: true,
+    hlsMaxBufferLength: 36,
+    hlsLowLatency: false,
+    liveHlsMaxBufferLength: 48,
+    liveHlsSyncSegments: 6,
+    liveHlsLowLatency: false,
+    mpegTsEnableStashBuffer: true,
+    mpegTsStashInitialSize: 512 * 1024,
+    mpegTsLiveLatencyChasing: false,
+    mpegTsLiveLatencyMaxLatency: 10,
     enableMediaWorkers: true,
     torrentMaxConns: 64,
     torrentPrefetchPieces: 120,
@@ -83,8 +109,16 @@ const CLASS_KNOBS: Record<DeviceClass, Omit<PerformanceKnobs, 'mode' | 'deviceCl
   },
   lite: {
     maxQuality: 720,
-    hlsMaxBufferLength: 18,
+    hlsMaxBufferLength: 24,
     hlsLowLatency: false,
+    // Still hold enough live media — 18s was stalling sports on mid phones.
+    liveHlsMaxBufferLength: 40,
+    liveHlsSyncSegments: 7,
+    liveHlsLowLatency: false,
+    mpegTsEnableStashBuffer: true,
+    mpegTsStashInitialSize: 768 * 1024,
+    mpegTsLiveLatencyChasing: false,
+    mpegTsLiveLatencyMaxLatency: 12,
     enableMediaWorkers: false,
     torrentMaxConns: 32,
     torrentPrefetchPieces: 64,
@@ -138,6 +172,7 @@ export function performanceModeLabel(mode: PerformanceMode): string {
 export function classifyDevice(caps: DeviceCapabilities): DeviceClass {
   const cores = Math.max(1, caps.cpuCount || 1)
   const mem = Math.max(0, caps.totalMemGB || 0)
+  const android = caps.platform === 'android'
   let score = 0
   if (cores >= 12 || (cores >= 8 && mem >= 16)) score += 3
   else if (cores >= 6 || (cores >= 4 && mem >= 8)) score += 2
@@ -148,10 +183,15 @@ export function classifyDevice(caps: DeviceCapabilities): DeviceClass {
   else if (mem > 0 && mem < 6) score -= 1
 
   if (caps.gpuAccelerated === false) score -= 1
-  if (caps.onBattery === true) score -= 1
+  // Laptops on battery: gentle; phones are always "on battery" so ignore that flag on Android.
+  if (caps.onBattery === true && !android) score -= 1
 
   // Very small machines (tablets / underpowered sticks).
   if (cores <= 2 || (mem > 0 && mem < 4)) return 'lite'
+
+  // Mid Android phones report capped cores / opaque RAM — prefer balanced over lite
+  // so live sports keep a usable HLS/TS buffer floor.
+  if (android && score <= 2 && cores >= 4) return 'balanced'
 
   if (score >= 5) return 'high'
   if (score <= 2) return 'lite'
@@ -161,7 +201,7 @@ export function classifyDevice(caps: DeviceCapabilities): DeviceClass {
 function browserCapabilities(): DeviceCapabilities {
   const nav = navigator as Navigator & {
     deviceMemory?: number
-    connection?: { saveData?: boolean }
+    connection?: { saveData?: boolean; effectiveType?: string }
   }
   const cpuCount = Math.max(1, nav.hardwareConcurrency || 4)
   const totalMemGB =
@@ -175,13 +215,16 @@ function browserCapabilities(): DeviceCapabilities {
   } catch {
     /* ignore */
   }
+  const android = platform === 'android'
   return {
     platform,
     arch: 'unknown',
-    cpuCount: platform === 'android' ? Math.min(cpuCount, 4) : cpuCount,
-    totalMemGB: platform === 'android' && totalMemGB <= 0 ? 4 : totalMemGB,
+    // Keep enough cores visible for classification; old min(4) forced lite on phones.
+    cpuCount: android ? Math.min(cpuCount, 8) : cpuCount,
+    // Unknown Android RAM: assume mid-range so we don't self-classify as lite.
+    totalMemGB: android && totalMemGB <= 0 ? 8 : totalMemGB,
     freeMemGB: 0,
-    onBattery: platform === 'android' ? true : saveData ? true : null,
+    onBattery: android ? null : saveData ? true : null,
     gpuAccelerated: null,
     source: totalMemGB > 0 || nav.hardwareConcurrency ? 'browser' : 'fallback',
   }

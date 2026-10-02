@@ -6,6 +6,7 @@ import { isYouTubeUrl } from '../lib/webBrowser'
 import { resolveYouTubeLivePlay } from '../lib/youtubeLive'
 import { isVimeoLiveEventUrl, resolveVimeoLiveHls } from '../lib/vimeoLive'
 import { androidHlsConfig } from '../lib/hlsAndroid'
+import { getPerformanceKnobs } from '../lib/deviceProfile'
 
 interface LocalChannelLiveProps {
   item: StreamItem
@@ -97,13 +98,19 @@ export function LocalChannelLive({ item }: LocalChannelLiveProps) {
       destroyHls()
 
       if (Hls.isSupported()) {
+        const perf = getPerformanceKnobs()
         const hls = new Hls({
-          enableWorker: true,
-          lowLatencyMode: true,
-          maxBufferLength: 20,
-          fragLoadingMaxRetry: 4,
-          manifestLoadingMaxRetry: 4,
-          levelLoadingMaxRetry: 4,
+          enableWorker: perf.enableMediaWorkers,
+          // Local / live shelf previews — same anti-stall knobs as sports IPTV.
+          lowLatencyMode: perf.liveHlsLowLatency,
+          maxBufferLength: Math.max(perf.liveHlsMaxBufferLength, 36),
+          maxMaxBufferLength: Math.max(perf.liveHlsMaxBufferLength + 24, 72),
+          liveSyncDurationCount: perf.liveHlsSyncSegments,
+          liveMaxLatencyDurationCount: Math.max(perf.liveHlsSyncSegments + 4, 10),
+          fragLoadingTimeOut: 20_000,
+          fragLoadingMaxRetry: 8,
+          manifestLoadingMaxRetry: 6,
+          levelLoadingMaxRetry: 6,
           xhrSetup(xhr) {
             xhr.withCredentials = false
           },
