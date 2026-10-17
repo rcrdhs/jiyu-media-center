@@ -7,6 +7,7 @@
 
 import type { TorrentPageLink } from './torrents'
 import { tmdbTvDetailUrl } from './tmdbTv'
+import { genresFromTmdbIds } from './genres'
 
 export const ZENOX_SOURCE_ID = 'builtin-zenox-animation'
 export const ZENOX_ORIGIN = 'https://zenox.lol'
@@ -243,6 +244,7 @@ export async function fetchZenoxAnimationCatalogLinks(
       releasedAt: Number.isFinite(rankReleasedAt) ? rankReleasedAt : undefined,
       rivestreamTmdbId: id,
       ...(originalLanguage ? { originalLanguage } : {}),
+      ...(show.genreIds?.length ? { genres: genresFromTmdbIds(show.genreIds) } : {}),
     })
   }
 

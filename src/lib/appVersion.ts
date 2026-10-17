@@ -12,6 +12,11 @@ export const APP_VERSION_LABEL = `v${APP_VERSION}`
 /** Short milestone log — newest first — so progress is visible in-app. */
 export const APP_RELEASES: ReadonlyArray<{ version: string; summary: string }> = [
   {
+    version: '0.3.74',
+    summary:
+      'Smarter Recommended for you: picks by genre, no duplicate titles across sources, a mixed Movies/TV/Anime shelf for new users, quitting early no longer hides a title, and a series no longer disappears after one finished episode',
+  },
+  {
     version: '0.3.73',
     summary:
       'Expanding the in-app mini player now stays full screen instead of snapping back to the corner (Cinetaro series)',

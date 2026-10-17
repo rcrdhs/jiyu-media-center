@@ -6,6 +6,7 @@
 
 import { languageFromM2BoxCountry } from './language'
 import type { TorrentPageLink } from './torrents'
+import { normalizeGenres } from './genres'
 
 export const M2BOX_SERIES_FEED_PREFIX = 'jiyu://m2box-series'
 export const M2BOX_API_ORIGIN = 'https://h5-api.aoneroom.com'
@@ -595,6 +596,7 @@ export function m2boxSubjectsToLinks(
         .join(' · ')
         .concat(rating)
       const synopsis = subject.description?.trim()
+      const genres = normalizeGenres([subject.genre])
       return {
         title: subject.title.slice(0, 180),
         url: m2boxDetailUrl(o, subject.detailPath),
@@ -607,6 +609,7 @@ export function m2boxSubjectsToLinks(
         ...(subject.countryName
           ? { originalLanguage: languageFromM2BoxCountry(subject.countryName) || undefined }
           : {}),
+        ...(genres.length ? { genres } : {}),
       }
     })
 }

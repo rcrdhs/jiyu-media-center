@@ -1,10 +1,14 @@
 import type { CategoryId } from '../types'
+import { normalizeGenres } from './genres'
+import { CATALOG_STRUCTURE_TAGS } from './language'
 
 const KEY = 'jiyu.watch-history.v1'
 const MAX_ENTRIES = 48
 /** Ignore tiny accidental opens. */
 const MIN_SECONDS = 30
 const COMPLETE_RATIO = 0.95
+/** A session that ends before this (and never got further) counts as a quick bail. */
+export const QUICK_ABANDON_SECONDS = 60
 
 export const WATCH_HISTORY_EVENT = 'jiyu:watch-history'
 
@@ -28,6 +32,8 @@ export interface WatchHistoryEntry {
   detailUrl?: string
   playUrl?: string
   source?: string
+  /** Genre slugs captured at record time (lib/genres) — survives catalog churn. */
+  genres?: string[]
 }
 
 export const WATCH_HISTORY_FILTERS: WatchHistoryFilter[] = [
@@ -147,6 +153,15 @@ export interface WatchHistoryInput {
   detailUrl?: string
   playUrl?: string
   source?: string
+  genres?: string[]
+  /** Catalog tags; only genre-like tags are kept (providers / shelves dropped). */
+  tags?: string[]
+}
+
+/** Genre slugs from explicit genres plus any genre-like catalog tags. */
+function historyGenres(entry: { genres?: string[]; tags?: string[] }): string[] {
+  const tags = (entry.tags ?? []).filter((t) => !CATALOG_STRUCTURE_TAGS.has(String(t).toLowerCase()))
+  return normalizeGenres([...(entry.genres ?? []), ...tags])
 }
 
 /**
@@ -158,20 +173,19 @@ export function recordWatchHistory(entry: WatchHistoryInput) {
   const duration = Math.max(0, Number(entry.duration) || Number(entry.runtimeSeconds) || 0)
   const finished = entry.finished === true || isFinished(playhead, duration)
 
-  // Quick abandons (< 60s) still train recommendations as negative signals
-  // even when they're too short for the history list.
-  if (!finished && playhead > 0 && playhead < 60) {
-    void import('./recommendFeedback').then(({ recordRecommendAbandon }) => {
-      recordRecommendAbandon(entry.id, {
-        title: entry.title,
-        category: entry.category,
-      })
-    })
-  }
-
   if (!finished && playhead < MIN_SECONDS) return
 
   const existing = readAll().find((item) => item.id === entry.id)
+
+  // Crossing the first minute (or finishing) cancels an earlier quick-bail
+  // signal for this title. Only on the transition, not every progress tick.
+  const wasPastAbandon =
+    Boolean(existing?.finished) || (existing?.currentTime ?? 0) >= QUICK_ABANDON_SECONDS
+  if (!wasPastAbandon && (finished || playhead >= QUICK_ABANDON_SECONDS)) {
+    void import('./recommendFeedback').then(({ dropRecommendAbandons }) => {
+      dropRecommendAbandons([entry.id])
+    })
+  }
   const next: WatchHistoryEntry = {
     id: entry.id,
     title: entry.title,
@@ -182,16 +196,47 @@ export function recordWatchHistory(entry: WatchHistoryInput) {
     currentTime: finished ? Math.max(playhead, existing?.currentTime || 0) : playhead,
     duration: duration || existing?.duration || 0,
     runtimeSeconds: entry.runtimeSeconds || existing?.runtimeSeconds,
-    finished: finished || Boolean(existing?.finished),
+    // Per episode: a finished episode doesn't mark the next one (or the show) finished.
+    finished:
+      finished ||
+      (Boolean(existing?.finished) &&
+        (entry.playlistIndex ?? existing?.playlistIndex ?? 0) === (existing?.playlistIndex ?? 0)),
     updatedAt: Date.now(),
     torrentUri: entry.torrentUri || existing?.torrentUri,
     detailUrl: entry.detailUrl || existing?.detailUrl,
     playUrl: entry.playUrl || existing?.playUrl,
     source: entry.source || existing?.source,
   }
+  const genres = historyGenres(entry)
+  if (genres.length) next.genres = genres
+  else if (existing?.genres?.length) next.genres = existing.genres
 
   const others = readAll().filter((item) => item.id !== next.id)
   writeAll([next, ...others])
+}
+
+/**
+ * Called once when a playback session ends (player teardown / title change).
+ * A session whose furthest playhead stayed under a minute is a quick bail and
+ * trains recommendations as a soft negative — unless this title was already
+ * watched past the first minute before (e.g. a new episode opened and left).
+ */
+export function recordWatchSessionEnd(
+  entry: { id: string; title: string; category: CategoryId; tags?: string[]; genres?: string[] },
+  furthestPlayhead: number,
+) {
+  if (!isVodCategory(entry.category)) return
+  const furthest = Number(furthestPlayhead) || 0
+  if (furthest < 5 || furthest >= QUICK_ABANDON_SECONDS) return
+  const existing = readAll().find((item) => item.id === entry.id)
+  if (existing && (existing.finished || existing.currentTime >= QUICK_ABANDON_SECONDS)) return
+  void import('./recommendFeedback').then(({ recordRecommendAbandon }) => {
+    recordRecommendAbandon(entry.id, {
+      title: entry.title,
+      category: entry.category,
+      tags: historyGenres(entry),
+    })
+  })
 }
 
 function relativeDay(ts: number): string {

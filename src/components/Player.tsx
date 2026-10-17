@@ -606,6 +606,8 @@ export function Player({
   const resumePendingRef = useRef(false)
   /** After Restart, block saves until the playhead is back near 0 (avoids re-writing old time). */
   const restartGuardRef = useRef(false)
+  /** Furthest absolute playhead this session — a < 60s session is a quick bail for recommendations. */
+  const sessionFurthestRef = useRef(0)
   const [resumeOffer, setResumeOffer] = useState<number | null>(null)
   /** Absolute title clock (remux video.currentTime is only the current fragment). */
   const [playbackClock, setPlaybackClock] = useState({ current: 0, duration: 0 })
@@ -1302,6 +1304,7 @@ export function Player({
     const reportedAbsolute =
       reportedDuration > 0 ? reportedDuration + timelineOffsetRef.current : 0
     const currentTime = effectivePlayhead(video)
+    if (currentTime > sessionFurthestRef.current) sessionFurthestRef.current = currentTime
     if (restartGuardRef.current) {
       // Drop stale mid-episode ticks until the restarted stream is actually at the start.
       if (currentTime >= 5) return
@@ -1365,6 +1368,8 @@ export function Player({
           duration: trusted || knownDuration,
           runtimeSeconds: trusted || item.runtimeSeconds || saved?.runtimeSeconds,
           finished: true,
+          genres: item.genres,
+          tags: item.tags,
           torrentUri: item.torrentUri,
           detailUrl: item.detailUrl,
           playUrl: item.detailUrl || item.torrentUri,
@@ -1387,6 +1392,7 @@ export function Player({
         currentTime,
         duration: trusted || knownDuration,
         runtimeSeconds: trusted || item.runtimeSeconds || saved?.runtimeSeconds,
+        genres: item.genres,
         torrentUri: item.torrentUri,
         detailUrl: item.detailUrl,
         // Prefer a stable catalog/detail URL over the ephemeral 127.0.0.1 remux URL.
@@ -6085,6 +6091,27 @@ export function Player({
       window.clearInterval(interval)
     }
   }, [item.id, item.title, item.poster, item.category, playlistIndex, activePlaylistItem.title, isTile, hasPlaylist, skipIntervals])
+
+  // One recommendation signal per playback session (not per progress tick):
+  // when this title's session ends, a furthest playhead under a minute is a quick bail.
+  useEffect(() => {
+    if (isTile) return
+    sessionFurthestRef.current = 0
+    const session = {
+      id: item.id,
+      title: item.title,
+      category: item.category,
+      tags: item.tags,
+      genres: item.genres,
+    }
+    return () => {
+      const furthest = sessionFurthestRef.current
+      void import('../lib/watchHistory').then(({ recordWatchSessionEnd }) => {
+        recordWatchSessionEnd(session, furthest)
+      })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [item.id, isTile])
 
   useEffect(() => {
     if (isTile) return

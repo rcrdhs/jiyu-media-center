@@ -4,6 +4,7 @@
  */
 
 import type { TorrentPageLink } from './torrents'
+import { genresFromTmdbIds } from './genres'
 
 export const TMDB_TV_SOURCE_ID = 'builtin-tmdb-tv'
 export const TMDB_ANIME_SOURCE_ID = 'builtin-tmdb-anime'
@@ -274,6 +275,7 @@ export async function fetchTmdbTvCatalogLinks(
     const originalLanguage = String(show.originalLanguage || '')
       .trim()
       .toLowerCase()
+    const genres = genresFromTmdbIds(show.genreIds)
     links.push({
       title,
       url: tmdbTvDetailUrl(id),
@@ -290,6 +292,7 @@ export async function fetchTmdbTvCatalogLinks(
       releasedAt: Number.isFinite(rankReleasedAt) ? rankReleasedAt : undefined,
       rivestreamTmdbId: id,
       ...(originalLanguage ? { originalLanguage } : {}),
+      ...(genres.length ? { genres } : {}),
     })
   }
 

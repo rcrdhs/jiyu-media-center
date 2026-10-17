@@ -104,12 +104,34 @@ export function recordDislike(
   upsert(id, 'dislike', detail)
 }
 
-/** Quick bail — opened then left almost immediately. */
+/**
+ * Quick bail — a playback session that ended before the first minute.
+ * Called once per session (player teardown), never per progress tick.
+ */
 export function recordRecommendAbandon(
   id: string,
   detail?: { title?: string; category?: string; tags?: string[] },
 ) {
   upsert(id, 'abandon', detail)
+}
+
+/**
+ * Drop implicit abandon entries for titles that were later watched past the
+ * first minute. Explicit dislike / not interested entries are kept. Only
+ * writes (and fires the event) when something was removed.
+ */
+export function dropRecommendAbandons(ids: Iterable<string>): number {
+  const store = load()
+  let removed = 0
+  for (const id of ids) {
+    const key = String(id || '').trim()
+    if (key && store[key]?.kind === 'abandon') {
+      delete store[key]
+      removed++
+    }
+  }
+  if (removed > 0) save(store)
+  return removed
 }
 
 export function clearRecommendFeedback(id?: string) {

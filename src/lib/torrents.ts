@@ -29,6 +29,7 @@ import {
   KIDS_SHOW_ALLOWLIST,
 } from './kidsCatalog'
 import type { StreamItem } from '../types'
+import { normalizeGenres } from './genres'
 import {
   isM2BoxSeriesFeedUrl,
   isM2BoxUrl,
@@ -199,6 +200,8 @@ export interface TorrentPageLink {
   originalLanguage?: string
   /** Optional per-link shelf tag (Zenox Animation splits anime/kids/series). */
   shelfTag?: string
+  /** Canonical genre slugs (lib/genres) when the listing API provides genres. */
+  genres?: string[]
 }
 
 const SOURCES_KEY = 'jiyu.torrent.sources'
@@ -3866,6 +3869,7 @@ async function scrapeYtsPage(
         ? Date.now() - (page - 1) * 100_000 - index * 10
         : releasedAt
     index += 1
+    const ytsGenres = normalizeGenres(movie.genres)
     links.push({
       title: title.slice(0, 180),
       // Details API — same click-to-play path as opening a YTS movie HTML page
@@ -3875,6 +3879,7 @@ async function scrapeYtsPage(
       category: kidsGenreFeed ? 'kids' : 'movies',
       releasedAt: rankReleasedAt,
       runtimeSeconds: ytsRuntimeSeconds(movie),
+      ...(ytsGenres.length ? { genres: ytsGenres } : {}),
     })
   }
 
@@ -5600,5 +5605,6 @@ export function linkToCatalogItem(
     cinetaroTmdbId: link.cinetaroTmdbId,
     rivestreamTmdbId: link.rivestreamTmdbId,
     originalLanguage: link.originalLanguage,
+    ...(link.genres?.length ? { genres: link.genres } : {}),
   }
 }

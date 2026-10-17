@@ -65,7 +65,7 @@ export function languageFromM2BoxCountry(country?: string | null): string {
  * (`new-movies` used to become language "new" and hide the whole New Movies shelf
  * when English-only was on.)
  */
-const CATALOG_STRUCTURE_TAGS = new Set([
+export const CATALOG_STRUCTURE_TAGS: ReadonlySet<string> = new Set([
   'movies',
   'series',
   'anime',

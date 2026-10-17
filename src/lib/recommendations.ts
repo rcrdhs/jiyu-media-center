@@ -8,12 +8,15 @@
 
 import type { CategoryId, StreamItem } from '../types'
 import {
+  dropRecommendAbandons,
   listRecommendFeedback,
   RECOMMEND_FEEDBACK_EVENT,
   recommendFeedbackSignature,
   type RecommendFeedbackEntry,
 } from './recommendFeedback'
 import { listWatchHistory, WATCH_HISTORY_EVENT, type WatchHistoryEntry } from './watchHistory'
+import { genreLabel, normalizeGenres } from './genres'
+import { CATALOG_STRUCTURE_TAGS } from './language'
 
 export interface UserTasteProfile {
   totalWatched: number
@@ -23,8 +26,11 @@ export interface UserTasteProfile {
   /** Negative keyword / tag space (abandons + dislikes). */
   negativeKeywordWeights: Record<string, number>
   negativeTagWeights: Record<string, number>
+  /** Finished non-episodic titles (movies) — excluded. */
   completedIds: Set<string>
-  /** Hard-exclude from the shelf. */
+  /** Series / anime watched past the first minute — one finished episode never excludes a show. */
+  episodicWatchedIds: Set<string>
+  /** Hard-exclude from the shelf (dislike / not interested — not abandons). */
   blockedIds: Set<string>
   topCategory: CategoryId | null
 }
@@ -38,7 +44,7 @@ export interface RecommendedItem {
 /** Tunables — keep in sync with scripts/eval-recommendations.mts. */
 export const RECOMMEND_TUNABLES = {
   halfLifeDays: 21,
-  mmrLambda: 0.7,
+  mmrLambda: 0.5,
   scoreThreshold: 0.05,
   negativeCosineWeight: 0.55,
   quickAbandonSec: 60,
@@ -116,14 +122,34 @@ function recency(updatedAt: number, now: number, halfLifeDays: number): number {
   return Math.exp((-LN2 * days) / halfLifeDays)
 }
 
-function catalogTags(
+const tasteGenreCache = new WeakMap<StreamItem, string[]>()
+
+/**
+ * Genre slugs that describe taste: `item.genres` plus genre-like tags.
+ * Structural / provider / shelf tags (movies, cinetaro, torrent,
+ * popular-movies, web-embed, …) never count.
+ */
+export function itemTasteGenres(item: StreamItem | undefined): string[] {
+  if (!item) return []
+  const cached = tasteGenreCache.get(item)
+  if (cached) return cached
+  const tags = (item.tags ?? []).filter(
+    (t) => !CATALOG_STRUCTURE_TAGS.has(String(t || '').toLowerCase().trim()),
+  )
+  const genres = normalizeGenres([...(item.genres ?? []), ...tags])
+  tasteGenreCache.set(item, genres)
+  return genres
+}
+
+/** Genres stored with the signal (history / feedback) win; else the catalog row. */
+function genresFor(
   id: string,
   catalogById: Map<string, StreamItem> | undefined,
-  fallback?: string[],
+  own?: string[],
 ): string[] {
-  const fromCatalog = catalogById?.get(id)?.tags
-  if (Array.isArray(fromCatalog) && fromCatalog.length) return fromCatalog
-  return Array.isArray(fallback) ? fallback : []
+  const fromOwn = normalizeGenres(own)
+  if (fromOwn.length) return fromOwn
+  return itemTasteGenres(catalogById?.get(id))
 }
 
 function addTagWeights(
@@ -131,13 +157,7 @@ function addTagWeights(
   tags: string[],
   w: number,
 ) {
-  for (const tag of tags) {
-    const clean = String(tag || '')
-      .toLowerCase()
-      .trim()
-    if (!clean || clean === 'popular' || clean === 'web-embed') continue
-    tagWeights[clean] = (tagWeights[clean] || 0) + w
-  }
+  for (const tag of tags) tagWeights[tag] = (tagWeights[tag] || 0) + w
 }
 
 export type BuildProfileOptions = {
@@ -164,13 +184,18 @@ export function buildUserTasteProfile(
   const negativeKeywordWeights: Record<string, number> = {}
   const negativeTagWeights: Record<string, number> = {}
   const completedIds = new Set<string>()
+  const episodicWatchedIds = new Set<string>()
   const blockedIds = new Set<string>()
   const now = Date.now()
 
   for (const entry of history) {
-    if (entry.finished) completedIds.add(entry.id)
+    if (isEpisodicEntry(entry, catalogById?.get(entry.id))) {
+      if (entry.finished || entry.currentTime >= quickAbandonSec) episodicWatchedIds.add(entry.id)
+    } else if (entry.finished) {
+      completedIds.add(entry.id)
+    }
 
-    const tags = catalogTags(entry.id, catalogById)
+    const tags = genresFor(entry.id, catalogById, entry.genres)
     const isQuickAbandon =
       !entry.finished && entry.currentTime > 0 && entry.currentTime < quickAbandonSec
 
@@ -206,13 +231,23 @@ export function buildUserTasteProfile(
     addTagWeights(tagWeights, tags, w)
   }
 
+  // Titles watched past the first minute: a stale abandon for them is noise.
+  const watchedIds = new Set(
+    history.filter((h) => h.finished || h.currentTime >= quickAbandonSec).map((h) => h.id),
+  )
+
   for (const fb of feedback) {
-    blockedIds.add(fb.id)
+    if (fb.kind === 'abandon') {
+      // Soft penalty only; ignore it once the title was actually watched.
+      if (watchedIds.has(fb.id)) continue
+    } else {
+      blockedIds.add(fb.id)
+    }
     const strength =
       fb.kind === 'dislike' ? 3.0 : fb.kind === 'notInterested' ? 2.2 : 1.4
     const w = strength * Math.min(3, Math.max(1, fb.count)) * recency(fb.updatedAt, now, halfLifeDays)
     const title = fb.title || catalogById?.get(fb.id)?.title || ''
-    const tags = catalogTags(fb.id, catalogById, fb.tags)
+    const tags = genresFor(fb.id, catalogById, fb.tags)
     for (const token of tokenizeTitle(title)) {
       const iw = idf[token] ?? 1
       negativeKeywordWeights[token] = (negativeKeywordWeights[token] || 0) + w * iw
@@ -240,46 +275,56 @@ export function buildUserTasteProfile(
     negativeKeywordWeights,
     negativeTagWeights,
     completedIds,
+    episodicWatchedIds,
     blockedIds,
     topCategory,
   }
 }
 
-function cosine(a: Record<string, number>, b: Record<string, number>): number {
-  let dot = 0
-  let na = 0
-  let nb = 0
-  for (const k in a) {
-    na += a[k]! * a[k]!
-    if (b[k]) dot += a[k]! * b[k]!
-  }
-  for (const k in b) nb += b[k]! * b[k]!
-  if (na === 0 || nb === 0) return 0
-  return dot / (Math.sqrt(na) * Math.sqrt(nb))
+/** Series / anime (and kids shows / multi-episode rows) track progress per episode. */
+function isEpisodicEntry(entry: WatchHistoryEntry, item: StreamItem | undefined): boolean {
+  if (entry.category === 'series' || entry.category === 'anime') return true
+  if (entry.playlistIndex > 0) return true
+  if (item?.tags?.includes('kids-shows')) return true
+  return (item?.playlist?.length ?? 0) > 1
 }
 
-function itemVector(item: StreamItem, idf: Record<string, number>): Record<string, number> {
+/** Sparse vector with its L2 norm precomputed (cosine is then one pass over the smaller side). */
+type SparseVec = { w: Record<string, number>; keys: string[]; norm: number }
+
+function sparse(w: Record<string, number>): SparseVec {
+  const keys = Object.keys(w)
+  let n = 0
+  for (const k of keys) n += w[k]! * w[k]!
+  return { w, keys, norm: Math.sqrt(n) }
+}
+
+function cosine(a: SparseVec, b: SparseVec): number {
+  if (a.norm === 0 || b.norm === 0) return 0
+  const [small, big] = a.keys.length <= b.keys.length ? [a, b] : [b, a]
+  let dot = 0
+  for (const k of small.keys) {
+    const v = big.w[k]
+    if (v) dot += small.w[k]! * v
+  }
+  return dot / (a.norm * b.norm)
+}
+
+/**
+ * Item features, each counted once: title TF–IDF tokens, one category
+ * feature, and genre features (no extra additive category / genre boosts).
+ */
+function itemVector(item: StreamItem, idf: Record<string, number>): SparseVec {
   const vec: Record<string, number> = {}
   for (const t of tokenizeTitle(item.title)) {
     vec[t] = (vec[t] || 0) + (idf[t] ?? 1)
   }
-  if (item.category) {
-    vec[`#${item.category}`] = (vec[`#${item.category}`] || 0) + 2.0
-  }
-  if (Array.isArray(item.tags)) {
-    for (const tag of item.tags) {
-      const clean = String(tag || '')
-        .toLowerCase()
-        .trim()
-      if (!clean) continue
-      const k = `#${clean}`
-      vec[k] = (vec[k] || 0) + 3.0
-    }
-  }
-  return vec
+  if (item.category) vec[`cat:${item.category}`] = 2.0
+  for (const genre of itemTasteGenres(item)) vec[`#${genre}`] = 3.0
+  return sparse(vec)
 }
 
-function profileToVector(profile: UserTasteProfile, negative = false): Record<string, number> {
+function profileToVector(profile: UserTasteProfile, negative = false): SparseVec {
   const vec: Record<string, number> = {}
   const keywords = negative ? profile.negativeKeywordWeights : profile.keywordWeights
   const tags = negative ? profile.negativeTagWeights : profile.tagWeights
@@ -291,15 +336,15 @@ function profileToVector(profile: UserTasteProfile, negative = false): Record<st
   }
   if (!negative) {
     for (const [cat, w] of Object.entries(profile.categoryWeights)) {
-      if (w > 0) vec[`#${cat}`] = (vec[`#${cat}`] || 0) + w * 2.0
+      if (w > 0) vec[`cat:${cat}`] = (vec[`cat:${cat}`] || 0) + w * 2.0
     }
   }
-  return vec
+  return sparse(vec)
 }
 
 type ScoredCandidate = {
   item: StreamItem
-  vec: Record<string, number>
+  vec: SparseVec
   score: number
   reason: string
 }
@@ -328,18 +373,143 @@ function mmr(candidates: ScoredCandidate[], k: number, lambda: number): ScoredCa
   return picked
 }
 
+/** Real catalog shelf tags that mean "popular / trending now", strongest first. */
+const POPULAR_SHELF_TAGS = [
+  'popular-movies',
+  'trending-series',
+  'popular-series',
+  'trending-airing',
+  'airing-series',
+  'full-shows',
+  'new-movies',
+  'new-releases',
+  'kids-movies',
+  'kids-shows',
+]
+const COLD_START_CATEGORY_ORDER = ['movies', 'series', 'anime', 'kids']
+const CATEGORY_LABEL: Record<string, string> = {
+  movies: 'Movies',
+  series: 'TV Series',
+  anime: 'Anime',
+  kids: 'Kids',
+}
+
+function popularShelfRank(item: StreamItem): number {
+  let best = POPULAR_SHELF_TAGS.length
+  for (const tag of item.tags ?? []) {
+    const i = POPULAR_SHELF_TAGS.indexOf(String(tag).toLowerCase())
+    if (i >= 0 && i < best) best = i
+  }
+  return best
+}
+
+/**
+ * Popular picks for cold start and for backfilling a short personalized shelf:
+ * popular / trending shelves first (catalog order within a shelf), taken
+ * round-robin across Movies / TV Series / Anime so no category dominates.
+ */
+function popularPicks(
+  items: StreamItem[],
+  limit: number,
+  skip: (item: StreamItem) => boolean,
+  taken: StreamItem[] = [],
+): StreamItem[] {
+  const buckets = new Map<string, Array<{ item: StreamItem; rank: number; idx: number }>>()
+  items.forEach((item, idx) => {
+    if (skip(item)) return
+    const list = buckets.get(item.category) ?? []
+    list.push({ item, rank: popularShelfRank(item), idx })
+    buckets.set(item.category, list)
+  })
+  const order = [
+    ...COLD_START_CATEGORY_ORDER.filter((c) => buckets.has(c)),
+    ...[...buckets.keys()].filter((c) => !COLD_START_CATEGORY_ORDER.includes(c)),
+  ]
+  const queues = order.map((c) =>
+    buckets
+      .get(c)!
+      .sort((a, b) => a.rank - b.rank || a.idx - b.idx)
+      .map((e) => e.item),
+  )
+  const out: StreamItem[] = []
+  const titles = createTitleDeduper(taken)
+  let progressed = true
+  while (out.length < limit && progressed) {
+    progressed = false
+    for (const q of queues) {
+      while (q.length) {
+        const next = q.shift()!
+        if (titles.isDuplicate(next)) continue
+        titles.add(next)
+        out.push(next)
+        progressed = true
+        break
+      }
+      if (out.length >= limit) break
+    }
+  }
+  return out
+}
+
+/** releasedAt below this is a popularity / by-year rank encoding, not a date. */
+const MIN_REAL_RELEASED_AT = Date.UTC(1971, 0, 1)
+
+/** "Dune (2021)" from YTS and "Dune" (2021) from Cinetaro → same title + year. */
+function titleParts(item: Pick<StreamItem, 'title' | 'releasedAt'>): { title: string; year: string } {
+  const raw = String(item.title || '').toLowerCase()
+  const yearInTitle = raw.match(/\((19|20)\d{2}\)/)?.[0]?.slice(1, 5)
+  const releasedYear =
+    item.releasedAt && item.releasedAt >= MIN_REAL_RELEASED_AT
+      ? new Date(item.releasedAt).getUTCFullYear()
+      : 0
+  const year =
+    yearInTitle || (releasedYear >= 1900 && releasedYear <= 2100 ? String(releasedYear) : '')
+  const title = raw
+    .replace(/\((19|20)\d{2}\)/g, ' ')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim()
+  return { title, year }
+}
+
+/**
+ * Cross-source duplicate filter: same normalized title, and the same year
+ * when both years are known (remakes with different years stay distinct).
+ */
+export function createTitleDeduper(initial: Iterable<Pick<StreamItem, 'title' | 'releasedAt'>> = []) {
+  const seen = new Map<string, Set<string>>()
+  const add = (item: Pick<StreamItem, 'title' | 'releasedAt'>) => {
+    const { title, year } = titleParts(item)
+    if (!title) return
+    const years = seen.get(title) ?? new Set<string>()
+    years.add(year)
+    seen.set(title, years)
+  }
+  const isDuplicate = (item: Pick<StreamItem, 'title' | 'releasedAt'>) => {
+    const { title, year } = titleParts(item)
+    const years = title ? seen.get(title) : undefined
+    if (!years) return false
+    return !year || years.has('') || years.has(year)
+  }
+  for (const item of initial) add(item)
+  return { add, isDuplicate }
+}
+
 let cachedIdf: Record<string, number> | null = null
 let cachedIdfKey = ''
 let cachedProfile: UserTasteProfile | null = null
 let cachedProfileKey = ''
 
+/** FNV-1a over every id + title — any catalog change rebuilds IDF (O(n), no sampling). */
 function catalogIdfKey(items: StreamItem[]): string {
-  const n = items.length
-  if (n === 0) return '0'
-  const a = items[0]?.id || ''
-  const b = items[Math.floor(n / 2)]?.id || ''
-  const c = items[n - 1]?.id || ''
-  return `${n}:${a}:${b}:${c}`
+  let h = 0x811c9dc5
+  for (const item of items) {
+    const s = `${item.id}\u0000${item.title}\u0001`
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i)
+      h = Math.imul(h, 0x01000193)
+    }
+  }
+  return `${items.length}:${(h >>> 0).toString(36)}`
 }
 
 function historySignature(history: WatchHistoryEntry[]): string {
@@ -370,6 +540,8 @@ export type RankRecommendationsOptions = {
   negativeCosineWeight?: number
   halfLifeDays?: number
   quickAbandonSec?: number
+  /** Never recommend these (e.g. titles already on Continue watching). */
+  excludeIds?: Iterable<string>
 }
 
 /**
@@ -390,27 +562,37 @@ export function rankRecommendations(options: RankRecommendationsOptions): Recomm
   const feedback = options.feedback ?? []
   const history = options.history
 
-  const profileKey = `${idfKey}::${historySignature(history)}::${recommendFeedbackSignature(feedback)}`
+  const halfLifeDays = options.halfLifeDays ?? RECOMMEND_TUNABLES.halfLifeDays
+  const quickAbandonSec = options.quickAbandonSec ?? RECOMMEND_TUNABLES.quickAbandonSec
+  // Tunables + hour bucket: recency weights age even when nothing else changes.
+  const profileKey = [
+    idfKey,
+    historySignature(history),
+    recommendFeedbackSignature(feedback),
+    halfLifeDays,
+    quickAbandonSec,
+    Math.floor(Date.now() / 3_600_000),
+  ].join('::')
   let profile = cachedProfile
   if (!profile || profileKey !== cachedProfileKey) {
     profile = buildUserTasteProfile(history, {
       idf,
       catalogById,
       feedback,
-      halfLifeDays: options.halfLifeDays,
-      quickAbandonSec: options.quickAbandonSec,
+      halfLifeDays,
+      quickAbandonSec,
     })
     cachedProfile = profile
     cachedProfileKey = profileKey
   }
 
+  const excludeIds = new Set(options.excludeIds ?? [])
+
   if (profile.totalWatched === 0 && feedback.length === 0) {
-    const trending = items.filter((i) => i.tags?.includes('popular'))
-    const cold = trending.length > 0 ? trending : items.filter((i) => i.category === 'movies')
-    return cold.slice(0, limit).map((item) => ({
+    return popularPicks(items, limit, (item) => excludeIds.has(item.id)).map((item) => ({
       item,
       score: 1.0,
-      reason: 'Trending in Jiyu',
+      reason: `Popular in ${CATEGORY_LABEL[item.category] ?? 'Jiyu'}`,
     }))
   }
 
@@ -420,46 +602,52 @@ export function rankRecommendations(options: RankRecommendationsOptions): Recomm
   const threshold = options.scoreThreshold ?? RECOMMEND_TUNABLES.scoreThreshold
   const lambda = options.mmrLambda ?? RECOMMEND_TUNABLES.mmrLambda
 
-  const lastWatched = history.find((h) => !profile.blockedIds.has(h.id) && h.currentTime >= (options.quickAbandonSec ?? RECOMMEND_TUNABLES.quickAbandonSec))
+  const lastWatched = history.find((h) => !profile.blockedIds.has(h.id) && h.currentTime >= quickAbandonSec)
     || history[0]
   const lastTokens = lastWatched ? tokenizeTitle(lastWatched.title) : []
+
+  const isExcluded = (item: StreamItem) =>
+    excludeIds.has(item.id) ||
+    profile.blockedIds.has(item.id) ||
+    (profile.completedIds.has(item.id) && item.category !== 'sports')
+
+  // The same title from another source is excluded too (finished movie,
+  // already on Continue watching, explicitly hidden).
+  const titles = createTitleDeduper([
+    ...history.filter((h) => profile.completedIds.has(h.id)),
+    ...items.filter((i) => excludeIds.has(i.id) || profile.blockedIds.has(i.id)),
+  ])
 
   const candidates: ScoredCandidate[] = []
 
   for (const item of items) {
-    if (profile.blockedIds.has(item.id)) continue
-    if (profile.completedIds.has(item.id) && item.category !== 'sports') continue
+    if (isExcluded(item)) continue
 
     const vec = itemVector(item, idf)
     const pos = cosine(posVec, vec)
     const neg = cosine(negVec, vec)
     let score = pos - negWeight * neg
+    // Shows you've already started: keep them reachable, but new finds first.
+    if (profile.episodicWatchedIds.has(item.id)) score *= 0.5
 
     const catW = profile.categoryWeights[item.category] || 0
-    if (catW > 0) score += Math.min(catW * 0.02, 0.15)
-
-    // Shared genre tags with the positive profile.
-    if (Array.isArray(item.tags)) {
-      let tagHit = 0
-      for (const tag of item.tags) {
-        const clean = String(tag || '')
-          .toLowerCase()
-          .trim()
-        if (clean && profile.tagWeights[clean]) tagHit += profile.tagWeights[clean]!
+    let topGenre = ''
+    let topGenreW = 0
+    for (const genre of itemTasteGenres(item)) {
+      const gw = profile.tagWeights[genre] || 0
+      if (gw > topGenreW) {
+        topGenreW = gw
+        topGenre = genre
       }
-      if (tagHit > 0) score += Math.min(tagHit * 0.01, 0.12)
     }
 
+    // Reasons prefer the strongest shared genre, then a franchise / title match.
     let reason = 'Recommended for you'
     const overlap = tokenizeTitle(item.title).filter((t) => lastTokens.includes(t))
-    if (overlap.length > 0 && lastWatched) {
+    if (topGenre) {
+      reason = `Because you like ${genreLabel(topGenre)}`
+    } else if (overlap.length > 0 && lastWatched) {
       reason = `Because you watched ${lastWatched.title}`
-    } else if (
-      Array.isArray(item.tags) &&
-      item.tags.some((t) => profile.tagWeights[String(t).toLowerCase().trim()])
-    ) {
-      const hit = item.tags.find((t) => profile.tagWeights[String(t).toLowerCase().trim()])
-      if (hit) reason = `Because you like ${hit}`
     } else if (catW > 0 && profile.topCategory === item.category) {
       reason = `Top pick for you in ${item.category}`
     }
@@ -468,13 +656,35 @@ export function rankRecommendations(options: RankRecommendationsOptions): Recomm
   }
 
   candidates.sort((a, b) => b.score - a.score)
-  const reranked = mmr(candidates.slice(0, limit * 3), limit, lambda)
+  // Cross-source dedup: keep the best-scoring copy of each title.
+  const unique: ScoredCandidate[] = []
+  for (const c of candidates) {
+    if (titles.isDuplicate(c.item)) continue
+    titles.add(c.item)
+    unique.push(c)
+    if (unique.length >= limit * 3) break
+  }
+  const reranked = mmr(unique, limit, lambda)
 
-  return reranked.map((c) => ({
+  const out: RecommendedItem[] = reranked.map((c) => ({
     item: c.item,
     score: Number(c.score.toFixed(3)),
     reason: c.reason,
   }))
+
+  // Short shelf (thin history, strict threshold): backfill with popular picks.
+  if (out.length < limit) {
+    const fill = popularPicks(
+      items,
+      limit - out.length,
+      (item) => isExcluded(item) || titles.isDuplicate(item),
+      out.map((r) => r.item),
+    )
+    for (const item of fill) {
+      out.push({ item, score: 0, reason: `Popular in ${CATEGORY_LABEL[item.category] ?? 'Jiyu'}` })
+    }
+  }
+  return out
 }
 
 /**
@@ -543,15 +753,36 @@ export function evaluateHoldout(options: {
   }
 }
 
+let staleAbandonsPruned = false
+
+/**
+ * One-time cleanup per app session: builds up to 0.3.73 stored an "abandon"
+ * for every title during its first minute of playback. Drop those for titles
+ * that were watched past the first minute; real quick bails are kept.
+ */
+function pruneStaleAbandons(history: WatchHistoryEntry[]) {
+  if (staleAbandonsPruned) return
+  staleAbandonsPruned = true
+  const watched = history
+    .filter((h) => h.finished || h.currentTime >= RECOMMEND_TUNABLES.quickAbandonSec)
+    .map((h) => h.id)
+  // Deferred: this runs inside a render (useMemo) and the drop fires an event.
+  if (watched.length) queueMicrotask(() => dropRecommendAbandons(watched))
+}
+
 export function getPersonalizedRecommendations(
   items: StreamItem[],
   limit = 24,
+  options?: { excludeIds?: Iterable<string> },
 ): RecommendedItem[] {
   ensureCacheInvalidation()
+  const history = listWatchHistory('all')
+  pruneStaleAbandons(history)
   return rankRecommendations({
     items,
-    history: listWatchHistory('all'),
+    history,
     feedback: listRecommendFeedback(),
     limit,
+    excludeIds: options?.excludeIds,
   })
 }

@@ -34,6 +34,8 @@ export interface StreamItem {
   url: string
   poster?: string
   tags?: string[]
+  /** Canonical genre slugs (see lib/genres) from TMDB / YTS / M2Box — drives recommendations. */
+  genres?: string[]
   source?: string
   /** How this entry entered the catalog */
   sourceKind?: StreamSourceKind

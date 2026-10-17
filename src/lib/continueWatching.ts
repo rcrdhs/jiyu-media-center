@@ -1,8 +1,21 @@
 import type { CategoryId, StreamItem, StreamSourceKind, StreamTransport } from '../types'
 
+/** Progress ticks arrive several times a second; history only needs a coarse playhead. */
+const HISTORY_MIRROR_INTERVAL_MS = 5000
+let lastHistoryMirror = { id: '', at: 0 }
+
 function mirrorWatchHistory(
   entry: Omit<ContinueWatchingEntry, 'updatedAt'> & { updatedAt?: number; finished?: boolean },
 ) {
+  // Finished always goes through; plain progress is throttled per title.
+  // Continue watching (resume) is written separately and is not throttled.
+  if (!entry.finished) {
+    const now = Date.now()
+    if (lastHistoryMirror.id === entry.id && now - lastHistoryMirror.at < HISTORY_MIRROR_INTERVAL_MS) {
+      return
+    }
+    lastHistoryMirror = { id: entry.id, at: now }
+  }
   // Dynamic import avoids a static cycle with watchHistory helpers.
   void import('./watchHistory').then(({ recordWatchHistory }) => {
     recordWatchHistory(entry)
@@ -51,6 +64,8 @@ export interface ContinueWatchingEntry {
   source?: string
   /** Authoritative runtime (YTS/ffprobe) — preferred over remux buffer duration. */
   runtimeSeconds?: number
+  /** Genre slugs snapshot so watch history can train recommendations after the title leaves the catalog. */
+  genres?: string[]
 }
 
 export const CONTINUE_WATCHING_EVENT = 'jiyu:continue-watching'
