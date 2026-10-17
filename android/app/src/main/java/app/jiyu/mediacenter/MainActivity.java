@@ -22,6 +22,7 @@ import app.jiyu.mediacenter.media3.Media3PlayerPlugin;
 import app.jiyu.mediacenter.torrent.TorrentStreamerPlugin;
 
 public class MainActivity extends BridgeActivity {
+  private volatile long pipExitSettleUntil = 0;
   /** Home was pressed and we asked the system to enter picture-in-picture. */
   private boolean pipTransition = false;
   /**
@@ -132,6 +133,14 @@ public class MainActivity extends BridgeActivity {
     pipTransition = isInPictureInPictureMode;
     exitAfterLeave = false;
     if (isInPictureInPictureMode) keepWebViewPlaying();
+    pipExitSettleUntil = isInPictureInPictureMode ? 0 : System.currentTimeMillis() + 900;
+    if (!isInPictureInPictureMode) {
+      // Expand from PiP: re-assert bars only after the system transition settles.
+      try {
+        View decor = getWindow() != null ? getWindow().getDecorView() : null;
+        if (decor != null) decor.postDelayed(() -> onConfigurationChanged(getResources().getConfiguration()), 1000);
+      } catch (Throwable ignored) {}
+    }
     AppChromePlugin chrome = chromePlugin();
     if (chrome != null) chrome.onPictureInPictureModeChanged(isInPictureInPictureMode);
   }
@@ -156,6 +165,9 @@ public class MainActivity extends BridgeActivity {
   @Override
   public void onConfigurationChanged(Configuration newConfig) {
     super.onConfigurationChanged(newConfig);
+    // PiP enter/expand also lands here; touching insets/layout mid-transition
+    // makes Android snap the window back into PiP.
+    if (inPipOrSettling()) return;
     applyDarkSystemBars();
     AppChromePlugin chrome = chromePlugin();
     if (chrome != null) chrome.reapplyImmersiveIfNeeded();
@@ -212,7 +224,15 @@ public class MainActivity extends BridgeActivity {
    * Target SDK 35+ forces edge-to-edge (statusBarColor is often ignored); if light-mode
    * leaves dark glyphs on #080A0D the strip looks blank.
    */
+  /** True while in PiP or just after expanding out of it. */
+  private boolean inPipOrSettling() {
+    if (pipTransition) return true;
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && isInPictureInPictureMode()) return true;
+    return System.currentTimeMillis() < pipExitSettleUntil;
+  }
+
   void applyDarkSystemBars() {
+    if (inPipOrSettling()) return;
     try {
       Window window = getWindow();
       if (window == null) return;
