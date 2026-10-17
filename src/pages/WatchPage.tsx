@@ -59,6 +59,7 @@ import {
   resolveFullmatchShowsPlay,
 } from '../lib/fullmatchShows'
 import {
+  isNativeMedia3PlaybackItem,
   isWebEmbedPlaybackItem,
   isYouTubeUrl,
   shouldOpenInWebBrowser,
@@ -259,6 +260,14 @@ export function WatchPage() {
   itemsRef.current = items
   const playingIdRef = useRef(playing?.id)
   playingIdRef.current = playing?.id
+  // GlobalPlayer <video> already owns this title (PiP Expand lands here).
+  const playingNativeRef = useRef(false)
+  playingNativeRef.current = Boolean(
+    playing &&
+      mode !== 'off' &&
+      !isWebEmbedPlaybackItem(playing) &&
+      !isNativeMedia3PlaybackItem(playing),
+  )
 
   useEffect(() => {
     if (!item) return
@@ -267,6 +276,15 @@ export function WatchPage() {
 
     async function start() {
       setError(null)
+
+      // PiP Expand → /watch/<id> for a title the native player already owns.
+      // Cinetaro series now play via Movy/Bilibili HLS (0.3.70), so the Cinetaro
+      // redirect below sent /watch → /show while mode was 'full', and
+      // NavigationPiPBridge minimized straight back to the corner player.
+      if (playingIdRef.current === item!.id && playingNativeRef.current) {
+        const guard = multiviewGuardRef.current
+        if (guard.mode !== 'multi' && !guard.awaitingAdd) return
+      }
 
       // Cinetaro TV catalog pages are a Cloudflare wall — episode play uses ShowPage.
       // Cinetaro *movies* (shelf search fallback) go straight to the cinextream embed.

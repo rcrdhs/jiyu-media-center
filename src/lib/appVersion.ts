@@ -12,6 +12,11 @@ export const APP_VERSION_LABEL = `v${APP_VERSION}`
 /** Short milestone log — newest first — so progress is visible in-app. */
 export const APP_RELEASES: ReadonlyArray<{ version: string; summary: string }> = [
   {
+    version: '0.3.73',
+    summary:
+      'Expanding the in-app mini player now stays full screen instead of snapping back to the corner (Cinetaro series)',
+  },
+  {
     version: '0.3.72',
     summary:
       'Android: expanding from picture-in-picture stays expanded instead of snapping back to PiP',

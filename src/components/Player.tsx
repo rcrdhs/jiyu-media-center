@@ -18,6 +18,7 @@ import {
   usesOsFullscreenOnly,
   webSurfaceOwnsFullscreen,
 } from '../lib/fullscreenSession'
+import { androidSystemPipSettling } from '../lib/androidSystemPip'
 import { nativeFetchText } from '../lib/nativeHttp'
 import {
   formatClock,
@@ -3611,7 +3612,11 @@ export function Player({
     const onOrient = () => {
       setFittedVideo(null)
       fit()
-      if (!isPip && !isTile && (osFullScreenRef.current || usesOsFullscreenOnly())) {
+      // Only re-assert when the user is actually in Full. On Android
+      // usesOsFullscreenOnly() is always true, so the old check forced immersive on
+      // every orientationchange - including the one fired by expanding system PiP,
+      // which snapped the window straight back into PiP.
+      if (!isPip && !isTile && osFullScreenRef.current && !androidSystemPipSettling()) {
         void enterOsFullscreen('native')
       }
       try {

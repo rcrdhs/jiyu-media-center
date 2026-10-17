@@ -136,18 +136,33 @@ public class AppChromePlugin extends Plugin {
     pipHeight = height != null && height > 0 ? height : 9;
     Activity activity = getActivity();
     if (activity != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-      activity.runOnUiThread(() -> {
-        try {
-          if (activity.isInPictureInPictureMode() && !homePipEnabled) {
-            // Leave the window up until the user closes it; just stop re-entering.
-          }
-          activity.setPictureInPictureParams(buildPipParams());
-        } catch (Throwable ignored) {}
-      });
+      activity.runOnUiThread(() -> applyPipParamsWhenSafe(activity, 0));
     }
     JSObject out = new JSObject();
     out.put("ok", true);
     call.resolve(out);
+  }
+
+  /**
+   * setPictureInPictureParams(autoEnter) during an expand makes Android snap
+   * straight back into PiP. Wait until MainActivity's settle window has passed.
+   */
+  private void applyPipParamsWhenSafe(Activity activity, int attempt) {
+    if (activity.isFinishing()) return;
+    boolean defer =
+      activity instanceof MainActivity && ((MainActivity) activity).deferPipParamUpdates();
+    if (defer && attempt < 8) {
+      View decor = activity.getWindow() != null ? activity.getWindow().getDecorView() : null;
+      if (decor != null) {
+        decor.postDelayed(() -> applyPipParamsWhenSafe(activity, attempt + 1), 400);
+        return;
+      }
+    }
+    try {
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        activity.setPictureInPictureParams(buildPipParams());
+      }
+    } catch (Throwable ignored) {}
   }
 
   public boolean isHomePipEnabled() {

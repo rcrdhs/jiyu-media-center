@@ -3,6 +3,7 @@ import { usePlayback } from '../context/PlaybackContext'
 import { useWebBrowser } from '../context/WebBrowserContext'
 import {
   isAndroidSystemPipHost,
+  markAndroidSystemPip,
   onAndroidSystemPip,
   setAndroidHomePip,
 } from '../lib/androidSystemPip'
@@ -114,6 +115,7 @@ export function SystemPipBridge() {
   useEffect(() => {
     if (!isAndroidSystemPipHost()) return
     return onAndroidSystemPip((active) => {
+      markAndroidSystemPip(active)
       document.documentElement.classList.toggle('is-system-pip', active)
       const fire = () => window.dispatchEvent(new Event('resize'))
       window.requestAnimationFrame(() => {

@@ -133,14 +133,9 @@ public class MainActivity extends BridgeActivity {
     pipTransition = isInPictureInPictureMode;
     exitAfterLeave = false;
     if (isInPictureInPictureMode) keepWebViewPlaying();
-    pipExitSettleUntil = isInPictureInPictureMode ? 0 : System.currentTimeMillis() + 900;
-    if (!isInPictureInPictureMode) {
-      // Expand from PiP: re-assert bars only after the system transition settles.
-      try {
-        View decor = getWindow() != null ? getWindow().getDecorView() : null;
-        if (decor != null) decor.postDelayed(() -> onConfigurationChanged(getResources().getConfiguration()), 1000);
-      } catch (Throwable ignored) {}
-    }
+    // Keep this window long enough that focus/resume and PiP-param updates
+    // cannot land mid-expand. Those calls make Android re-enter PiP.
+    pipExitSettleUntil = isInPictureInPictureMode ? 0 : System.currentTimeMillis() + 2_000;
     AppChromePlugin chrome = chromePlugin();
     if (chrome != null) chrome.onPictureInPictureModeChanged(isInPictureInPictureMode);
   }
@@ -219,11 +214,10 @@ public class MainActivity extends BridgeActivity {
     }
   }
 
-  /**
-   * Keep clock / battery / signal light on the black status bar.
-   * Target SDK 35+ forces edge-to-edge (statusBarColor is often ignored); if light-mode
-   * leaves dark glyphs on #080A0D the strip looks blank.
-   */
+  boolean deferPipParamUpdates() {
+    return System.currentTimeMillis() < pipExitSettleUntil;
+  }
+
   /** True while in PiP or just after expanding out of it. */
   private boolean inPipOrSettling() {
     if (pipTransition) return true;
@@ -231,6 +225,11 @@ public class MainActivity extends BridgeActivity {
     return System.currentTimeMillis() < pipExitSettleUntil;
   }
 
+  /**
+   * Keep clock / battery / signal light on the black status bar.
+   * Target SDK 35+ forces edge-to-edge (statusBarColor is often ignored); if light-mode
+   * leaves dark glyphs on #080A0D the strip looks blank.
+   */
   void applyDarkSystemBars() {
     if (inPipOrSettling()) return;
     try {

@@ -36,6 +36,21 @@ export async function setAndroidHomePip(options: {
   }
 }
 
+let systemPipExitAt = 0
+
+/** Record system PiP enter/leave (SystemPipBridge). */
+export function markAndroidSystemPip(active: boolean): void {
+  systemPipExitAt = active ? 0 : Date.now()
+}
+
+/** True in system PiP or within `ms` after expanding out of it. */
+export function androidSystemPipSettling(ms = 2000): boolean {
+  if (typeof document !== 'undefined' && document.documentElement.classList.contains('is-system-pip')) {
+    return true
+  }
+  return systemPipExitAt > 0 && Date.now() - systemPipExitAt < ms
+}
+
 export function onAndroidSystemPip(listener: (active: boolean) => void): () => void {
   if (!isAndroidSystemPipHost()) return () => {}
   let handle: PluginListenerHandle | undefined
