@@ -12,6 +12,11 @@ export const APP_VERSION_LABEL = `v${APP_VERSION}`
 /** Short milestone log — newest first — so progress is visible in-app. */
 export const APP_RELEASES: ReadonlyArray<{ version: string; summary: string }> = [
   {
+    version: '0.3.71',
+    summary:
+      'Playback auto-resumes after a network drop: shows Reconnecting… while offline, reloads at the same spot when the connection returns, and backs off retries instead of needing skip forward',
+  },
+  {
     version: '0.3.70',
     summary:
       'Anime and series advance to the next episode when one ends; player controls hide after 5s and stay hidden through brief buffering',

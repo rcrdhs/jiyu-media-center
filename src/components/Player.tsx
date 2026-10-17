@@ -294,9 +294,17 @@ function hlsHasInFlightMainFrag(hls: Hls | null | undefined): boolean {
 function softHealHlsStall(
   hls: Hls,
   playhead: number,
-  opts?: { allowAbrDownshift?: boolean; onAbrCap?: (height: number) => void },
+  opts?: { allowAbrDownshift?: boolean; onAbrCap?: (height: number) => void; force?: boolean },
 ): 'in-flight' | 'abr-down' | 'start-load' {
-  if (hlsHasInFlightMainFrag(hls)) return 'in-flight'
+  // force: playhead frozen / network came back - the in-flight flag can be stale
+  // after an aborted request, so reset the loader like the skip-forward path does.
+  if (opts?.force) {
+    try {
+      hls.stopLoad()
+    } catch {
+      /* ignore */
+    }
+  } else if (hlsHasInFlightMainFrag(hls)) return 'in-flight'
   if (opts?.allowAbrDownshift && hls.levels.length > 1) {
     try {
       const curIdx =
@@ -4857,7 +4865,10 @@ export function Player({
     video.addEventListener('ended', onEnded)
     video.addEventListener('timeupdate', onRemuxGuard)
 
+    let hlsNetTeardown: (() => void) | null = null
     const cleanupPlayers = () => {
+      hlsNetTeardown?.()
+      hlsNetTeardown = null
       if (hls) {
         hls.destroy()
         hls = null
@@ -5089,10 +5100,29 @@ export function Player({
           fragLoadingTimeOut: liveMode ? 20_000 : movyPlayback ? 30_000 : 20_000,
           manifestLoadingTimeOut: liveMode ? 15_000 : movyPlayback ? 20_000 : 12_000,
           levelLoadingTimeOut: liveMode ? 15_000 : movyPlayback ? 20_000 : 12_000,
-          fragLoadingMaxRetry: liveMode ? 8 : 8,
+          fragLoadingMaxRetry: liveMode ? 8 : 12,
           manifestLoadingMaxRetry: liveMode ? 6 : 6,
           levelLoadingMaxRetry: liveMode ? 6 : 6,
-          fragLoadingRetryDelay: liveMode ? 800 : 800,
+          fragLoadingRetryDelay: liveMode ? 800 : 1000,
+          // VOD: exponential backoff (1s,2s,4s.. capped 16s) rides out Wi-Fi dips
+          // instead of exhausting retries in ~6s and going fatal.
+          ...(liveMode
+            ? {}
+            : {
+                fragLoadPolicy: {
+                  default: {
+                    maxTimeToFirstByteMs: 10_000,
+                    maxLoadTimeMs: movyPlayback ? 30_000 : 20_000,
+                    timeoutRetry: { maxNumRetry: 4, retryDelayMs: 0, maxRetryDelayMs: 0 },
+                    errorRetry: {
+                      maxNumRetry: 12,
+                      retryDelayMs: 1000,
+                      maxRetryDelayMs: 16_000,
+                      backoff: 'exponential' as const,
+                    },
+                  },
+                },
+              }),
           // Movy masters are true ladders (360/720/1080). Start near 720p
           // bandwidth, downshift quickly, climb slowly — never lock max bitrate.
           ...(movyPlayback && !liveMode
@@ -5184,6 +5214,87 @@ export function Player({
             onAbrCap: (height) => setEngineLabel(`hls · auto ≤${height}p`),
           })
           void ensureVideoAutoplay(video)
+        }
+        // Same recovery as skip-forward, but at the current playhead.
+        const forceReloadAtPlayhead = () => {
+          if (!hls || cancelled) return
+          const t = video.currentTime
+          if (Number.isFinite(t) && t > 0.5) pinStallPlayhead(t)
+          softHealHlsStall(hls, Number.isFinite(t) ? t : NaN, { force: true })
+          if (Number.isFinite(t) && Math.abs(video.currentTime - t) > 0.25) {
+            try {
+              video.currentTime = t
+            } catch {
+              /* ignore */
+            }
+          }
+          void ensureVideoAutoplay(video)
+        }
+        const isOffline = () => typeof navigator !== 'undefined' && navigator.onLine === false
+        const netBackoffSteps = [1000, 2000, 4000, 8000, 15_000]
+        let netBackoffTimer = 0
+        let netBackoffStep = 0
+        let netBackoffStarted = 0
+        const clearNetBackoff = () => {
+          window.clearTimeout(netBackoffTimer)
+          netBackoffTimer = 0
+          netBackoffStep = 0
+          netBackoffStarted = 0
+        }
+        /** True while a backoff retry is scheduled/allowed (~90s budget). */
+        const scheduleNetBackoff = (): boolean => {
+          if (!netBackoffStarted) netBackoffStarted = Date.now()
+          if (Date.now() - netBackoffStarted > 90_000) return false
+          if (netBackoffTimer) return true
+          const delay = netBackoffSteps[Math.min(netBackoffStep, netBackoffSteps.length - 1)]!
+          netBackoffStep += 1
+          netBackoffTimer = window.setTimeout(() => {
+            netBackoffTimer = 0
+            if (cancelled || !hls) return
+            if (isOffline()) return
+            forceReloadAtPlayhead()
+          }, delay)
+          return true
+        }
+        const onNetOffline = () => {
+          if (cancelled || !settled) return
+          setStatus('Reconnecting\u2026')
+        }
+        const onNetOnline = () => {
+          if (cancelled || !hls || !settled) return
+          window.clearTimeout(netBackoffTimer)
+          netBackoffTimer = 0
+          setStatus('Buffering\u2026')
+          forceReloadAtPlayhead()
+        }
+        let frozenAt = -1
+        let frozenSince = 0
+        const frozenWatch = window.setInterval(() => {
+          if (cancelled || !hls || !settled) return
+          const t = video.currentTime
+          if (video.paused || video.ended || !Number.isFinite(t)) {
+            frozenAt = -1
+            return
+          }
+          if (frozenAt < 0 || t > frozenAt + 0.2) {
+            if (frozenAt >= 0 && t > frozenAt + 0.2) clearNetBackoff()
+            frozenAt = t
+            frozenSince = Date.now()
+            return
+          }
+          if (isOffline() || Date.now() < seekGuardUntilRef.current) return
+          if (Date.now() - frozenSince >= 6000) {
+            frozenSince = Date.now()
+            forceReloadAtPlayhead()
+          }
+        }, 1000)
+        window.addEventListener('online', onNetOnline)
+        window.addEventListener('offline', onNetOffline)
+        hlsNetTeardown = () => {
+          window.removeEventListener('online', onNetOnline)
+          window.removeEventListener('offline', onNetOffline)
+          window.clearInterval(frozenWatch)
+          clearNetBackoff()
         }
         hls.loadSource(activePlaylistItem.url)
         hls.attachMedia(video)
@@ -5435,6 +5546,19 @@ export function Player({
             hls = null
             reject(new Error(message))
             return
+          }
+
+          // Mid-playback network loss: wait for 'online' / back off without
+          // spending recoveries or jumping to Atlantic.
+          if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+            if (isOffline()) {
+              setStatus('Reconnecting\u2026')
+              return
+            }
+            if (scheduleNetBackoff()) {
+              setStatus('Reconnecting\u2026')
+              return
+            }
           }
 
           // Mid-playback: keep recovering — the old `settled` gate dropped fatals
