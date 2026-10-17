@@ -22,6 +22,7 @@ import {
   isCloudflareChallengeTarget,
   isBlankBrowserUrl,
   isEmbedPlayerHost,
+  isPlaceholderBrowserTitle,
   isSportsOrReplayEmbedUrl,
   sameBrowserPageUrl,
   toAutoplayUrl,
@@ -73,6 +74,13 @@ type WebBrowserContextValue = {
   desktop: boolean
   mode: WebBrowserMode
   nav: BrowserNavState
+  /**
+   * Catalog title of what the embed is playing (match / movie / show + episode).
+   * Survives native nav updates (which report page titles or "Web browser") and
+   * PiP -> Expand, so player chrome never falls back to the Jiyu location.
+   */
+  contentTitle: string
+  setContentTitle: (title: string) => void
   address: string
   setAddress: (value: string) => void
   status: string | null
@@ -311,6 +319,12 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
   /** Latest embed URL for detachFrame last-chance PiP (nav state can lag unmount). */
   const navUrlRef = useRef('')
   const [mode, setMode] = useState<WebBrowserMode>('off')
+  const [contentTitle, setContentTitleState] = useState('')
+  const setContentTitle = useCallback((title: string) => {
+    const next = String(title || '').trim()
+    if (isPlaceholderBrowserTitle(next)) return
+    setContentTitleState((prev) => (prev === next ? prev : next))
+  }, [])
   const [fullscreen, setFullscreen] = useState(false)
   const fullscreenRef = useRef(false)
   const embedAspectRef = useRef(16 / 9)
@@ -765,6 +779,7 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
       frameRef.current = null
       setAddress(target)
       navUrlRef.current = target
+      if (title && !isPlaceholderBrowserTitle(title)) setContentTitleState(title.trim())
       setNav((currentNav) => ({
         ...currentNav,
         url: target,
@@ -920,6 +935,7 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
     modeRef.current = 'off'
     setFullscreen(false)
     setStatus(null)
+    setContentTitleState('')
     void hostHide({ blank: true })
     // Drop web Full only — leave a native stream's claim intact.
     if (getFullscreenOwner() === 'web') {
@@ -1237,6 +1253,8 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
       desktop,
       mode,
       nav,
+      contentTitle,
+      setContentTitle,
       address,
       setAddress,
       status,
@@ -1272,6 +1290,8 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
       desktop,
       mode,
       nav,
+      contentTitle,
+      setContentTitle,
       address,
       status,
       fullscreen,

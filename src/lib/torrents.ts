@@ -27,6 +27,8 @@ import {
   KIDS_SHELF_MOVIES,
   KIDS_SHELF_SHOWS,
   KIDS_SHOW_ALLOWLIST,
+  YTS_KIDS_GENRES,
+  YTS_KIDS_NEW_MAX_PAGES,
 } from './kidsCatalog'
 import type { StreamItem } from '../types'
 import { normalizeGenres } from './genres'
@@ -853,6 +855,8 @@ export const YTS_POPULAR_MIN_TITLES = 3000
 export const YTS_NEW_MAX_PAGES = 40
 /** Kids Movies — Family / Animation genre crawls (filtered under-13). */
 export const YTS_KIDS_MAX_PAGES = 30
+/** Kids New ranks ahead of Kids Popular (whose ranks are ~sync time). */
+const YTS_KIDS_NEW_RANK_LEAD_MS = 24 * 60 * 60 * 1000
 /**
  * Pause between YTS API list pages during catalog sync.
  * YTS does not publish a limit; Jackett uses 2.5s (2s caused problems).
@@ -3864,10 +3868,15 @@ async function scrapeYtsPage(
     const poster =
       movie.medium_cover_image || movie.large_cover_image || movie.small_cover_image || undefined
     // Preserve API list order for Popular (download_count); New uses upload time.
+    // Kids New (date_added): float fresh uploads above the popularity-ranked
+    // Kids shelf while they are still in the latest pages; they sink once they
+    // age out of the feed (rows keep the last rank they were synced with).
     const rankReleasedAt =
       sortBy === 'download_count' || sortBy === 'like_count'
         ? Date.now() - (page - 1) * 100_000 - index * 10
-        : releasedAt
+        : kidsGenreFeed && sortBy === 'date_added'
+          ? Date.now() + YTS_KIDS_NEW_RANK_LEAD_MS - (page - 1) * 100_000 - index * 10
+          : releasedAt
     index += 1
     const ytsGenres = normalizeGenres(movie.genres)
     links.push({
@@ -5273,6 +5282,11 @@ export interface CatalogFeed {
   maxPages: number
   /** Extra shelf tag (e.g. anime New Releases vs Full Shows) */
   shelfTag?: string
+  /**
+   * Kids refresh role: `new-movies` / `shows` feeds also run on their own in
+   * light passes; `popular-movies` completeness gates Kids Movies pruning.
+   */
+  kidsRefresh?: 'new-movies' | 'popular-movies' | 'shows'
 }
 
 /**
@@ -5303,6 +5317,15 @@ export function catalogFeedsForSource(source: TorrentSource): CatalogFeed[] {
     }
     if (isYtsSource(source.url, source.label)) {
       return [
+        // Kids New first (a few pages, date_added): new kids movies land before
+        // the long Popular crawl; also run alone by the light Kids New pass.
+        ...YTS_KIDS_GENRES.map((genre) => ({
+          url: ytsListApiUrl(origin, 1, undefined, 'date_added', genre),
+          category: 'kids' as const,
+          maxPages: YTS_KIDS_NEW_MAX_PAGES,
+          shelfTag: KIDS_SHELF_MOVIES,
+          kidsRefresh: 'new-movies' as const,
+        })),
         {
           url: ytsListApiUrl(origin, 1, undefined, 'download_count'),
           category: 'movies',
@@ -5315,18 +5338,14 @@ export function catalogFeedsForSource(source: TorrentSource): CatalogFeed[] {
           maxPages: YTS_NEW_MAX_PAGES,
           shelfTag: MOVIES_SHELF_NEW,
         },
-        {
-          url: ytsListApiUrl(origin, 1, undefined, 'download_count', 'Family'),
-          category: 'kids',
+        // Kids Popular (download_count): full crawl; completeness gates pruning.
+        ...YTS_KIDS_GENRES.map((genre) => ({
+          url: ytsListApiUrl(origin, 1, undefined, 'download_count', genre),
+          category: 'kids' as const,
           maxPages: YTS_KIDS_MAX_PAGES,
           shelfTag: KIDS_SHELF_MOVIES,
-        },
-        {
-          url: ytsListApiUrl(origin, 1, undefined, 'download_count', 'Animation'),
-          category: 'kids',
-          maxPages: YTS_KIDS_MAX_PAGES,
-          shelfTag: KIDS_SHELF_MOVIES,
-        },
+          kidsRefresh: 'popular-movies' as const,
+        })),
       ]
     }
     if (isEztvSource(source.url, source.label)) {
@@ -5351,6 +5370,7 @@ export function catalogFeedsForSource(source: TorrentSource): CatalogFeed[] {
           category: 'kids',
           maxPages: 1,
           shelfTag: KIDS_SHELF_SHOWS,
+          kidsRefresh: 'shows',
         },
       ]
     }

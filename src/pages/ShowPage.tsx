@@ -8,6 +8,7 @@ import { getContinueEntry, mergeRuntimeSeconds, recordWebEmbedContinue } from '.
 import { isWeakPosterUrl, resolveCatalogPoster } from '../lib/posterFallback'
 import { hasRealDebridToken } from '../lib/debridSettings'
 import { upsertTorrentItems } from '../lib/torrentCatalogStore'
+import { isMovieDetailItem } from '../lib/kidsCatalog'
 import {
   fetchYtsMovieSynopsis,
   needsRicherMovieSynopsis,
@@ -142,8 +143,8 @@ export function ShowPage() {
 
   useEffect(() => {
     if (!item) return
-    // Movies open here for synopsis → Watch. Series/anime keep the episode list.
-    if (!isShowBrowseItem(item) && item.category !== 'movies') {
+    // Movies (incl. Kids movies) open here for synopsis → Watch. Series/anime keep the episode list.
+    if (!isShowBrowseItem(item) && !isMovieDetailItem(item)) {
       navigate(`/watch/${item.id}`, { replace: true, state: { from: returnTo } })
       return
     }
@@ -157,7 +158,7 @@ export function ShowPage() {
     setSynopsis('')
     setNetworks([])
 
-    if (item.category === 'movies' && !isShowBrowseItem(item)) {
+    if (isMovieDetailItem(item) && !isShowBrowseItem(item)) {
       const local = String(item.description || '').trim()
       if (local && !/^https?:\/\//i.test(local)) setSynopsis(local)
       void (async () => {
@@ -1107,7 +1108,7 @@ export function ShowPage() {
 
   const display = item ?? raw!
   const isMovieDetail =
-    display.category === 'movies' && !isShowBrowseItem(display)
+    isMovieDetailItem(display) && !isShowBrowseItem(display)
   const displayDescription = synopsis || display.description || ''
   const preparingEpisode =
     playingIndex != null ? episodes[playingIndex] ?? null : null

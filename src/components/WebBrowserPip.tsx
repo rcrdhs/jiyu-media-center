@@ -5,12 +5,14 @@ import {
   androidBrowserSetVolume,
   isAndroidInAppBrowser,
 } from '../lib/androidBrowser'
+import { isPlaceholderBrowserTitle } from '../lib/webBrowser'
 
 /** Floating chrome for web-browser PiP (native WebContentsView draws the page). */
 export function WebBrowserPip() {
   const {
     mode,
     nav,
+    contentTitle,
     expandFromPip,
     closeBrowser,
     fullscreen,
@@ -75,6 +77,10 @@ export function WebBrowserPip() {
 
   if (mode !== 'pip') return null
 
+  // Name what is playing (match / title), not the browser placeholder.
+  const pipTitle =
+    contentTitle || (!isPlaceholderBrowserTitle(nav.title) ? nav.title.trim() : '') || 'Now playing'
+
   const volumeControls = (
     <button
       type="button"
@@ -99,7 +105,7 @@ export function WebBrowserPip() {
           ×
         </button>
         <span className="web-browser-pip-meta">
-          <strong title={nav.title || nav.url}>{nav.title || 'Web browser'}</strong>
+          <strong title={pipTitle}>{pipTitle}</strong>
         </span>
         <div className="web-browser-pip-actions">
           {volumeControls}
@@ -134,7 +140,7 @@ export function WebBrowserPip() {
           ×
         </button>
         <div className="web-browser-pip-meta">
-          <strong title={nav.title || nav.url}>{nav.title || 'Web'}</strong>
+          <strong title={pipTitle}>{pipTitle}</strong>
         </div>
         <div className="web-browser-pip-actions">
           {volumeControls}

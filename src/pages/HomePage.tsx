@@ -10,6 +10,7 @@ import { RecommendedShelf } from '../components/RecommendedShelf'
 import { NewTitlesDialog } from '../components/NewTitlesDialog'
 import { WatchNextStrip } from '../components/WatchNextStrip'
 import { WatchHistory } from '../components/WatchHistory'
+import { useUrlOverlay } from '../hooks/useUrlOverlay'
 import { LocalChannelLive } from '../components/LocalChannelLive'
 import { filterShelfVisibleItems, isSeriesWebCatalogItem } from '../lib/torrents'
 import { HIDE_KEYWORDS_EVENT } from '../lib/hideKeywords'
@@ -28,6 +29,8 @@ import {
   subscribeWatchlist,
 } from '../lib/watchlist'
 
+const HOME_PANELS = ['added', 'saved'] as const
+
 export function HomePage() {
   const { byCategory, items, ready, englishOnly } = useCatalog()
   const { item: playingItem, mode } = usePlayback()
@@ -36,8 +39,10 @@ export function HomePage() {
   const [catalogGrowth, setCatalogGrowth] = useState<SectionGrowth>(() =>
     getCatalogGrowth(items.length),
   )
-  const [newTitlesOpen, setNewTitlesOpen] = useState(false)
-  const [savedOpen, setSavedOpen] = useState(false)
+  // In the URL (?panel=added|saved) so Back from a title reopens the sheet.
+  const [homePanel, openHomePanel, closeHomePanel] = useUrlOverlay('panel', HOME_PANELS)
+  const newTitlesOpen = homePanel === 'added'
+  const savedOpen = homePanel === 'saved'
   const [savedCount, setSavedCount] = useState(() => getWatchlist().length)
   const [hideKeywordsTick, setHideKeywordsTick] = useState(0)
 
@@ -154,7 +159,7 @@ export function HomePage() {
                 <button
                   type="button"
                   className="growth-hit"
-                  onClick={() => setNewTitlesOpen(true)}
+                  onClick={() => openHomePanel('added')}
                 >
                   Added today {catalogGrowth.newToday.toLocaleString()}
                 </button>
@@ -166,7 +171,7 @@ export function HomePage() {
           <button
             type="button"
             className={`growth-hit hero-saved-hit${savedCount > 0 ? '' : ' is-disabled'}`}
-            onClick={() => setSavedOpen(true)}
+            onClick={() => openHomePanel('saved')}
           >
             Saved {savedCount.toLocaleString()}
           </button>
@@ -177,7 +182,8 @@ export function HomePage() {
         <NewTitlesDialog
           title="Added today"
           items={newTodayItems}
-          onClose={() => setNewTitlesOpen(false)}
+          restoreKey="home:added"
+          onClose={closeHomePanel}
         />
       ) : null}
 
@@ -186,7 +192,8 @@ export function HomePage() {
           title="Saved"
           items={savedItems}
           emptyHint="Nothing saved yet — tap ♡ on a movie, series, anime, or kids title."
-          onClose={() => setSavedOpen(false)}
+          restoreKey="home:saved"
+          onClose={closeHomePanel}
         />
       ) : null}
 

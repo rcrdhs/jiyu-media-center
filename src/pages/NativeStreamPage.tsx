@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { VolumeSlider } from '../components/VolumeSlider'
+import { usePlayback } from '../context/PlaybackContext'
 import {
   androidBrowserHide,
   isAndroidInAppBrowser,
@@ -50,7 +51,9 @@ export function NativeStreamPage() {
   const [error, setError] = useState<string | null>(null)
   const [volume, setVolume] = useState(1)
   const mediaUrl = String(state.mediaUrl || '').trim()
-  const title = state.title || 'Live'
+  const { item: playingItem } = usePlayback()
+  // Route state can be lost (HMR / process restore): fall back to the playing title.
+  const title = state.title?.trim() || playingItem?.title?.trim() || 'Live'
   const from = state.from || '/section/sports'
 
   useEffect(() => {

@@ -8,9 +8,17 @@ interface SectionViewState {
   focusItemId?: string
 }
 
+/** Scroll spot inside a full-screen overlay sheet (Added today, Saved, …). */
+interface OverlayViewState {
+  scrollTop: number
+  /** Card last opened from the sheet; fallback anchor when layout differs. */
+  focusItemId?: string
+}
+
 interface ViewBag {
   scroll: Record<string, number>
   sections: Record<string, SectionViewState>
+  overlays?: Record<string, OverlayViewState>
 }
 
 function readBag(): ViewBag {
@@ -21,6 +29,7 @@ function readBag(): ViewBag {
     return {
       scroll: parsed.scroll ?? {},
       sections: parsed.sections ?? {},
+      overlays: parsed.overlays ?? {},
     }
   } catch {
     return { scroll: {}, sections: {} }
@@ -71,6 +80,26 @@ export function clearSectionFocusItem(sectionId: string) {
   const prev = getSectionView(sectionId)
   if (!prev?.focusItemId) return
   setSectionView(sectionId, { ...prev, focusItemId: undefined })
+}
+
+export function getOverlayView(key: string): OverlayViewState | undefined {
+  return readBag().overlays?.[key]
+}
+
+export function setOverlayView(key: string, patch: Partial<OverlayViewState>) {
+  const bag = readBag()
+  const overlays = bag.overlays ?? {}
+  const prev: OverlayViewState = overlays[key] ?? { scrollTop: 0 }
+  overlays[key] = { ...prev, ...patch }
+  bag.overlays = overlays
+  writeBag(bag)
+}
+
+export function clearOverlayView(key: string) {
+  const bag = readBag()
+  if (!bag.overlays?.[key]) return
+  delete bag.overlays[key]
+  writeBag(bag)
 }
 
 export function getMainStage(): HTMLElement | null {

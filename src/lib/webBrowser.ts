@@ -77,6 +77,19 @@ export function liveUrlForChannelTitle(title: string): string {
   return `https://www.youtube.com/results?search_query=${encodeURIComponent(`${name} Jamaica live`)}`
 }
 
+/**
+ * Generic labels the browser layer reports when a page has no real title
+ * (Android InAppBrowserPlugin / androidBrowserGetState default to "Web browser").
+ * Never show these as the name of what is being watched.
+ */
+export function isPlaceholderBrowserTitle(title: string | null | undefined): boolean {
+  const t = String(title ?? '').trim()
+  if (!t) return true
+  return /^(?:web(?:\s+browser)?|jiyu|now playing|live|loading\b.*|failed|untitled|new tab|about:.*)$/i.test(
+    t,
+  )
+}
+
 export function isYouTubeUrl(url: string): boolean {
   try {
     const u = new URL(url)

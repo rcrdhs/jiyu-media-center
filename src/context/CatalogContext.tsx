@@ -74,6 +74,32 @@ import {
 import { clearTorrentSyncStatus, setTorrentSyncMessage } from '../lib/torrentSyncStatus'
 import { isKidsModeEnabled, subscribeKidsMode } from '../lib/kidsMode'
 import {
+  KIDS_NEW_PASS_INTERVAL_MS,
+  KIDS_SHOWS_PASS_INTERVAL_MS,
+} from '../lib/kidsCatalog'
+
+/** Last light Kids pass (ms) - separate from full-sync syncedAt. */
+const KIDS_NEW_PASS_KEY = 'jiyu.kids.new-pass-at'
+const KIDS_SHOWS_PASS_KEY = 'jiyu.kids.shows-pass-at'
+/** Full YTS refresh cadence (Kids New rides along when that is due). */
+const YTS_FULL_REFRESH_MS = 12 * 60 * 60 * 1000
+
+function readPassAt(key: string): number {
+  try {
+    return Number(localStorage.getItem(key)) || 0
+  } catch {
+    return 0
+  }
+}
+
+function writePassAt(key: string, at: number): void {
+  try {
+    localStorage.setItem(key, String(at))
+  } catch {
+    /* private mode */
+  }
+}
+import {
   fetchStreamedAllMatches,
   fetchStreamedLiveMatches,
   fetchStreamedSports,
@@ -560,6 +586,39 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
     [applySyncProgress, reloadTorrentCatalog],
   )
 
+  /**
+   * Quiet Kids refresh between full syncs: run only the Kids New (YTS
+   * date_added) or Kids Shows (EZTV allowlist) feeds, merged in place - no
+   * prune, no whole-source replace, full-sync schedule untouched.
+   * Never-synced sources are skipped (their full launch sync covers Kids).
+   */
+  const runKidsLightPass = useCallback(
+    async (role: 'new-movies' | 'shows'): Promise<number> => {
+      const meta = loadTorrentCatalogMeta()
+      const targets = loadTorrentSources().filter(
+        (source) =>
+          isCatalogAutosyncSource(source) &&
+          (role === 'new-movies'
+            ? isYtsSource(source.url, source.label)
+            : isEztvSource(source.url, source.label)) &&
+          (meta.bySource[source.id]?.count ?? 0) > 0,
+      )
+      let added = 0
+      for (const source of targets) {
+        const result = await enqueueTorrentSyncTask(() =>
+          syncTorrentSource(source, undefined, {
+            lightPass: true,
+            feedFilter: (feed) => feed.kidsRefresh === role,
+          }),
+        )
+        if (result && !result.cancelled) added += result.added
+      }
+      if (added > 0) await reloadTorrentCatalog()
+      return added
+    },
+    [reloadTorrentCatalog],
+  )
+
   const syncAllTorrentWebsites = useCallback(async () => {
     const queued = await enqueueTorrentSyncTask(async () => {
       const list = loadTorrentSources().filter(isCatalogAutosyncSource)
@@ -802,6 +861,30 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
     }
   }, [ready, syncTorrentWebsite])
 
+  // Kids New: latest YTS Family / Animation uploads every ~3h between full
+  // YTS syncs (skipped when the 12h full refresh is due - it runs Kids New first).
+  useEffect(() => {
+    if (!ready) return
+    const run = () => {
+      const yts = loadTorrentSources().find(
+        (entry) => isYtsSource(entry.url, entry.label) && isCatalogAutosyncSource(entry),
+      )
+      if (!yts) return
+      const fullAt = loadTorrentCatalogMeta().bySource[yts.id]?.syncedAt ?? 0
+      if (!fullAt || Date.now() - fullAt >= YTS_FULL_REFRESH_MS) return
+      const lastAt = Math.max(fullAt, readPassAt(KIDS_NEW_PASS_KEY))
+      if (Date.now() - lastAt < KIDS_NEW_PASS_INTERVAL_MS) return
+      writePassAt(KIDS_NEW_PASS_KEY, Date.now())
+      void runKidsLightPass('new-movies')
+    }
+    const startup = window.setTimeout(run, 45_000)
+    const timer = window.setInterval(run, 30 * 60_000)
+    return () => {
+      window.clearTimeout(startup)
+      window.clearInterval(timer)
+    }
+  }, [ready, runKidsLightPass])
+
   // TMDB Series + Anime + Kids + Zenox Animation — daily only (skip if synced within 24h).
   useEffect(() => {
     if (!ready) return
@@ -839,6 +922,19 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
           if (Date.now() - syncedAt < DAY_MS) continue
           await syncTorrentWebsite(source.id)
         }
+        // Curated EZTV Kids Shows ride the same daily Kids Shows refresh. Light
+        // pass: replaces only Kids Show rows, keeps the old list if none return.
+        const eztv = loadTorrentSources().find(
+          (entry) => isEztvSource(entry.url, entry.label) && isCatalogAutosyncSource(entry),
+        )
+        if (eztv) {
+          const fullAt = loadTorrentCatalogMeta().bySource[eztv.id]?.syncedAt ?? 0
+          const lastAt = Math.max(fullAt, readPassAt(KIDS_SHOWS_PASS_KEY))
+          if (kidsShelfEmpty || Date.now() - lastAt >= KIDS_SHOWS_PASS_INTERVAL_MS) {
+            writePassAt(KIDS_SHOWS_PASS_KEY, Date.now())
+            await runKidsLightPass('shows')
+          }
+        }
       })()
     }
     // Kids Shows empty → sync soon; other TMDB feeds wait so startup isn’t a pile-up.
@@ -852,7 +948,7 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
     }
     // torrentItems only used for the one-shot empty Kids check at schedule time.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, syncTorrentWebsite])
+  }, [ready, syncTorrentWebsite, runKidsLightPass])
 
   // Streamed.pk + PPV.st — live sports catalogs; refresh as games start/end.
   useEffect(() => {

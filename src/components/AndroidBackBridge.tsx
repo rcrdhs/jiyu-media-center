@@ -53,6 +53,16 @@ function sectionPathFromLocation(
 }
 
 /**
+ * Player Back lands on its returnTo (often `/show/:id`). Keep the shelf/sheet that
+ * opened the title (e.g. `/?panel=added`) as that page's `state.from` so the
+ * next Back still returns there instead of the category fallback.
+ */
+function carryFrom(dest: string, routeFrom: string | null): { from: string } | undefined {
+  if (!routeFrom || !dest.startsWith('/show/')) return undefined
+  return { from: routeFrom }
+}
+
+/**
  * Hardware Back on Android — finite ladder:
  * overlay → leave watch/embed → section → home → “press again to exit” → exit.
  */
@@ -129,7 +139,7 @@ export function AndroidBackBridge() {
               s.routeFrom ||
               '/'
             if (s.path.startsWith('/watch') || s.path.startsWith('/show')) {
-              navigate(dest, { replace: true })
+              navigate(dest, { replace: true, state: carryFrom(dest, s.routeFrom) })
             }
           }
           return
@@ -145,7 +155,7 @@ export function AndroidBackBridge() {
             s.routeFrom ||
             '/'
           if (s.path.startsWith('/watch') || s.path.startsWith('/show')) {
-            navigate(dest, { replace: true })
+            navigate(dest, { replace: true, state: carryFrom(dest, s.routeFrom) })
           }
           return
         }

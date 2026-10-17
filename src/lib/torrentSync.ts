@@ -33,6 +33,7 @@ import {
   scrapePage,
   YTS_API_REQUEST_GAP_MS,
   YTS_POPULAR_MIN_TITLES,
+  type CatalogFeed,
   type TorrentSource,
 } from './torrents'
 import { isTmdbTvFeedUrl } from './tmdbTv'
@@ -41,8 +42,13 @@ import {
   isKidsMovieItem,
   isKidsShowItem,
   KIDS_SHELF_MOVIES,
+  KIDS_RETIRED_TAG,
   KIDS_SHELF_SHOWS,
+  planKidsMoviePrune,
 } from './kidsCatalog'
+import { listContinueWatching } from './continueWatching'
+import { listWatchHistory } from './watchHistory'
+import { getWatchlist } from './watchlist'
 import type { StreamItem } from '../types'
 
 /**
@@ -75,6 +81,31 @@ export interface TorrentSyncResult {
   superseded?: boolean
 }
 
+/** Ids the user touched (Continue watching / history / Saved): never pruned. */
+function userProtectedIds(): Set<string> {
+  const ids = new Set<string>()
+  try {
+    for (const entry of listContinueWatching()) ids.add(entry.id)
+    for (const entry of listWatchHistory('all')) ids.add(entry.id)
+    for (const entry of getWatchlist()) ids.add(entry.id)
+  } catch {
+    /* storage unavailable: protect nothing extra, prune still requires a full sync */
+  }
+  return ids
+}
+
+export interface SyncTorrentSourceOptions {
+  sessionId?: number
+  /** Only crawl these feeds (light passes). */
+  feedFilter?: (feed: CatalogFeed) => boolean
+  /**
+   * Light pass: a subset of feeds, merged in place. Never prunes, never
+   * replaces the whole source, and leaves sync metadata (syncedAt / count)
+   * alone so the full refresh schedule is unaffected.
+   */
+  lightPass?: boolean
+}
+
 function yieldToUi(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
@@ -95,11 +126,16 @@ async function upsertInBatches(items: StreamItem[], batchSize?: number): Promise
 export async function syncTorrentSource(
   source: TorrentSource,
   onProgress?: (progress: TorrentSyncProgress) => void,
-  options?: { sessionId?: number },
+  options?: SyncTorrentSourceOptions,
 ): Promise<TorrentSyncResult> {
   const ownsSession = options?.sessionId == null
   const session = options?.sessionId ?? beginTorrentSyncSession()
-  const feeds = catalogFeedsForSource(source)
+  const lightPass = Boolean(options?.lightPass)
+  const allFeeds = catalogFeedsForSource(source)
+  const feeds = options?.feedFilter ? allFeeds.filter(options.feedFilter) : allFeeds
+  // Kids Popular completeness (gates pruning): finished every page, no errors.
+  const feedState = new Map<CatalogFeed, { complete: boolean; errored: boolean }>()
+  for (const feed of feeds) feedState.set(feed, { complete: false, errored: false })
   const byId = new Map<string, StreamItem>()
   let pages = 0
   let lastError: string | undefined
@@ -321,6 +357,8 @@ export async function syncTorrentSource(
         }
         if (outcome.error && outcome.links.length === 0) {
           lastError = outcome.error
+          const state = feedState.get(feed)
+          if (state) state.errored = true
           // Keep progress for YTS — skip the bad page and keep crawling when we can.
           if (ytsSource && page < feed.maxPages) {
             let nextUrl = outcome.nextPage
@@ -356,6 +394,8 @@ export async function syncTorrentSource(
           )
         ) {
           lastError = `${source.label}: Now Airing list unavailable`
+          const state = feedState.get(feed)
+          if (state) state.errored = true
           break
         }
         for (const link of outcome.links) {
@@ -383,6 +423,10 @@ export async function syncTorrentSource(
         }
 
         const reachedEnd = !outcome.nextPage || page >= feed.maxPages
+        if (reachedEnd) {
+          const state = feedState.get(feed)
+          if (state) state.complete = true
+        }
         const within = reachedEnd ? 1 : Math.min(0.99, page / Math.max(1, feed.maxPages))
         // Leave headroom for the final "Saving…" step.
         const percent = Math.min(97, Math.round(feedBase + within * feedSpan * 0.97))
@@ -442,7 +486,13 @@ export async function syncTorrentSource(
     const previousCount = meta.bySource[source.id]?.count ?? 0
 
     // Only block tiny accidental wipes of a large library.
-    if (eztvShowlist && previousCount >= 1000 && items.length > 0 && items.length < 100) {
+    if (
+      !lightPass &&
+      eztvShowlist &&
+      previousCount >= 1000 &&
+      items.length > 0 &&
+      items.length < 100
+    ) {
       const message = `${source.label}: sync found only ${items.length.toLocaleString()} titles (had ${previousCount.toLocaleString()}); kept existing library`
       onProgress?.({
         sourceId: source.id,
@@ -487,7 +537,44 @@ export async function syncTorrentSource(
         const existingKids = existing.filter(isKidsMovieItem)
 
         const keptPopular = existingPopular.filter((item) => !incomingIds.has(item.id))
-        const keptKids = existingKids.filter((item) => !incomingIds.has(item.id))
+        // Kids Movies: prune rows the feeds no longer return, but only after a
+        // complete full sync (see planKidsMoviePrune for the guards).
+        const kidsPopularFeeds = feeds.filter((feed) => feed.kidsRefresh === 'popular-movies')
+        const kidsPlan = planKidsMoviePrune({
+          existing: existingKids,
+          seenIds: incomingIds,
+          incomingCount: items.filter(isKidsMovieItem).length,
+          feedsComplete:
+            !lightPass &&
+            kidsPopularFeeds.length > 0 &&
+            kidsPopularFeeds.every((feed) => feedState.get(feed)?.complete),
+          feedsErrored: kidsPopularFeeds.some((feed) => feedState.get(feed)?.errored),
+          protectedIds: userProtectedIds(),
+        })
+        const keptKids = [...kidsPlan.keep, ...kidsPlan.retire]
+        if (kidsPlan.pruned || kidsPlan.deleteIds.length > 0) {
+          console.info(
+            `[kids] ${source.label}: ${kidsPlan.pruned ? 'pruned' : `prune skipped (${kidsPlan.reason})`}; ` +
+              `removed ${kidsPlan.deleteIds.length}, retained hidden ${kidsPlan.retire.length}, kept ${kidsPlan.keep.length}`,
+          )
+        }
+        if (lightPass) {
+          // Light Kids New pass: write only what this pass returned (keep any
+          // other shelf tags the row already had; a re-seen row is un-retired),
+          // drop unsafe kids rows, and leave Popular / New untouched.
+          const existingById = new Map(existing.map((row) => [row.id, row]))
+          const lightWrite = items.map((item) => {
+            const prev = existingById.get(item.id)
+            if (!prev) return item
+            const tags = [...new Set([...(prev.tags ?? []), ...(item.tags ?? [])])].filter(
+              (tag) => tag !== KIDS_RETIRED_TAG,
+            )
+            return { ...prev, ...item, tags, description: item.description || prev.description }
+          })
+          await deleteTorrentItemsByIds(kidsPlan.deleteIds)
+          await upsertInBatches(lightWrite)
+          savedCount = lightWrite.length
+        } else {
         const merged = [...items, ...keptPopular, ...keptKids]
 
         const popularAfter = merged.filter(isMoviesPopularItem).length
@@ -535,9 +622,24 @@ export async function syncTorrentSource(
               return { ...item, tags }
             })
 
-        await deleteTorrentItemsByIds(staleNewIds)
+        await deleteTorrentItemsByIds([...staleNewIds, ...kidsPlan.deleteIds])
         await upsertInBatches(mergedForWrite)
         savedCount = mergedForWrite.length
+        }
+      } else if (lightPass) {
+        // Light pass (e.g. daily Kids Shows): merge in place. Replace only the
+        // Kids Show rows, and only when the feed returned some - otherwise keep
+        // the previous list. Every other row of this source is left untouched.
+        if (items.some(isKidsShowItem)) {
+          const existing = await listTorrentItemsForSource(source.id)
+          const incomingIds = new Set(items.map((item) => item.id))
+          const staleKidsShowIds = existing
+            .filter((item) => isKidsShowItem(item) && !incomingIds.has(item.id))
+            .map((item) => item.id)
+          await deleteTorrentItemsByIds(staleKidsShowIds)
+        }
+        await upsertInBatches(items)
+        savedCount = items.length
       } else {
         // One replace at the end (batched) — mid-sync IDB writes were freezing Jiyu.
         // Cancel is ignored once delete starts so we never leave an empty shelf.
@@ -553,10 +655,13 @@ export async function syncTorrentSource(
         savedCount = merged.length
       }
 
-      meta.lastSyncAt = Date.now()
-      meta.scraperVersion = TORRENT_SCRAPER_VERSION
-      meta.bySource[source.id] = { syncedAt: Date.now(), count: savedCount }
-      saveTorrentCatalogMeta(meta)
+      // Light passes leave the full-refresh schedule / counts alone.
+      if (!lightPass) {
+        meta.lastSyncAt = Date.now()
+        meta.scraperVersion = TORRENT_SCRAPER_VERSION
+        meta.bySource[source.id] = { syncedAt: Date.now(), count: savedCount }
+        saveTorrentCatalogMeta(meta)
+      }
     }
 
     onProgress?.({

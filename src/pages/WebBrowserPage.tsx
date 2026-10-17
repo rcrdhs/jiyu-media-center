@@ -8,6 +8,7 @@ import {
   buildSearchUrl,
   isBlankBrowserUrl,
   isEmbedPlayerHost,
+  isPlaceholderBrowserTitle,
   isSportsOrReplayEmbedUrl,
   toAutoplayUrl,
   type WebSearchKind,
@@ -109,6 +110,8 @@ export function WebBrowserPage() {
     desktop,
     mode: webMode,
     nav,
+    contentTitle,
+    setContentTitle,
     address,
     setAddress,
     status,
@@ -297,26 +300,43 @@ export function WebBrowserPage() {
   }, [desktop, embedPlayer, continueWatch?.id, continueWatch?.playlistIndex])
 
   const displayTitle = (() => {
+    // What is being watched, never the Jiyu location / browser placeholder.
     if (continueWatch?.episodeTitle && continueWatch?.title) {
       return `${continueWatch.title} ${continueWatch.episodeTitle}`
     }
     const raw = nav.title?.trim() || ''
-    // Prefer episode title from the player; never fall back to the stream host.
-    // Guest "about:blank" titles happen after hide({ blank }) — ignore them.
-    if (
+    // Guest "about:blank" titles happen after hide({ blank }); native reports
+    // "Web browser" when the embed page has no <title>. Ignore both, and hosts.
+    const pageTitle =
       raw &&
+      !isPlaceholderBrowserTitle(raw) &&
       !isBlankBrowserUrl(raw) &&
-      !/^about:/i.test(raw) &&
       !isEmbedPlayerHost(`https://${raw}/`) &&
       !/fstream365|vsembed|freemovies/i.test(raw)
-    ) {
-      return raw
+        ? raw
+        : ''
+    const catalogTitle =
+      continueWatch?.title?.trim() || (embedPlayer ? contentTitle : '')
+    if (catalogTitle) {
+      // Keep a richer player title (e.g. "Show - S01E03 Name") that names the same title.
+      if (pageTitle && pageTitle.toLowerCase().includes(catalogTitle.toLowerCase())) {
+        return pageTitle
+      }
+      return catalogTitle
     }
-    if (continueWatch?.title) return continueWatch.title
+    if (pageTitle) return pageTitle
     if (embedPlayer) return 'Now playing'
     const hostUrl = [nav.url, address, paramUrl].find((u) => u && !isBlankBrowserUrl(u)) || ''
     return displayHost(hostUrl) || 'Web'
   })()
+
+  // Remember the catalog title so PiP and PiP -> Expand keep naming the content.
+  useEffect(() => {
+    const title = continueWatch?.episodeTitle && continueWatch?.title
+      ? `${continueWatch.title} ${continueWatch.episodeTitle}`
+      : continueWatch?.title
+    if (title) setContentTitle(title)
+  }, [continueWatch?.title, continueWatch?.episodeTitle, setContentTitle])
 
   function leaveEmbed() {
     if (continueWatch?.id) {

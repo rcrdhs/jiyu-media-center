@@ -4,6 +4,7 @@ import { useStreamHealth } from '../context/StreamHealthContext'
 import { eventBadgeForItem } from '../lib/eventTimer'
 import { getMainStage, setMainScroll, setSectionFocusItem } from '../lib/viewState'
 import { isShowBrowseItem, isSeriesWebCatalogItem } from '../lib/torrents'
+import { isMovieDetailItem } from '../lib/kidsCatalog'
 import { isWebBrowserOnlyUrl, isYouTubeUrl } from '../lib/webBrowser'
 import { isWeakPosterUrl, resolveCatalogPoster } from '../lib/posterFallback'
 import { parseSportsMatchSides, sportsCardPoster } from '../lib/sportsMatchPoster'
@@ -186,7 +187,7 @@ export function MediaCard({ item }: MediaCardProps) {
     >
       <Link
         to={
-          isShowBrowseItem(item) || item.category === 'movies'
+          isShowBrowseItem(item) || isMovieDetailItem(item)
             ? `/show/${item.id}`
             : `/watch/${item.id}`
         }

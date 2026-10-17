@@ -8,6 +8,7 @@ import { HideKeywordsSettings } from '../components/HideKeywordsSettings'
 import { isHideKeywordSection } from '../lib/hideKeywords'
 import { NewTitlesDialog } from '../components/NewTitlesDialog'
 import { useMainScrollRestore } from '../hooks/useMainScrollRestore'
+import { useUrlOverlay } from '../hooks/useUrlOverlay'
 import { isVodCategory } from '../lib/continueWatching'
 import { searchNyaaAnimeForShelf } from '../lib/nyaa'
 import { searchMoviesForShelf, type MoviesShelfTarget } from '../lib/movieShelfSearch'
@@ -43,6 +44,7 @@ import {
 import {
   isKidsLiveItem,
   isKidsMovieItem,
+  isKidsMovieShelfItem,
   isKidsShowItem,
 } from '../lib/kidsCatalog'
 import {
@@ -73,6 +75,7 @@ import { FavoriteTeamsEditor } from '../components/FavoriteTeamsEditor'
 import type { CategoryId, StreamItem } from '../types'
 
 const PAGE = 120
+const NEW_TITLES_KINDS: readonly NewTitlesKind[] = ['today', 'sinceYesterday']
 /** First paint after navigation — keep small so TV Series (~20k) opens under ~2s. */
 const INITIAL_VISIBLE_CAP = 48
 /** Never eagerly remount more than this when entering the section (scroll loads the rest). */
@@ -608,7 +611,8 @@ export function SectionPage() {
 
     if (categoryId === 'kids') {
       const primary = prepareShelfList(
-        items.filter((item) => isKidsMovieItem(item) && match(item)),
+        // Retired (hidden-but-retained) kids movies stay off the shelf.
+        items.filter((item) => isKidsMovieShelfItem(item) && match(item)),
         { ...shelfOpts, newestFirst: true },
       )
       const fullShows = prepareShelfList(
@@ -791,7 +795,7 @@ export function SectionPage() {
     if (categoryId === 'kids') {
       return [
         ...prepareShelfList(
-          items.filter((item) => isKidsMovieItem(item)),
+          items.filter((item) => isKidsMovieShelfItem(item)),
           { ...shelfOpts, newestFirst: true },
         ),
         ...prepareShelfList(
@@ -990,7 +994,11 @@ export function SectionPage() {
     reloadTorrentCatalog,
   ])
   const [growth, setGrowth] = useState<SectionGrowth | null>(null)
-  const [newTitlesKind, setNewTitlesKind] = useState<NewTitlesKind | null>(null)
+  // In the URL (?new=today|sinceYesterday) so Back from a title reopens the sheet.
+  const [newTitlesKind, openNewTitles, closeNewTitles] = useUrlOverlay<NewTitlesKind>(
+    'new',
+    NEW_TITLES_KINDS,
+  )
 
   useEffect(() => {
     if (!ready || !trackGrowth) {
@@ -1299,7 +1307,7 @@ export function SectionPage() {
                   type="button"
                   className={`growth-hit section-growth-up${growth.delta <= 0 ? ' is-disabled' : ''}`}
                   disabled={growth.delta <= 0}
-                  onClick={() => (growth.delta ?? 0) > 0 && setNewTitlesKind('sinceYesterday')}
+                  onClick={() => (growth.delta ?? 0) > 0 && openNewTitles('sinceYesterday')}
                 >
                   {' '}
                   ({growth.delta > 0 ? '+' : ''}
@@ -1312,7 +1320,7 @@ export function SectionPage() {
               <button
                 type="button"
                 className="growth-hit section-growth-up"
-                onClick={() => setNewTitlesKind('today')}
+                onClick={() => openNewTitles('today')}
               >
                 {' '}
                 (+{growth.newToday.toLocaleString()} new today)
@@ -1337,7 +1345,8 @@ export function SectionPage() {
               : `New in ${meta.label} today`
           }
           items={newTitleItems}
-          onClose={() => setNewTitlesKind(null)}
+          restoreKey={`section:${categoryId}:${newTitlesKind}`}
+          onClose={closeNewTitles}
         />
       ) : null}
 
