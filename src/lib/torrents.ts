@@ -7,6 +7,7 @@
 import { stableTorrentItemId } from './torrentCatalogStore'
 import { TorrentSyncCancelledError } from './torrentSyncControl'
 import { hasRealDebridToken } from './debridSettings'
+import { hasAnyHideKeywords, itemMatchesHideKeywords } from './hideKeywords'
 import { nativeFetchText, isNativeHttpPlatform } from './nativeHttp'
 import {
   fetchTorrentioEpisodeStreams,
@@ -104,6 +105,7 @@ import {
   fetchZenoxAnimationCatalogLinks,
   isZenoxAnimationFeedUrl,
   isZenoxCatalogItem,
+  isZenoxRoutedShelfItem,
   isZenoxUrl,
   zenoxAnimationFeedUrl,
   ZENOX_SOURCE_ID,
@@ -115,7 +117,7 @@ export { isNetMirrorUrl, isNetMirrorCatalogItem } from './netmirror'
 export { isYmoviesUrl, isYmoviesCatalogItem } from './ymovies'
 export { isCinetaroUrl, isCinetaroCatalogItem } from './cinetaro'
 export { isTmdbTvUrl, isTmdbTvCatalogItem } from './tmdbTv'
-export { isZenoxUrl, isZenoxCatalogItem } from './zenox'
+export { isZenoxUrl, isZenoxCatalogItem, isZenoxRoutedShelfItem } from './zenox'
 
 /** Series shelf web catalogs — not raw torrents / IPTV. */
 export function isSeriesWebCatalogItem(item: {
@@ -146,6 +148,19 @@ export interface TorrentSource {
    * New user-added sites stay unlocked.
    */
   locked?: boolean
+}
+
+/**
+ * Sources included in Sync all / launch autosync / daily refresh.
+ * Zenox stays Library-hidden as a source row but still autosyncs (routes onto Anime/Kids/Series).
+ */
+export function isCatalogAutosyncSource(source: {
+  id?: string
+  url?: string
+  hiddenFromShelves?: boolean
+}): boolean {
+  if (source.id === ZENOX_SOURCE_ID || (source.url && isZenoxUrl(source.url))) return true
+  return !source.hiddenFromShelves
 }
 
 export interface TorrentResult {
@@ -180,6 +195,8 @@ export interface TorrentPageLink {
   cinetaroTmdbId?: string
   /** TMDB TV id for RiveStream / TMDB catalog rows. */
   rivestreamTmdbId?: string
+  /** ISO 639-1 original language when known (TMDB / M2Box country). */
+  originalLanguage?: string
   /** Optional per-link shelf tag (Zenox Animation splits anime/kids/series). */
   shelfTag?: string
 }
@@ -191,11 +208,6 @@ const SUBSPLEASE_SOURCE: TorrentSource = {
   label: 'subsplease.org',
   url: 'https://subsplease.org/shows/',
 }
-const TORRENTFUNK_SOURCE: TorrentSource = {
-  id: 'builtin-torrentfunk',
-  label: 'torrentfunk.com',
-  url: 'https://www.torrentfunk.com/television.html',
-}
 const YTS_SOURCE: TorrentSource = {
   id: 'builtin-yts',
   label: 'YTS',
@@ -203,19 +215,18 @@ const YTS_SOURCE: TorrentSource = {
 }
 const CINETARO_SOURCE: TorrentSource = {
   id: 'builtin-cinetaro',
-  label: 'Cinetaro · TV Series',
+  label: 'Cinetaro · TV Series (backup)',
   url: 'https://cinetaro.to/movie/tv-series?page=1',
 }
-/** Backup TV shelf — hidden by default (CF/origin flaky); Sync + Show still available. */
+/** Backup TV Series shelf (alongside TMDB / M2Box / NetMirror). */
 const YMOVIES_SOURCE: TorrentSource = {
   id: 'builtin-ymovies',
   label: 'YMovies · TV Series (backup)',
   url: 'https://ww.ymovies.vip/movie/filter/series/',
-  hiddenFromShelves: true,
 }
 const TMDB_TV_SOURCE: TorrentSource = {
   id: TMDB_TV_SOURCE_ID,
-  label: 'TMDB · TV Series (Rive)',
+  label: 'TMDB · TV Series',
   url: tmdbTvPopularFeedUrl(),
 }
 const TMDB_ANIME_SOURCE: TorrentSource = {
@@ -230,14 +241,15 @@ const TMDB_KIDS_SOURCE: TorrentSource = {
 }
 const ZENOX_SOURCE: TorrentSource = {
   id: ZENOX_SOURCE_ID,
-  label: 'Zenox · Animation',
+  label: 'Zenox · Animation (backup)',
   url: 'https://zenox.lol/tv?genre=16',
+  /** Hidden as a Library shelf source; still autosyncs — rows route to Anime/Kids/Series. */
+  hiddenFromShelves: true,
 }
 
 /** Canonical sites shipped with Jiyu — always restored; not user-removable. */
 export const SHIPPED_TORRENT_SOURCES: readonly TorrentSource[] = [
   { ...SUBSPLEASE_SOURCE, locked: true },
-  { ...TORRENTFUNK_SOURCE, locked: true },
   { ...YTS_SOURCE, locked: true },
   { ...CINETARO_SOURCE, locked: true },
   { ...YMOVIES_SOURCE, locked: true },
@@ -247,8 +259,8 @@ export const SHIPPED_TORRENT_SOURCES: readonly TorrentSource[] = [
   { ...ZENOX_SOURCE, locked: true },
 ]
 
-/** Rev 3: Cinetaro is primary TV series; YMovies hidden from shelves (backup only). */
-const SHIPPED_SOURCES_REVISION = 3
+/** Rev 7: show YMovies + Cinetaro on Series shelves again (were backup-hidden in rev 3–4). */
+const SHIPPED_SOURCES_REVISION = 7
 const SHIPPED_SOURCES_REVISION_KEY = 'jiyu.torrent.sources.shippedRev'
 
 function sourceUrlKey(url: string): string {
@@ -307,7 +319,11 @@ function labelYmoviesSource(source: TorrentSource): TorrentSource {
 function labelCinetaroSource(source: TorrentSource): TorrentSource {
   try {
     if (!isCinetaroUrl(source.url)) return source
-    return { ...source, label: source.label?.trim() || 'Cinetaro · TV Series' }
+    const label = source.label?.trim() || ''
+    if (!label || /^Cinetaro · TV Series$/i.test(label)) {
+      return { ...source, label: 'Cinetaro · TV Series (backup)' }
+    }
+    return { ...source, label }
   } catch {
     return source
   }
@@ -331,7 +347,11 @@ function labelTmdbTvSource(source: TorrentSource): TorrentSource {
 function labelZenoxSource(source: TorrentSource): TorrentSource {
   try {
     if (source.id !== ZENOX_SOURCE_ID && !isZenoxUrl(source.url)) return source
-    return { ...source, label: source.label?.trim() || 'Zenox · Animation' }
+    const label = source.label?.trim() || ''
+    if (!label || /^Zenox · Animation$/i.test(label)) {
+      return { ...source, label: 'Zenox · Animation (backup)' }
+    }
+    return { ...source, label }
   } catch {
     return source
   }
@@ -344,8 +364,13 @@ function normalizeTorrentSourceList(parsed: unknown): TorrentSource[] {
           Boolean(s && typeof s === 'object' && typeof (s as TorrentSource).url === 'string'),
       )
     : []
-  // Drop NetMirror — freemovies.lol CF unlock is unreliable; Cinetaro replaces it.
-  const kept = sources.filter((source) => !isNetMirrorUrl(source.url))
+  // Drop NetMirror / TorrentFunk — CF unlock unreliable; TMDB covers Series.
+  const kept = sources.filter(
+    (source) =>
+      !isNetMirrorUrl(source.url) &&
+      source.id !== 'builtin-torrentfunk' &&
+      !isTorrentFunkUrl(source.url),
+  )
   for (const source of kept) {
     // yts.mx no longer resolves; the live API is on yts.gg.
     if (!isYtsSource(source.url, source.label)) continue
@@ -368,9 +393,13 @@ function normalizeTorrentSourceList(parsed: unknown): TorrentSource[] {
     const shipped = shippedById.get(source.id)
     if (shipped) {
       // Keep hide preference only — url/label/id stay canonical.
+      // If the saved row never set the flag, keep the shipped default (e.g. Cinetaro backup).
       shippedById.set(source.id, {
         ...shipped,
-        hiddenFromShelves: Boolean(source.hiddenFromShelves),
+        hiddenFromShelves:
+          typeof source.hiddenFromShelves === 'boolean'
+            ? source.hiddenFromShelves
+            : Boolean(shipped.hiddenFromShelves),
         locked: true,
       })
       continue
@@ -414,6 +443,33 @@ export function loadTorrentSources(): TorrentSource[] {
       sources = sources.map((source) =>
         source.id === 'builtin-ymovies' || isYmoviesUrl(source.url)
           ? { ...source, hiddenFromShelves: true }
+          : source,
+      )
+    }
+    if (rev < 4) {
+      // TMDB owns Series shelves; Cinetaro stays syncable from Library only.
+      sources = sources.map((source) =>
+        source.id === 'builtin-cinetaro' || isCinetaroUrl(source.url)
+          ? { ...source, hiddenFromShelves: true }
+          : source,
+      )
+    }
+    if (rev < 6) {
+      // TMDB Anime/Kids own Animation; Zenox titles + embed player stay off shelves/play.
+      sources = sources.map((source) =>
+        source.id === ZENOX_SOURCE_ID || isZenoxUrl(source.url)
+          ? { ...source, hiddenFromShelves: true }
+          : source,
+      )
+    }
+    if (rev < 7) {
+      // Restore YMovies + Cinetaro on TV Series shelves.
+      sources = sources.map((source) =>
+        source.id === 'builtin-ymovies' ||
+        isYmoviesUrl(source.url) ||
+        source.id === 'builtin-cinetaro' ||
+        isCinetaroUrl(source.url)
+          ? { ...source, hiddenFromShelves: false }
           : source,
       )
     }
@@ -474,8 +530,29 @@ export function isHiddenFromShelves(item: Pick<StreamItem, 'torrentSourceId'>): 
 
 export function filterShelfVisibleItems(items: StreamItem[]): StreamItem[] {
   const hidden = getHiddenTorrentSourceIds()
-  if (hidden.size === 0) return items
-  return items.filter((item) => !item.torrentSourceId || !hidden.has(item.torrentSourceId))
+  const hasKeywords = hasAnyHideKeywords()
+  if (hidden.size === 0 && !hasKeywords) return items
+  const hideCinetaro = hidden.has('builtin-cinetaro')
+  const hideYmovies = hidden.has('builtin-ymovies')
+  const hideZenox = hidden.has(ZENOX_SOURCE_ID)
+  return items.filter((item) => {
+    if (item.torrentSourceId && hidden.has(item.torrentSourceId)) {
+      // Zenox Animation: anime → Full Shows, kids animation → Kids, adult → Series.
+      if (hideZenox && isZenoxRoutedShelfItem(item)) {
+        /* visible on section shelves */
+      } else {
+        return false
+      }
+    }
+    // Older catalog rows sometimes lack torrentSourceId — still drop backup feeds.
+    if (!item.torrentSourceId) {
+      if (hideCinetaro && isCinetaroCatalogItem(item)) return false
+      if (hideYmovies && isYmoviesCatalogItem(item)) return false
+      if (hideZenox && isZenoxCatalogItem(item) && !isZenoxRoutedShelfItem(item)) return false
+    }
+    if (hasKeywords && itemMatchesHideKeywords(item)) return false
+    return true
+  })
 }
 
 export function isMagnetLink(text: string): boolean {
@@ -2561,7 +2638,8 @@ export function parseEpisodeKey(title: string): string | null {
   const epWord = /\b(?:Ep(?:isode)?\.?\s*|E)(\d+(?:\.\d+)?)\b/i.exec(title)
   if (epWord) return `E${epWord[1]}`
 
-  const dashEp = /\s[-–]\s*(\d{1,3}(?:\.\d+)?)\s*(?:\[|\(|$)/.exec(title)
+  // Allow 4-digit episode numbers (One Piece, Detective Conan, …).
+  const dashEp = /\s[-–]\s*(\d{1,4}(?:\.\d+)?)\s*(?:\[|\(|$)/.exec(title)
   if (dashEp) return `E${dashEp[1]}`
 
   return null
@@ -2785,6 +2863,7 @@ export async function resolveShowEpisodes(
   episodes: EpisodeChoice[]
   error?: string
   description?: string
+  networks?: Array<{ name: string; logoUrl?: string }>
   netmirrorPostId?: string
   netmirrorTmdbId?: string
   m2boxSubjectId?: string
@@ -2874,10 +2953,14 @@ export async function resolveShowEpisodes(
   }
 
   if (isTmdbTvCatalogItem(item)) {
-    const tmdbId =
+    let tmdbId =
       item.rivestreamTmdbId ||
       tmdbTvIdFromUrl(item.detailUrl || '') ||
       tmdbTvIdFromUrl(item.url || '')
+    if (item.category === 'anime') {
+      const { resolveAnimeTmdbTvId } = await import('./rivestream')
+      tmdbId = (await resolveAnimeTmdbTvId(item.title, tmdbId)) || tmdbId
+    }
     const result = await fetchTmdbTvEpisodeList(tmdbId)
     if (result.episodes.length === 0) {
       return { episodes: [], error: result.error || 'No episodes found on TMDB.' }
@@ -2891,6 +2974,7 @@ export async function resolveShowEpisodes(
       })),
       error: result.error,
       description: result.description,
+      networks: result.networks,
       rivestreamTmdbId: result.tmdbId || undefined,
     }
   }
@@ -4025,8 +4109,13 @@ export async function scrapeEztvTmdbFeed(
     cancelled?: boolean
   }
   try {
+    const { hideSectionForTmdbTvKind, tmdbWithoutKeywordsParam } = await import(
+      './hideKeywords'
+    )
+    const withoutKeywords =
+      tmdbWithoutKeywordsParam(hideSectionForTmdbTvKind(String(kind))) || undefined
     if (catalog) {
-      tmdb = await catalog(kind, limit)
+      tmdb = await catalog(kind, limit, { withoutKeywords })
     } else if (kind === 'popular' && legacy) {
       tmdb = await legacy(limit)
     } else {
@@ -5465,9 +5554,14 @@ export function linkToCatalogItem(
     effectiveShelfTag === ANIME_SHELF_NEW_RELEASES
       ? link.url.replace(/#.*$/, '').replace(/\/$/, '')
       : undefined
-  const baseId = stableTorrentItemId(link.url)
+  const tmdbId = link.rivestreamTmdbId?.trim()
+  const baseId =
+    tmdbId && (zenoxItem || tmdbItem)
+      ? stableTorrentItemId(`jiyu://tmdb-tv/${tmdbId}`)
+      : stableTorrentItemId(link.url)
   const tmdbAnime = tmdbItem && (category === 'anime' || source.id === TMDB_ANIME_SOURCE_ID)
   const tmdbKids = tmdbItem && (category === 'kids' || source.id === TMDB_KIDS_SOURCE_ID)
+  const zenoxRouted = zenoxItem && Boolean(tmdbId)
   return {
     id: kidsFeed || category === 'kids' ? `kids-${baseId}` : baseId,
     title: link.title,
@@ -5477,15 +5571,21 @@ export function linkToCatalogItem(
     poster: link.poster,
     // Category (+ optional shelf) — never put origin hostnames in shelf-facing fields.
     tags,
-    source: zenoxItem
-      ? 'Zenox'
-      : tmdbKids
+    source: zenoxRouted
+      ? category === 'kids'
         ? 'TMDB Kids'
-        : tmdbAnime
+        : category === 'anime'
           ? 'TMDB Anime'
-          : tmdbItem
-            ? 'TMDB'
-            : 'Web catalog',
+          : 'TMDB'
+      : zenoxItem
+        ? 'Zenox'
+        : tmdbKids
+          ? 'TMDB Kids'
+          : tmdbAnime
+            ? 'TMDB Anime'
+            : tmdbItem
+              ? 'TMDB'
+              : 'Web catalog',
     sourceKind: tmdbItem || zenoxItem ? 'builtin' : webCatalogItem ? undefined : 'torrent',
     transport: webCatalogItem ? 'direct' : 'torrent',
     torrentUri: webCatalogItem ? undefined : link.torrentUri,
@@ -5499,5 +5599,6 @@ export function linkToCatalogItem(
     ymoviesId: link.ymoviesId,
     cinetaroTmdbId: link.cinetaroTmdbId,
     rivestreamTmdbId: link.rivestreamTmdbId,
+    originalLanguage: link.originalLanguage,
   }
 }

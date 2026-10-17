@@ -6,6 +6,7 @@ import { recordWebEmbedContinue } from '../lib/continueWatching'
 import { isZenoxUrl, zenoxWatchUrl } from '../lib/zenox'
 import {
   buildSearchUrl,
+  isBlankBrowserUrl,
   isEmbedPlayerHost,
   isSportsOrReplayEmbedUrl,
   toAutoplayUrl,
@@ -106,6 +107,7 @@ export function WebBrowserPage() {
   const frameRef = useRef<HTMLDivElement>(null)
   const {
     desktop,
+    mode: webMode,
     nav,
     address,
     setAddress,
@@ -152,13 +154,24 @@ export function WebBrowserPage() {
   const continueWatch = routeState?.continueWatch
 
   useEffect(() => {
-    // Arm leave→PiP for any embed player (route pipOnBack can be lost after Expand/HMR).
-    setPipOnLeave(embedPlayer)
+    // Arm leave→PiP for embed / sports routes (pipOnBack can be lost after Expand/HMR).
+    const armPip =
+      embedPlayer ||
+      Boolean(routeState?.pipOnBack) ||
+      isSportsOrReplayEmbedUrl(paramUrl || nav.url || address || '')
+    setPipOnLeave(armPip)
     return () => {
       // Defer clear so NavigationPiPBridge can still minimize after this page unmounts.
       window.setTimeout(() => setPipOnLeave(false), 80)
     }
-  }, [embedPlayer, setPipOnLeave])
+  }, [
+    embedPlayer,
+    setPipOnLeave,
+    routeState?.pipOnBack,
+    paramUrl,
+    nav.url,
+    address,
+  ])
 
   useEffect(() => {
     if (!isAndroidCastHost()) {
@@ -289,12 +302,20 @@ export function WebBrowserPage() {
     }
     const raw = nav.title?.trim() || ''
     // Prefer episode title from the player; never fall back to the stream host.
-    if (raw && !isEmbedPlayerHost(`https://${raw}/`) && !/fstream365|vsembed|freemovies/i.test(raw)) {
+    // Guest "about:blank" titles happen after hide({ blank }) — ignore them.
+    if (
+      raw &&
+      !isBlankBrowserUrl(raw) &&
+      !/^about:/i.test(raw) &&
+      !isEmbedPlayerHost(`https://${raw}/`) &&
+      !/fstream365|vsembed|freemovies/i.test(raw)
+    ) {
       return raw
     }
     if (continueWatch?.title) return continueWatch.title
     if (embedPlayer) return 'Now playing'
-    return displayHost(nav.url || address) || 'Web'
+    const hostUrl = [nav.url, address, paramUrl].find((u) => u && !isBlankBrowserUrl(u)) || ''
+    return displayHost(hostUrl) || 'Web'
   })()
 
   function leaveEmbed() {
@@ -308,13 +329,14 @@ export function WebBrowserPage() {
     // and can leave the BrowserView hidden/paused. openInPip exits OS fullscreen.
     exitFullscreen()
     void window.signalDesktop?.browserAdDockClose?.()
-    // Prefer the real player URL over an ad hop that polluted nav.url.
-    const candidates = [nav.url, address, continueWatch?.playUrl, paramUrl]
+    // Prefer real embed URLs; never PiP/reopen about:blank from a blanked guest.
+    const candidates = [continueWatch?.playUrl, paramUrl, nav.url, address].filter(
+      (u): u is string => Boolean(u) && !isBlankBrowserUrl(u),
+    )
     const url =
-      candidates.find((u) => u && isEmbedPlayerHost(u)) ||
-      candidates.find(Boolean) ||
-      undefined
-    if (embedPlayer || (url && isEmbedPlayerHost(url))) {
+      candidates.find((u) => isEmbedPlayerHost(u) || isSportsOrReplayEmbedUrl(u)) ||
+      candidates[0]
+    if (embedPlayer || (url && (isEmbedPlayerHost(url) || isSportsOrReplayEmbedUrl(url)))) {
       openInPip(url, displayTitle, {
         navigateTo: returnTo,
       })
@@ -433,12 +455,26 @@ export function WebBrowserPage() {
   // Open route URL once per param change. Do not re-fire when openUrl identity
   // changes (nav.url updates recreate callbacks and caused rivestream↔player flash).
   const openedParamRef = useRef('')
+  const blankRecoverRef = useRef('')
   useEffect(() => {
     if (!desktop || !paramUrl) return
-    if (openedParamRef.current === paramUrl) return
-    openedParamRef.current = paramUrl
-    void openUrl(toAutoplayUrl(paramUrl))
-  }, [desktop, paramUrl, openUrl])
+    if (openedParamRef.current !== paramUrl) {
+      openedParamRef.current = paramUrl
+      blankRecoverRef.current = ''
+      void openUrl(toAutoplayUrl(paramUrl))
+      return
+    }
+    // Hide({ blank }) left about:blank while we still have a play URL — reload once.
+    // Skip while PiP/off so openUrl cannot yank mode back to full page on leave.
+    if (webMode !== 'page') return
+    if (
+      (isBlankBrowserUrl(nav.url) || isBlankBrowserUrl(address)) &&
+      blankRecoverRef.current !== paramUrl
+    ) {
+      blankRecoverRef.current = paramUrl
+      void openUrl(toAutoplayUrl(paramUrl))
+    }
+  }, [desktop, paramUrl, openUrl, nav.url, address, webMode])
 
   // Keep the native BrowserView aligned when chrome shows/hides.
   useEffect(() => {

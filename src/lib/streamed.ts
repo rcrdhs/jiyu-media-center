@@ -5,6 +5,7 @@
  */
 
 import type { StreamItem } from '../types'
+import { isPpvStCatalogItem, isPpvStLiveNow } from './ppvSt'
 import { rankSourcesWithLearning, recordStreamProbeResult } from './streamLearning'
 
 export const STREAMED_API_ORIGIN = 'https://streamed.pk'
@@ -155,22 +156,44 @@ export async function fetchStreamedLiveMatches(
   return { ok: true, matches: result.data }
 }
 
+/** Full schedule (live + upcoming). Used to fill Sports → Upcoming. */
+export async function fetchStreamedAllMatches(): Promise<
+  { ok: true; matches: StreamedMatch[] } | { ok: false; error: string }
+> {
+  const result = await fetchJson<StreamedMatch[]>('/api/matches/all')
+  if (!result.ok) return result
+  if (!Array.isArray(result.data)) return { ok: false, error: 'Invalid matches response' }
+  return { ok: true, matches: result.data }
+}
+
 /**
- * Merge `/api/matches/live` + `/api/matches/live/popular`.
+ * Merge `/api/matches/live` + `/api/matches/live/popular` (+ optional `/api/matches/all`).
  * Popular endpoint wins the popular flag even when the live row omits it.
+ * Rows only on `all` and still in the future become Upcoming; past leftovers are dropped.
  */
 export function mergeStreamedLiveCatalog(
   live: StreamedMatch[],
   popular: StreamedMatch[],
+  all: StreamedMatch[] = [],
+  nowMs = Date.now(),
 ): StreamItem[] {
   const popularIds = new Set(
     popular.map((m) => String(m?.id || '').trim()).filter(Boolean),
   )
+  const liveIds = new Set(
+    [...live, ...popular].map((m) => String(m?.id || '').trim()).filter(Boolean),
+  )
   const byId = new Map<string, StreamedMatch>()
-  for (const match of [...popular, ...live]) {
+  for (const match of [...popular, ...live, ...all]) {
     const id = String(match?.id || '').trim()
     if (!id) continue
     const prev = byId.get(id)
+    const onLive = liveIds.has(id)
+    // Skip finished schedule rows that are no longer on the live feed.
+    if (!onLive) {
+      const start = Number(match?.date) || Number(prev?.date) || 0
+      if (start > 0 && start <= nowMs) continue
+    }
     byId.set(id, {
       ...prev,
       ...match,
@@ -182,7 +205,7 @@ export function mergeStreamedLiveCatalog(
           : prev?.sources || [],
     })
   }
-  return streamedMatchesToItems([...byId.values()])
+  return streamedMatchesToItems([...byId.values()], liveIds, nowMs)
 }
 
 export function streamedItemSportId(item: StreamItem): string | undefined {
@@ -196,7 +219,11 @@ export function isStreamedPopularItem(item: StreamItem): boolean {
   return isStreamedCatalogItem(item) && Boolean(item.tags?.includes('popular'))
 }
 
-export function streamedMatchToItem(match: StreamedMatch): StreamItem | null {
+export function streamedMatchToItem(
+  match: StreamedMatch,
+  liveIds?: Set<string>,
+  nowMs = Date.now(),
+): StreamItem | null {
   if (!match?.id || !match.title) return null
   if (!Array.isArray(match.sources) || match.sources.length === 0) return null
 
@@ -218,13 +245,25 @@ export function streamedMatchToItem(match: StreamedMatch): StreamItem | null {
   const away = match.teams?.away?.name
   const teamsLine = home && away ? `${home} vs ${away}` : match.title
 
+  const homeBadgeUrl = absoluteImageUrl(
+    match.teams?.home?.badge
+      ? `/api/images/badge/${match.teams.home.badge}.webp`
+      : undefined,
+  )
+  const awayBadgeUrl = absoluteImageUrl(
+    match.teams?.away?.badge
+      ? `/api/images/badge/${match.teams.away.badge}.webp`
+      : undefined,
+  )
   const poster =
-    absoluteImageUrl(match.poster) ||
-    absoluteImageUrl(
-      match.teams?.home?.badge
-        ? `/api/images/badge/${match.teams.home.badge}.webp`
-        : undefined,
-    )
+    absoluteImageUrl(match.poster) || homeBadgeUrl || awayBadgeUrl
+
+  const onLive = liveIds ? liveIds.has(String(match.id)) : true
+  const start = Number.isFinite(match.date) && match.date > 0 ? match.date : 0
+  const status =
+    onLive || (start > 0 && start <= nowMs && !liveIds)
+      ? 'live-now'
+      : 'upcoming'
 
   return {
     id: streamedItemId(match.id),
@@ -236,8 +275,15 @@ export function streamedMatchToItem(match: StreamedMatch): StreamItem | null {
     url: `${STREAMED_API_ORIGIN}/`,
     detailUrl: `${STREAMED_API_ORIGIN}/`,
     poster,
-    tags: ['live', 'streamed', match.category, match.popular ? 'popular' : '']
-      .filter(Boolean),
+    homeBadgeUrl,
+    awayBadgeUrl,
+    tags: [
+      'live',
+      'streamed',
+      match.category,
+      match.popular ? 'popular' : '',
+      status,
+    ].filter(Boolean),
     source: 'Streamed',
     sourceKind: 'builtin',
     transport: 'direct',
@@ -252,23 +298,50 @@ export function streamedMatchToItem(match: StreamedMatch): StreamItem | null {
   }
 }
 
-export function streamedMatchesToItems(matches: StreamedMatch[]): StreamItem[] {
+export function streamedMatchesToItems(
+  matches: StreamedMatch[],
+  liveIds?: Set<string>,
+  nowMs = Date.now(),
+): StreamItem[] {
   const out: StreamItem[] = []
   const seen = new Set<string>()
   for (const match of matches) {
-    const item = streamedMatchToItem(match)
+    const item = streamedMatchToItem(match, liveIds, nowMs)
     if (!item || seen.has(item.id)) continue
     seen.add(item.id)
     out.push(item)
   }
-  // Popular + soonest first
+  // Live/popular first, then soonest upcoming.
   out.sort((a, b) => {
+    const aLive = a.tags?.includes('live-now') ? 1 : 0
+    const bLive = b.tags?.includes('live-now') ? 1 : 0
+    if (aLive !== bLive) return bLive - aLive
     const ap = a.tags?.includes('popular') ? 1 : 0
     const bp = b.tags?.includes('popular') ? 1 : 0
     if (ap !== bp) return bp - ap
-    return (b.releasedAt || 0) - (a.releasedAt || 0)
+    const aStart = a.eventStartsAt || a.releasedAt || 0
+    const bStart = b.eventStartsAt || b.releasedAt || 0
+    if (aLive && bLive) return bStart - aStart
+    return aStart - bStart
   })
   return out
+}
+
+/** True when a Streamed/PPV sports row belongs on Sports → Live (not Upcoming). */
+export function isSportsLiveNowItem(item: StreamItem, nowMs = Date.now()): boolean {
+  if (isPpvStCatalogItem(item)) return isPpvStLiveNow(item, Math.floor(nowMs / 1000))
+  if (isStreamedCatalogItem(item)) {
+    if (item.tags?.includes('live-now')) return true
+    if (item.tags?.includes('upcoming')) return false
+    // Legacy rows (live feed only): treat as live.
+    return true
+  }
+  return false
+}
+
+export function isSportsUpcomingItem(item: StreamItem, nowMs = Date.now()): boolean {
+  if (!isStreamedCatalogItem(item) && !isPpvStCatalogItem(item)) return false
+  return !isSportsLiveNowItem(item, nowMs)
 }
 
 function pickBestStream(streams: StreamedStream[]): StreamedStream | null {

@@ -158,6 +158,17 @@ export function recordWatchHistory(entry: WatchHistoryInput) {
   const duration = Math.max(0, Number(entry.duration) || Number(entry.runtimeSeconds) || 0)
   const finished = entry.finished === true || isFinished(playhead, duration)
 
+  // Quick abandons (< 60s) still train recommendations as negative signals
+  // even when they're too short for the history list.
+  if (!finished && playhead > 0 && playhead < 60) {
+    void import('./recommendFeedback').then(({ recordRecommendAbandon }) => {
+      recordRecommendAbandon(entry.id, {
+        title: entry.title,
+        category: entry.category,
+      })
+    })
+  }
+
   if (!finished && playhead < MIN_SECONDS) return
 
   const existing = readAll().find((item) => item.id === entry.id)

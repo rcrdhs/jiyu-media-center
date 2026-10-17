@@ -4,6 +4,8 @@ import { CATEGORIES } from '../data/catalog'
 import { useCatalog } from '../context/CatalogContext'
 import { CatalogGrid } from '../components/CatalogGrid'
 import { ContinueWatching } from '../components/ContinueWatching'
+import { HideKeywordsSettings } from '../components/HideKeywordsSettings'
+import { isHideKeywordSection } from '../lib/hideKeywords'
 import { NewTitlesDialog } from '../components/NewTitlesDialog'
 import { useMainScrollRestore } from '../hooks/useMainScrollRestore'
 import { isVodCategory } from '../lib/continueWatching'
@@ -51,6 +53,8 @@ import {
   setSectionView,
 } from '../lib/viewState'
 import {
+  isSportsLiveNowItem,
+  isSportsUpcomingItem,
   isStreamedCatalogItem,
   streamedItemSportId,
 } from '../lib/streamed'
@@ -111,6 +115,11 @@ function readShelfTab(category: CategoryId, fallback: ShelfTabId): ShelfTabId {
     const raw = localStorage.getItem(shelfTabStorageKey(category))
     // Sports no longer has a Popular tab — migrate saved preference.
     if (category === 'sports' && raw === 'primary') return 'full-shows'
+    // Kids Live tab removed — land on Shows.
+    if (category === 'kids' && raw === 'live') return 'full-shows'
+    // Sports: `live` tab is Upcoming (Channels tab was removed earlier).
+    // Series 24/7 tab removed — land on Popular.
+    if (category === 'series' && raw === 'replay') return 'primary'
     if (raw === 'primary' || raw === 'full-shows' || raw === 'live' || raw === 'replay') {
       return raw
     }
@@ -340,7 +349,12 @@ function matchesSectionQuery(item: StreamItem, q: string): boolean {
 
 export function SectionPage() {
   const { id } = useParams<{ id: string }>()
-  const { byCategory, ready, streamedSports, reloadTorrentCatalog } = useCatalog()
+  const {
+    byCategory,
+    ready,
+    streamedSports,
+    reloadTorrentCatalog,
+  } = useCatalog()
   const meta = CATEGORIES.find((c) => c.id === id)
   const saved = id ? getSectionView(id) : undefined
   const sentinelRef = useRef<HTMLDivElement>(null)
@@ -374,6 +388,8 @@ export function SectionPage() {
     ),
   )
   const [sportsSportFilter, setSportsSportFilter] = useState(readSelectedSportsFilter)
+  /** Re-evaluate PPV Upcoming → Live by clock between catalog polls. */
+  const [sportsNowMs, setSportsNowMs] = useState(() => Date.now())
   const userPickedShelfTabRef = useRef(false)
   const focusItemIdRef = useRef<string | undefined>(saved?.focusItemId)
   const pendingScrollAdjustRef = useRef(0)
@@ -390,6 +406,13 @@ export function SectionPage() {
   const trackGrowth = Boolean(meta && isGrowthTrackedSection(meta.id))
 
   const targetVisibleRef = useRef(PAGE)
+
+  useEffect(() => {
+    if (categoryId !== 'sports') return
+    setSportsNowMs(Date.now())
+    const timer = window.setInterval(() => setSportsNowMs(Date.now()), 30_000)
+    return () => window.clearInterval(timer)
+  }, [categoryId])
 
   useEffect(() => {
     // Remounting the same section (click a title → Back) must keep *some* of the
@@ -509,7 +532,7 @@ export function SectionPage() {
       }
     }
 
-    // Series: Popular / Airing / Trending / 24/7 (PPV always-on cartoons).
+    // Series: Popular / Airing / Trending.
     if (categoryId === 'series') {
       const primary = prepareShelfList(
         items.filter((item) => isSeriesPopularItem(item) && match(item)),
@@ -522,10 +545,6 @@ export function SectionPage() {
       const live = prepareShelfList(
         items.filter((item) => isSeriesTrendingItem(item) && match(item)),
         { ...shelfOpts, sortMode: 'rank' },
-      )
-      const replay = prepareShelfList(
-        items.filter((item) => isSeries247Item(item) && match(item)),
-        shelfOpts,
       )
       const other = prepareShelfList(
         items.filter(
@@ -542,19 +561,15 @@ export function SectionPage() {
         primaryLabel: 'Popular',
         fullLabel: 'Airing',
         liveLabel: 'Trending',
-        replayLabel: '24/7',
         primaryBlurb: '',
         fullBlurb: '',
         liveBlurb: '',
-        replayBlurb: '',
         primaryEmpty: 'No popular series yet — sync TMDB · TV Series in Library.',
         fullEmpty: 'No airing series yet — sync TMDB · TV Series in Library.',
         liveEmpty: 'No trending series yet — sync TMDB · TV Series in Library.',
-        replayEmpty: 'No 24/7 series streams right now.',
         primary,
         fullShows,
         live,
-        replay,
         other,
       }
     }
@@ -600,10 +615,7 @@ export function SectionPage() {
         items.filter((item) => isKidsShowItem(item) && match(item)),
         shelfOpts,
       )
-      const live = prepareShelfList(
-        items.filter((item) => isKidsLiveItem(item) && match(item)),
-        shelfOpts,
-      )
+      // Live tab removed — keep kids-live channels out of Movies / Shows.
       const other = prepareShelfList(
         items.filter(
           (item) =>
@@ -617,16 +629,16 @@ export function SectionPage() {
       return {
         primaryLabel: 'Movies',
         fullLabel: 'Shows',
-        liveLabel: 'Live',
+        liveLabel: undefined as string | undefined,
         primaryBlurb: '',
         fullBlurb: '',
-        liveBlurb: '',
+        liveBlurb: undefined as string | undefined,
         primaryEmpty: 'No Kids movies yet — sync YTS in Library (Family / Animation).',
         fullEmpty: 'No Kids shows yet — sync TMDB · Kids Shows in Library (or wait for auto-sync).',
-        liveEmpty: 'No Kids live channels yet — IPTV-Org Kids imports on first launch.',
+        liveEmpty: undefined as string | undefined,
         primary,
         fullShows,
-        live,
+        live: undefined as StreamItem[] | undefined,
         other,
       }
     }
@@ -655,59 +667,60 @@ export function SectionPage() {
         }
         return true
       }
-      const liveAll = prepareShelfList(
-        items.filter(
-          (item) =>
-            (isStreamedCatalogItem(item) || isPpvStCatalogItem(item)) &&
-            sportOk(item) &&
-            match(item),
-        ),
+      const scheduleItems = items.filter(
+        (item) =>
+          (isStreamedCatalogItem(item) || isPpvStCatalogItem(item)) &&
+          sportOk(item) &&
+          match(item),
+      )
+      const liveNow = prepareShelfList(
+        scheduleItems.filter((item) => isSportsLiveNowItem(item, sportsNowMs)),
         shelfOpts,
+      )
+      const upcoming = prepareShelfList(
+        scheduleItems
+          .filter((item) => isSportsUpcomingItem(item, sportsNowMs))
+          .sort(
+            (a, b) =>
+              (a.eventStartsAt || a.releasedAt || 0) -
+              (b.eventStartsAt || b.releasedAt || 0),
+          ),
+        { ...shelfOpts, newestFirst: false },
       )
       const replay = prepareShelfList(
         items.filter(
-          (item) => isSportsReplayCatalogItem(item) && sportOk(item) && match(item),
+          (item) =>
+            isSportsReplayCatalogItem(item) &&
+            sportOk(item) &&
+            match(item),
         ),
         { ...shelfOpts, newestFirst: true, collapseEpisodes: false },
       )
-      const channels = pinSportsShortcuts(
-        prepareShelfList(
-          items.filter(
-            (item) =>
-              !isStreamedCatalogItem(item) &&
-              !isPpvStCatalogItem(item) &&
-              !isSportsReplayCatalogItem(item) &&
-              match(item),
-          ),
-          shelfOpts,
-        ),
-        'sports',
-      )
       return {
-        // Popular tab removed — primary stays empty so Live is the first sports shelf.
+        // Live (on now) → Upcoming (scheduled) → Replay.
         primaryLabel: 'Popular',
         fullLabel: 'Live',
-        liveLabel: 'Channels',
+        liveLabel: 'Upcoming',
         replayLabel: 'Replay',
         primaryBlurb: '',
         fullBlurb: '',
         liveBlurb: '',
         replayBlurb: '',
         primaryEmpty: '',
-        fullEmpty: 'No live matches right now — Streamed / PPV.st refresh automatically.',
-        liveEmpty: 'No sports channels yet — IPTV sports playlist imports on first launch.',
+        fullEmpty: 'No live matches right now — check Upcoming or try again shortly.',
+        liveEmpty: 'No upcoming matches scheduled — Streamed / PPV.st refresh automatically.',
         replayEmpty:
           'No recent football, boxing, cricket, or motorsport replays (last 3 days).',
         primary: [] as StreamItem[],
-        fullShows: liveAll,
-        live: channels,
+        fullShows: liveNow,
+        live: upcoming,
         replay,
         other: [] as StreamItem[],
       }
     }
 
     return null
-  }, [items, query, categoryId, shelfOpts, sportsSportFilter])
+  }, [items, query, categoryId, shelfOpts, sportsSportFilter, sportsNowMs])
 
   /** Shelf size without search — used for today/yesterday title counts. */
   const shelfItems = useMemo(() => {
@@ -1048,10 +1061,16 @@ export function SectionPage() {
 
   const activeShelfList = useMemo(() => {
     if (!splitShelves) return null
-    if (shelfTab === 'primary') return splitShelves.primary
+    if (shelfTab === 'primary') {
+      // Anime leftovers (untagged) belong with New Releases, not Full Shows.
+      if (categoryId === 'anime') return [...splitShelves.primary, ...splitShelves.other]
+      return splitShelves.primary
+    }
     if (shelfTab === 'live') return splitShelves.live ?? []
     if (shelfTab === 'replay') return splitShelves.replay ?? []
-    if (categoryId === 'kids' || categoryId === 'sports') return splitShelves.fullShows
+    if (categoryId === 'kids' || categoryId === 'sports' || categoryId === 'anime') {
+      return splitShelves.fullShows
+    }
     return [...splitShelves.fullShows, ...splitShelves.other]
   }, [splitShelves, shelfTab, categoryId])
 
@@ -1097,7 +1116,7 @@ export function SectionPage() {
   const footballLeagueShelves = useMemo(() => {
     if (categoryId !== 'sports') return null
     if (sportsSportFilter !== 'football') return null
-    if (shelfTab !== 'full-shows' && shelfTab !== 'replay') {
+    if (shelfTab !== 'full-shows' && shelfTab !== 'live' && shelfTab !== 'replay') {
       return null
     }
     const shelves = groupFootballByLeague(pagedList)
@@ -1339,9 +1358,8 @@ export function SectionPage() {
             setVisible(PAGE)
           }}
         />
-        {(meta.id === 'sports'
-          ? shelfTab === 'live'
-          : !showSourceTools || (meta.id === 'kids' && shelfTab === 'live')) && (
+        {meta.id !== 'sports' &&
+        (!showSourceTools || (meta.id === 'kids' && shelfTab === 'live')) ? (
           <label className="check-toggle tool-toggle">
             <input
               type="checkbox"
@@ -1350,7 +1368,7 @@ export function SectionPage() {
             />
             Auto-check visible streams
           </label>
-        )}
+        ) : null}
         {showSourceTools && (
           <>
             {meta.id !== 'kids' &&
@@ -1394,6 +1412,9 @@ export function SectionPage() {
           </label>
         )}
       </div>
+      {isHideKeywordSection(meta.id) ? (
+        <HideKeywordsSettings variant="section" category={meta.id} />
+      ) : null}
       {categoryId === 'movies' && query.trim() && movieSearchStatus === 'loading' ? (
         <p className="fine-print section-search-status">Searching for “{query.trim()}”…</p>
       ) : null}
@@ -1454,7 +1475,9 @@ export function SectionPage() {
             </div>
             {categoryId === 'sports' &&
             sportsFilterChips.length > 0 &&
-            (shelfTab === 'full-shows' || shelfTab === 'replay') ? (
+            (shelfTab === 'full-shows' ||
+              shelfTab === 'live' ||
+              shelfTab === 'replay') ? (
               <div
                 className="anime-shelf-tabs sports-sport-filters"
                 role="toolbar"
@@ -1529,13 +1552,9 @@ export function SectionPage() {
             <CatalogGrid
               items={shown}
               autoCheck={
-                (categoryId === 'kids' || categoryId === 'sports') && shelfTab === 'live'
-                  ? autoCheck
-                  : false
+                categoryId === 'kids' && shelfTab === 'live' ? autoCheck : false
               }
-              showHealthFilters={
-                (categoryId === 'kids' || categoryId === 'sports') && shelfTab === 'live'
-              }
+              showHealthFilters={categoryId === 'kids' && shelfTab === 'live'}
               autoHideUnresponsive={false}
               emptyHint={
                 categoryId === 'anime' && query.trim() && animeCatalogSearchEmpty
@@ -1577,9 +1596,9 @@ export function SectionPage() {
           ) : null}
           <CatalogGrid
             items={shown}
-            autoCheck={showSourceTools ? false : autoCheck}
-            showHealthFilters={!showSourceTools}
-            autoHideUnresponsive={!showSourceTools}
+            autoCheck={showSourceTools || categoryId === 'sports' ? false : autoCheck}
+            showHealthFilters={!showSourceTools && categoryId !== 'sports'}
+            autoHideUnresponsive={!showSourceTools && categoryId !== 'sports'}
             emptyHint={
               categoryId === 'series'
                 ? 'No shows yet. Import a playlist in Library to fill this shelf.'

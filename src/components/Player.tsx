@@ -6,6 +6,7 @@ import { useEpg } from '../context/EpgContext'
 import { usePlayback } from '../context/PlaybackContext'
 import { PlaybackLoadingScreen } from './PlaybackLoadingScreen'
 import { VolumeSlider } from './VolumeSlider'
+import { SeekSlider } from './SeekSlider'
 import { SeekSkipOverlay } from './SeekSkipOverlay'
 import { isHlsUrl, isMpegTsUrl } from '../lib/iptv'
 import { androidHlsConfig } from '../lib/hlsAndroid'
@@ -14,6 +15,7 @@ import {
   exitOsFullscreen,
   getFullscreenOwner,
   syncFullscreenOwnerFromOs,
+  usesOsFullscreenOnly,
   webSurfaceOwnsFullscreen,
 } from '../lib/fullscreenSession'
 import { nativeFetchText } from '../lib/nativeHttp'
@@ -22,6 +24,7 @@ import {
   getContinueEntry,
   isEpisodeComplete,
   isLikelyPartialDuration,
+  isLocalPlaybackUrl,
   isRemuxFalseEnd,
   isTrustedDuration,
   isVodCategory,
@@ -41,6 +44,15 @@ import {
 } from '../lib/animeSkip'
 import { recordUserSeekJump, getLearnedSkipInterval } from '../lib/skipLearning'
 import { recordPlaybackHealth } from '../lib/streamLearning'
+import {
+  forgetLastGoodPlay,
+  getLastGoodPlay,
+  inferPlayPipe,
+  playReliabilityKey,
+  preferredResolveBackend,
+  rememberLastGoodPlay,
+  type PlayPipe,
+} from '../lib/playReliability'
 import {
   activeSubtitleText,
   isJunkSubtitleText,
@@ -65,16 +77,21 @@ import {
 import { resolveM2BoxPlay } from '../lib/m2box'
 import {
   lookupRivestreamTmdbId,
+  resolveAnimeTmdbTvId,
   rivestreamTmdbIdFromItem,
   shouldPreferRivestreamJapaneseAudio,
 } from '../lib/rivestream'
 import { resolveMovyPlay, MOVY_PLAY_REFERER, probeMovyHlsUrl } from '../lib/movy'
 import {
+  BILIBILI_TV_PLAY_REFERER,
+  resolveBilibiliPlay,
+} from '../lib/bilibiliTv'
+import {
   ATLANTIC_PLAY_REFERER,
   isMovyStreamUrl,
   resolveAtlanticPlay,
 } from '../lib/atlanticHls'
-import { isWyzieAvailable, resolveWyzieSubtitle } from '../lib/wyzie'
+import { ensureEpisodeSoftSubtitles } from '../lib/softSubs'
 import {
   estimateSubtitleDelay,
   isSubtitleAutoSyncAvailable,
@@ -117,6 +134,8 @@ import {
   torrentStop,
   torrentStream,
 } from '../lib/torrentBridge'
+import { maskUserFacingMessage } from '../lib/sourceMask'
+import { upsertTorrentItems } from '../lib/torrentCatalogStore'
 import type { StreamItem, StreamPlaylistItem, TorrentStreamResult } from '../types'
 
 /** Remux pipe (`/stream.mp4`) is not byte-seekable — resume via ffmpeg `-ss` query. */
@@ -221,25 +240,29 @@ function isEphemeralLocalStreamUrl(url: string | undefined): boolean {
 
 function torrentStallMessage(): string {
   if (isAndroidTorrentAvailable()) {
-    return 'Playback stalled — not enough torrent data yet. Tap Retry, wait for more peers, or try another quality.'
+    return 'Playback stalled — not enough source data yet. Tap Retry, wait a moment, or try another quality.'
   }
-  return 'Playback stalled — not enough torrent data yet, or this file won’t remux. Try Retry or another quality.'
+  return 'Playback stalled — not enough source data yet, or this file won’t remux. Try Retry or another quality.'
 }
 
 function playerErrorHint(error: string, url: string | undefined): string {
-  if (/no peers|no reachable seeds|swarm may be dead|unavailable/i.test(error)) {
-    return 'This swarm looks dead or empty. Open Episodes and pick another release, or try a different quality.'
+  if (/no peers|no reachable seeds|swarm may be dead|unavailable|no working sources/i.test(error)) {
+    return 'This source looks empty. Open Episodes and pick another release, or try a different quality.'
   }
-  if (/taking too long|still starting|still buffering|not enough torrent|buffer ran dry/i.test(error)) {
+  if (
+    /taking too long|still starting|still buffering|not enough (torrent|source)|buffer ran dry/i.test(
+      error,
+    )
+  ) {
     if (isAndroidTorrentAvailable()) {
-      return 'Peers may be slow or the download needs more data. Tap Retry, wait a moment, or try another episode or quality.'
+      return 'Sources may be slow or need more data. Tap Retry, wait a moment, or try another episode or quality.'
     }
-    return 'Peers may be slow or the remux needs more data. Tap Retry, wait a moment, or try another episode or quality.'
+    return 'Sources may be slow or the remux needs more data. Tap Retry, wait a moment, or try another episode or quality.'
   }
   if (isEphemeralLocalStreamUrl(url)) {
-    return 'Torrent playback stalled. Tap Retry, wait for more peers, or try another episode or quality.'
+    return 'Playback stalled. Tap Retry, wait a moment, or try another episode or quality.'
   }
-  return 'Status may show online while the stream still fails (DRM, expired token, or CDN block). Try another channel, use Web browser for YouTube / 1SpotMedia, or Refresh the playlist source.'
+  return 'Status may show online while the stream still fails. Try another channel, use Web browser for live sites, or Refresh the playlist source.'
 }
 
 /** SxxExx (or similar) for a playlist row — not the 1-based list slot. */
@@ -251,6 +274,81 @@ function playlistEpisodeKey(entry: StreamPlaylistItem | undefined): string | nul
     parseEpisodeKey(entry.fileName || '') ||
     null
   )
+}
+
+/** True while hls.js is mid-download on the main playlist — do not startLoad. */
+function hlsHasInFlightMainFrag(hls: Hls | null | undefined): boolean {
+  if (!hls) return false
+  try {
+    return Boolean(hls.inFlightFragments?.main?.frag)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Soft stall heal: never abort an in-flight fragment fetch. When Auto ABR is on,
+ * tighten the ladder cap so the next segment can be 720p (etc.) instead of
+ * freezing on 1080p. Only call startLoad when the pipeline is idle.
+ */
+function softHealHlsStall(
+  hls: Hls,
+  playhead: number,
+  opts?: { allowAbrDownshift?: boolean; onAbrCap?: (height: number) => void },
+): 'in-flight' | 'abr-down' | 'start-load' {
+  if (hlsHasInFlightMainFrag(hls)) return 'in-flight'
+  if (opts?.allowAbrDownshift && hls.levels.length > 1) {
+    try {
+      const curIdx =
+        hls.loadLevel >= 0 ? hls.loadLevel : hls.currentLevel >= 0 ? hls.currentLevel : -1
+      const curHeight = curIdx >= 0 ? hls.levels[curIdx]?.height || 0 : 0
+      const capIdx = hls.autoLevelCapping
+      const capHeight =
+        capIdx >= 0 && hls.levels[capIdx] ? hls.levels[capIdx]!.height || 0 : curHeight
+      const ceiling = curHeight > 0 ? Math.min(curHeight, capHeight || curHeight) : capHeight
+      let bestIdx = -1
+      let bestH = -1
+      for (let i = 0; i < hls.levels.length; i++) {
+        const h = hls.levels[i]?.height || 0
+        if (h > 0 && ceiling > 0 && h < ceiling && h > bestH) {
+          bestH = h
+          bestIdx = i
+        }
+      }
+      if (bestIdx >= 0 && bestH > 0) {
+        // Cap future loads — does not abort the fragment already on the wire.
+        hls.autoLevelCapping = bestIdx
+        if (getViewingQuality() === 'auto') hls.currentLevel = -1
+        opts.onAbrCap?.(bestH)
+        return 'abr-down'
+      }
+    } catch {
+      /* fall through to startLoad */
+    }
+  }
+  try {
+    hls.startLoad(Number.isFinite(playhead) ? playhead : undefined)
+  } catch {
+    /* ignore */
+  }
+  return 'start-load'
+}
+
+function hlsTargetSegmentDurationSec(hls: Hls | null | undefined): number {
+  if (!hls) return 6
+  try {
+    const details =
+      hls.latestLevelDetails ||
+      (hls.loadLevel >= 0 ? hls.levels[hls.loadLevel]?.details : null) ||
+      hls.levels.find((l) => l.details)?.details
+    const td = details?.targetduration
+    if (typeof td === 'number' && Number.isFinite(td) && td > 0) {
+      return Math.min(12, Math.max(2, td))
+    }
+  } catch {
+    /* ignore */
+  }
+  return 6
 }
 
 interface PlayerProps {
@@ -268,16 +366,49 @@ type Engine = 'hls' | 'ts' | 'native'
 const VOLUME_KEY = 'jiyu.player.volume'
 const VOLUME_MIGRATE_KEY = 'jiyu.player.volume.unity'
 const MUTE_KEY = 'jiyu.player.muted'
+/** Default softsub bump when cues run ahead of Movy/HLS anime (VLC-style +delay). */
+const ANIME_SUB_DELAY_KEY = 'jiyu.player.animeSubDelaySec'
+const DEFAULT_ANIME_SUB_DELAY_SEC = 0.5
 /** In-app volume ceiling (native <video> max). At 100%, loudness matches the OS mixer. */
 const VOLUME_MAX = 1
 const VOLUME_STEP = 0.05
+/** Hide controls after pointer idle once playback is underway. */
 const CHROME_IDLE_MS = 2800
+/** First auto-hide after the picture is up (and when entering fullscreen). */
+const CHROME_START_HIDE_MS = 5_000
+/** Statuses that mean the player is still starting — keep controls up. */
+const CHROME_HOLD_RE =
+  /^(Connecting|Loading|Opening|Finding|Fetching|Starting|Seeking|Trying|Press play)/i
 /** Failed torrent loads on one episode before auto-skipping to the next. */
 const EPISODE_FAILS_BEFORE_SKIP = 3
 /** Don't sit forever on magnet #1 when an alternate exists. */
 const TORRENT_CANDIDATE_TIMEOUT_MS = 28_000
 const DEAD_SWARM_RE =
   /no peers|no reachable seeds|swarm may be dead|unavailable|taking too long|timed? ?out|took too long/i
+
+function readAnimeSubtitleDelay(): number {
+  try {
+    const raw = localStorage.getItem(ANIME_SUB_DELAY_KEY)
+    if (raw == null) return DEFAULT_ANIME_SUB_DELAY_SEC
+    const n = parseFloat(raw)
+    if (!Number.isFinite(n)) return DEFAULT_ANIME_SUB_DELAY_SEC
+    return Math.max(-15, Math.min(15, n))
+  } catch {
+    return DEFAULT_ANIME_SUB_DELAY_SEC
+  }
+}
+
+function writeAnimeSubtitleDelay(sec: number) {
+  try {
+    localStorage.setItem(ANIME_SUB_DELAY_KEY, String(sec))
+  } catch {
+    /* ignore */
+  }
+}
+
+function initialSubtitleDelayForCategory(category?: string): number {
+  return category === 'anime' ? readAnimeSubtitleDelay() : 0
+}
 
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -323,6 +454,17 @@ function pickEngines(url: string): Engine[] {
   }
   engines.push('native')
   return [...new Set(engines)]
+}
+
+/** Sports / IPTV / tagged live — drive HLS liveMode + mpegts live stash. */
+function isLivePlaybackItem(item: StreamItem): boolean {
+  if (item.category === 'sports') return true
+  if (item.sourceKind === 'iptv') return true
+  return Boolean(
+    item.tags?.some((t) =>
+      /^(iptv|local|live|live-now|ppv\.st|streamed|always-live)$/i.test(t),
+    ),
+  )
 }
 
 function describeHlsError(data: { type?: string }): string {
@@ -396,16 +538,23 @@ export function Player({
     if (queued && queued.id === item.id) clearWatchNext()
   }, [item.id])
 
-  const [error, setError] = useState<string | null>(null)
-  const [status, setStatus] = useState('Connecting…')
+  const [error, setErrorRaw] = useState<string | null>(null)
+  const [status, setStatusRaw] = useState('Connecting…')
+  const setError = (value: string | null) =>
+    setErrorRaw(value == null ? null : maskUserFacingMessage(value))
+  const setStatus = (value: string) => setStatusRaw(maskUserFacingMessage(value))
   const [engineLabel, setEngineLabel] = useState('')
   /** Hide black stage until the first frame / playing event. */
   const [mediaReady, setMediaReady] = useState(false)
   const [retryTick, setRetryTick] = useState(0)
+  /** Bump to remount the video element (explicit Retry only — never soft stalls). */
+  const [hlsRemountNonce, setHlsRemountNonce] = useState(0)
   const [paused, setPaused] = useState(false)
   const [muted, setMuted] = useState(loadSavedMuted)
   const [volume, setVolume] = useState(loadSavedVolume)
-  const [hint, setHint] = useState<string | null>(null)
+  const [hint, setHintRaw] = useState<string | null>(null)
+  const setHint = (value: string | null) =>
+    setHintRaw(value == null ? null : maskUserFacingMessage(value))
   const [castAvailable, setCastAvailable] = useState(false)
   const [casting, setCasting] = useState(false)
   const [castDevice, setCastDevice] = useState('')
@@ -421,6 +570,8 @@ export function Player({
   const [episodeLoading, setEpisodeLoading] = useState(false)
   /** UI episode while Next/Prev resolves — playlistIndex only advances after a stream URL exists. */
   const [loadingPlaylistIndex, setLoadingPlaylistIndex] = useState<number | null>(null)
+  /** Prevent double auto-advance when both `ended` and near-end timeupdate fire. */
+  const autoAdvanceLockRef = useRef(false)
   const [subsEnabled, setSubsEnabled] = useState(true)
   const [subtitleCues, setSubtitleCues] = useState<SubtitleCue[]>([])
   const [subtitleLine, setSubtitleLine] = useState('')
@@ -457,7 +608,10 @@ export function Player({
   /** After the user hits Play, don't auto-pause again for a few seconds. */
   const leadBufferGraceUntilRef = useRef(0)
   const selectPlaylistItemRef = useRef<
-    (index: number, options?: { force?: boolean; rotateTorrent?: boolean }) => Promise<void>
+    (
+      index: number,
+      options?: { force?: boolean; rotateTorrent?: boolean; rotateSource?: boolean },
+    ) => Promise<void>
   >(async () => {})
   /** Movy → Atlantic mid-playback stall fallback (TMDB meta captured when Movy resolves). */
   const hlsFallbackMetaRef = useRef<{
@@ -470,6 +624,28 @@ export function Player({
     busy: boolean
   } | null>(null)
   const tryHlsFallbackRef = useRef<(resumeAt: number) => Promise<boolean>>(async () => false)
+  /** Active hls.js instance — used to nudge startLoad after Resume seeks. */
+  const hlsInstanceRef = useRef<Hls | null>(null)
+  /** Cap mid-episode HLS remounts so a dead CDN can't reload-loop forever. */
+  const hlsStallRemountRef = useRef({ key: '', count: 0, playStableSince: 0 })
+  /** After Movy→Atlantic stall switch, seek once to this absolute time when ready. */
+  const autoSeekResumeOnceRef = useRef(0)
+  /**
+   * While HLS recover/remount resets video.currentTime to 0, keep showing this
+   * playhead on the seek bar so a soft stall doesn't look like a restart.
+   */
+  const stallHoldPlayheadRef = useRef(0)
+  /**
+   * Absolute media time for an in-flight HLS/native seek. Rapid ±10 taps must
+   * stack from this (not stale video.currentTime) or the second Back re-seeks
+   * to the same spot and leaves the stream buffering mid-episode.
+   */
+  const pendingNativeSeekRef = useRef<number | null>(null)
+  const pendingNativeSeekGenRef = useRef(0)
+  const pendingNativeSeekClearTimerRef = useRef(0)
+  const pendingNativeSeekHandlerRef = useRef<(() => void) | null>(null)
+  /** Block stall remount / Atlantic swap while a user scrub is settling. */
+  const seekGuardUntilRef = useRef(0)
   /** Prefer over item.httpReferrer so Android/desktop HLS loaders get Movy/Atlantic Referer. */
   const activePlaybackReferrerRef = useRef(item.httpReferrer || '')
   const episodeFailRef = useRef({ index: -1, fails: 0 })
@@ -533,7 +709,7 @@ export function Player({
     const tmdbId = rivestreamTmdbIdFromItem(item)
     if (!tmdbId) return
     const epKey = playlistEpisodeKey(activePlaylistItem) || parseEpisodeKey(item.title) || ''
-    const seMatch = /^S(\d{1,2})E(\d{1,3})$/i.exec(epKey)
+    const seMatch = /^S(\d{1,2})E(\d{1,4})$/i.exec(epKey)
     const season = seMatch ? Number(seMatch[1]) : 1
     const episode = seMatch ? Number(seMatch[2]) : playlistIndex + 1
     const existing = hlsFallbackMetaRef.current
@@ -586,13 +762,19 @@ export function Player({
     ? `Episodes · ${uiEpisodeKey} · ${uiPlaylistIndex + 1}/${playlist.length}`
     : `Episodes · ${uiPlaylistIndex + 1}/${playlist.length}`
   const hasPlaylist = playlist.length > 1
-  // Prefer the active episode's subs only — never fall back to episode 1's URL.
-  const subtitleUrl = activePlaylistItem.subtitleUrl ?? item.subtitleUrl
-  const subtitleKind = activePlaylistItem.subtitleKind ?? item.subtitleKind
+  // Prefer the active episode's subs only — never fall back to another episode's
+  // show-level subtitleUrl (that reused E02 captions while watching E05).
+  const subtitleUrl = activePlaylistItem.subtitleUrl
+  const subtitleKind = activePlaylistItem.subtitleKind
   // Companion files and embedded softsubs both get a Subs control once we have a URL.
   const showSubsLoading = subsStatus === 'loading' && Boolean(subtitleUrl)
   const showSubsControls = Boolean(subtitleUrl)
-  const videoMountKey = `v${AUDIO_PIPELINE_REV}-${item.id}-${activePlaylistItem.url ?? ''}`
+  const videoMountKey = `v${AUDIO_PIPELINE_REV}-${item.id}-${activePlaylistItem.url ?? ''}-r${hlsRemountNonce}`
+
+  // Allow one auto-advance per episode (ended + near-end timeupdate both fire).
+  useEffect(() => {
+    autoAdvanceLockRef.current = false
+  }, [playlistIndex, item.id])
 
   // Only re-bootstrap the episode list when a new play session starts.
   // Do not depend on runtimeSeconds — that used to snap Next back to episode 1.
@@ -820,10 +1002,43 @@ export function Player({
     let stallTimer = 0
     let sustainedTimer = 0
 
+    const rememberPipe = () => {
+      const pipe =
+        inferPlayPipe({
+          url: activePlaylistItem.url || item.url,
+          referrer: activePlaybackReferrerRef.current || item.httpReferrer,
+        }) || (item.torrentUri ? ('torrent' as PlayPipe) : null)
+      if (!pipe) return
+      const epKey =
+        playlistEpisodeKey(activePlaylistItem) || parseEpisodeKey(item.title) || ''
+      const se = /^S(\d{1,2})E(\d{1,4})$/i.exec(epKey)
+      const tmdbId = rivestreamTmdbIdFromItem(item)
+      rememberLastGoodPlay(
+        playReliabilityKey({
+          itemId: item.id,
+          tmdbId,
+          mediaType: tmdbId ? 'tv' : undefined,
+          season: se ? Number(se[1]) : undefined,
+          episode: se ? Number(se[2]) : undefined,
+        }),
+        pipe,
+        {
+          host: (() => {
+            try {
+              return new URL(activePlaylistItem.url || item.url || '').hostname
+            } catch {
+              return undefined
+            }
+          })(),
+        },
+      )
+    }
+
     const onPlaying = () => {
       if (!started) {
         started = true
         recordPlaybackHealth(key, 'started')
+        rememberPipe()
       }
       waitingSince = 0
       if (stallTimer) {
@@ -836,6 +1051,7 @@ export function Player({
           if (!sustained && !video.paused && !video.ended) {
             sustained = true
             recordPlaybackHealth(key, 'sustained')
+            rememberPipe()
           }
         }, 30_000)
       }
@@ -939,8 +1155,34 @@ export function Player({
     return reported + timelineOffsetRef.current
   }
 
+  /** Pin UI/clock across recoverMediaError / remount (media element resets to 0). */
+  function pinStallPlayhead(at: number) {
+    if (!(at > 0.5)) return
+    stallHoldPlayheadRef.current = at
+    autoSeekResumeOnceRef.current = Math.max(autoSeekResumeOnceRef.current, at)
+    watchClockRef.current = { lastTs: 0, accrued: at }
+    setPlaybackClock((prev) =>
+      Math.abs(prev.current - at) < 0.15 ? prev : { ...prev, current: at },
+    )
+  }
+
+  function clearStallHoldIfCaughtUp(video: HTMLVideoElement) {
+    const hold = stallHoldPlayheadRef.current
+    if (!(hold > 0.5)) return
+    const t = Number.isFinite(video.currentTime) ? video.currentTime : 0
+    // Media has landed near the hold and is playing — drop the pin.
+    if (!video.paused && !video.ended && t >= hold - 1.25 && t <= hold + 12) {
+      stallHoldPlayheadRef.current = 0
+    }
+  }
+
   function effectivePlayhead(video: HTMLVideoElement): number {
     const absolute = absolutePlayhead(video)
+    const hold = stallHoldPlayheadRef.current
+    // recoverMediaError / remount briefly report t=0 — keep the bar at the stall.
+    if (hold > 0.5 && (absolute < 1 || absolute + 1.5 < hold)) {
+      return hold
+    }
     // Accrued wall-clock is only a gap-fill for brief remux glitches — never a
     // runaway past the media timeline (that produced Resume 2:49 on 1h45 films).
     const accrued = watchClockRef.current.accrued
@@ -993,7 +1235,10 @@ export function Player({
 
   function updatePlaybackClock(video: HTMLVideoElement) {
     const playbackUrl = activePlaylistItem.url || item.url || video.currentSrc
-    const playhead = absolutePlayhead(video)
+    clearStallHoldIfCaughtUp(video)
+    // Prefer effective playhead so brief remux/HLS stalls don't freeze the bar
+    // while audio is still advancing via accrued clock.
+    const playhead = effectivePlayhead(video)
     const reported =
       Number.isFinite(video.duration) && video.duration !== Infinity && video.duration > 0
         ? video.duration + timelineOffsetRef.current
@@ -1035,6 +1280,9 @@ export function Player({
     if (isTile) return
     const video = videoRef.current
     if (!video) return
+    // Never persist a mid-seek playhead — Back/Forward (±10) on HLS is async;
+    // saving the pre-seek time re-arms Resume and fights the jump.
+    if (video.seeking || pendingNativeSeekRef.current != null) return
     try {
     tickWatchClock(video)
     const reportedDuration =
@@ -1154,15 +1402,20 @@ export function Player({
   }
 
   function restartEpisode() {
-    if (isPip || isTile || episodeLoading) return
+    if (isPip || isTile) return
     // Clear Continue watching for this title — restart is the only bypass for resume.
     restartGuardRef.current = true
     removeContinueEntry(item.id)
     resumePendingRef.current = false
     resumeKeyRef.current = `${item.id}:${playlistIndex}:restart`
+    autoSeekResumeOnceRef.current = 0
+    stallHoldPlayheadRef.current = 0
+    pendingNativeSeekRef.current = null
+    seekGuardUntilRef.current = Date.now() + 18_000
     setResumeOffer(null)
     skipDismissedRef.current = null
     setSkipTarget(null)
+    setPlaybackClock((prev) => ({ ...prev, current: 0 }))
     const hadOffset = timelineOffsetRef.current > 0
     setTimelineOffsetSeconds(0)
     watchClockRef.current = { lastTs: 0, accrued: 0 }
@@ -1176,21 +1429,87 @@ export function Player({
       isRemuxPlaybackUrl(raw) ||
       /[?&]t=\d+/.test(video.currentSrc) ||
       hadOffset
+    const hadError = Boolean(error)
+    const hls = hlsInstanceRef.current
+    const movyStyle =
+      isMovyStreamUrl(url) ||
+      item.httpReferrer === MOVY_PLAY_REFERER ||
+      /movy\.sx/i.test(activePlaybackReferrerRef.current || '')
 
     setError(null)
+    setStatus('Restarting…')
+
+    // Movy signed URLs expire mid-title — Restart must mint a fresh source,
+    // not reload the dead playlist that stalled at e.g. 3:10.
+    if (movyStyle || hadError) {
+      hlsStallRemountRef.current = { key: '', count: 0, playStableSince: 0 }
+      if (hlsFallbackMetaRef.current) {
+        hlsFallbackMetaRef.current.busy = false
+        hlsFallbackMetaRef.current.tried = false
+      }
+      flash('Restarting with a fresh source…')
+      bumpChrome()
+      void selectPlaylistItemRef.current(playlistIndex, {
+        force: true,
+        rotateSource: true,
+      })
+      return
+    }
+
+    // Remux / torrent pipe: reopen without t= so ffmpeg starts at 0.
     if (hadRemuxSeek || isRemuxPlaybackUrl(url)) {
-      setStatus('Restarting…')
-      video.src = url
+      try {
+        const parsed = new URL(url)
+        parsed.searchParams.set('r', String(Date.now()))
+        video.src = parsed.toString()
+      } catch {
+        video.src = url
+      }
       video.load()
       void video.play().catch(() => setStatus('Press play'))
-    } else {
+      flash('Restarted from beginning')
+      bumpChrome()
+      return
+    }
+
+    // Errored / missing HLS session — full remount from the start (currentTime=0
+    // alone left anime stuck after a bad scrub with "HLS load timed out").
+    if (isHlsUrl(url) && !hls) {
+      setRetryTick((n) => n + 1)
+      flash('Restarted from beginning')
+      bumpChrome()
+      return
+    }
+
+    // Healthy HLS — stop the old window, then load from 0.
+    if (hls) {
       try {
-        video.currentTime = 0
+        hls.stopLoad()
       } catch {
         /* ignore */
       }
-      void video.play().catch(() => undefined)
+      try {
+        video.currentTime = 0
+        hls.startLoad(0)
+      } catch {
+        setRetryTick((n) => n + 1)
+        flash('Restarted from beginning')
+        bumpChrome()
+        return
+      }
+      void video.play().catch(() => setStatus('Press play'))
+      flash('Restarted from beginning')
+      bumpChrome()
+      return
     }
+
+    // Progressive / mpeg-ts / native
+    try {
+      video.currentTime = 0
+    } catch {
+      /* ignore */
+    }
+    void video.play().catch(() => undefined)
     flash('Restarted from beginning')
     bumpChrome()
   }
@@ -1217,38 +1536,46 @@ export function Player({
     const playbackUrl = activePlaylistItem.url || item.url || video.currentSrc
     if (isRemuxPlaybackUrl(playbackUrl)) {
       setTimelineOffsetSeconds(target)
-      resumePendingRef.current = false
+      resumePendingRef.current = true
       resumeKeyRef.current = `${item.id}:${playlistIndex}`
       setStatus(`Resuming at ${formatClock(target)}…`)
-      const baseUrl = playbackUrl.replace(/([?&])t=\d+(&|$)/, '$1').replace(/[?&]$/, '')
+      const baseUrl = stripResumeOffset(playbackUrl)
       const resumeUrl = withResumeOffset(baseUrl, target)
       let settled = false
-      const fallBackToStart = (message: string) => {
+      // Never auto-jump to t=0 on a slow remux/probe — that feels like Resume
+      // "restarted the episode". Keep the offer and let them retry.
+      const holdResumePoint = (message: string) => {
         if (settled) return
         settled = true
         window.clearTimeout(failTimer)
         video.removeEventListener('loadeddata', onReady)
         video.removeEventListener('canplay', onReady)
+        video.removeEventListener('playing', onReady)
         video.removeEventListener('error', onResumeError)
-        setTimelineOffsetSeconds(0)
+        resumePendingRef.current = false
         setResumeOffer(target)
         setError(null)
-        video.src = baseUrl
-        video.load()
-        void video.play().catch(() => undefined)
-        setStatus('Starting from the beginning…')
+        setPaused(true)
+        setStatus('Resume point not ready — tap Resume when more is downloaded')
         flash(message)
       }
       const failTimer = window.setTimeout(() => {
-        fallBackToStart('Resume not buffered yet — started from the beginning')
-      }, 22_000)
+        // Remux + audio-track probe often needs >22s on cold torrents.
+        holdResumePoint('Still buffering at resume point — tap Resume again')
+      }, 55_000)
       const onReady = () => {
         if (settled) return
+        // Ignore a stale ready from the previous src before the resume pipe attaches.
+        if (video.currentSrc && !/[?&]t=\d+/i.test(video.currentSrc) && target >= 5) {
+          return
+        }
         settled = true
         window.clearTimeout(failTimer)
         video.removeEventListener('loadeddata', onReady)
         video.removeEventListener('canplay', onReady)
+        video.removeEventListener('playing', onReady)
         video.removeEventListener('error', onResumeError)
+        resumePendingRef.current = false
         setResumeOffer(null)
         setError(null)
         setStatus('Ready')
@@ -1256,10 +1583,11 @@ export function Player({
         void video.play().catch(() => undefined)
       }
       const onResumeError = () => {
-        fallBackToStart('Resume point not ready yet — playing from the start')
+        holdResumePoint('Resume point not ready yet — tap Resume when more is downloaded')
       }
       video.addEventListener('loadeddata', onReady)
       video.addEventListener('canplay', onReady)
+      video.addEventListener('playing', onReady)
       video.addEventListener('error', onResumeError)
       video.src = resumeUrl
       video.load()
@@ -1267,32 +1595,88 @@ export function Player({
       return
     }
     try {
-      video.currentTime = target
-      if (Math.abs(video.currentTime - target) > 3) {
-        flash('Resume is not ready yet — try again in a moment')
-        return
+      // HLS / MSE seeks are async — reading currentTime right after assign still
+      // returns the old playhead, which falsely aborted Resume and left a seek
+      // in flight (black "Buffering…" at the resume point with the button still up).
+      setStatus(`Resuming at ${formatClock(target)}…`)
+      resumePendingRef.current = true
+      let settled = false
+      const finishOk = () => {
+        if (settled) return
+        settled = true
+        window.clearTimeout(failTimer)
+        video.removeEventListener('seeked', onSeeked)
+        video.removeEventListener('canplay', onSeeked)
+        video.removeEventListener('playing', onSeeked)
+        video.removeEventListener('error', onFail)
+        resumeKeyRef.current = `${item.id}:${playlistIndex}`
+        resumePendingRef.current = false
+        setResumeOffer(null)
+        setError(null)
+        setStatus('Playing')
+        flash(`Resumed at ${formatClock(target)}`)
+        void video.play().catch(() => undefined)
       }
-      resumeKeyRef.current = `${item.id}:${playlistIndex}`
-      resumePendingRef.current = false
-      setResumeOffer(null)
-      flash(`Resumed at ${formatClock(target)}`)
+      const onSeeked = () => {
+        if (settled) return
+        const at = Number.isFinite(video.currentTime) ? video.currentTime : 0
+        // Accept near-miss (keyframe snap) — only retry if still nowhere near target.
+        if (Math.abs(at - target) > 12) return
+        finishOk()
+      }
+      const onFail = () => {
+        if (settled) return
+        settled = true
+        window.clearTimeout(failTimer)
+        video.removeEventListener('seeked', onSeeked)
+        video.removeEventListener('canplay', onSeeked)
+        video.removeEventListener('playing', onSeeked)
+        video.removeEventListener('error', onFail)
+        resumePendingRef.current = false
+        setStatus('Resume not ready — try again in a moment')
+        flash('Resume is not ready yet — try again in a moment')
+      }
+      const failTimer = window.setTimeout(() => {
+        if (settled) return
+        const at = Number.isFinite(video.currentTime) ? video.currentTime : 0
+        if (Math.abs(at - target) <= 12) {
+          finishOk()
+          return
+        }
+        onFail()
+      }, 14_000)
+      video.addEventListener('seeked', onSeeked)
+      video.addEventListener('canplay', onSeeked)
+      video.addEventListener('playing', onSeeked)
+      video.addEventListener('error', onFail)
+      video.currentTime = target
+      // Nudge hls.js to fetch around the new playhead (VOD stalls after seek).
+      try {
+        hlsInstanceRef.current?.startLoad(target)
+      } catch {
+        /* ignore */
+      }
       void video.play().catch(() => undefined)
     } catch {
+      resumePendingRef.current = false
       flash('Resume is not ready yet — try again in a moment')
     }
   }
 
   useEffect(() => {
     let cancelled = false
+    // Always drop cues when the episode has no sub URL (or on episode change).
+    // Keeping prior cues here left E02 text on screen while watching E05.
+    if (!subtitleUrl) {
+      setSubtitleCues([])
+      setSubtitleLine('')
+      setSubsStatus('idle')
+      return
+    }
     // Keep existing cues visible during a manual re-fetch so toggle doesn't blank the screen.
     if (subsFetchTick === 0 || subtitleCues.length === 0) {
       setSubtitleCues([])
       setSubtitleLine('')
-    }
-
-    if (!subtitleUrl) {
-      setSubsStatus('idle')
-      return
     }
 
     setSubsStatus((prev) => (prev === 'ready' && subtitleCues.length > 0 ? prev : 'loading'))
@@ -1340,12 +1724,23 @@ export function Player({
           // so CORS / missing Referer cannot silently leave Subs Off forever.
           if (remoteSidecar) {
             try {
+              let referer = 'https://rivestream.ru/'
+              let origin = 'https://rivestream.ru'
+              try {
+                const host = new URL(subtitleUrl!).hostname
+                if (!/rivestream/i.test(host)) {
+                  origin = new URL(subtitleUrl!).origin
+                  referer = `${origin}/`
+                }
+              } catch {
+                /* keep rivestream referer */
+              }
               const remote = await nativeFetchText(subtitleUrl!, {
                 quiet: true,
                 headers: {
                   Accept: 'text/vtt,text/plain,application/x-subrip,*/*',
-                  Referer: 'https://rivestream.ru/',
-                  Origin: 'https://rivestream.ru',
+                  Referer: referer,
+                  Origin: origin,
                 },
               })
               if (remote.ok && remote.content) {
@@ -1379,8 +1774,32 @@ export function Player({
           }
           if (ok) {
             const cues = parseSubtitleCues(text)
+            const notASubtitle = sidecar && text.length > 40 && !text.includes('-->')
             // Wyzie free-plan ad dump — drop and let Nyaa / next source try.
-            if (sidecar && cues.length === 0 && isJunkSubtitleText(text)) {
+            // VTT conversion sometimes returns the ad; the raw SRT is still usable.
+            if (
+              sidecar &&
+              cues.length === 0 &&
+              isJunkSubtitleText(text) &&
+              /[?&]to=vtt/i.test(subtitleUrl!)
+            ) {
+              const plain = subtitleUrl!
+                .replace(/([?&])to=vtt&?/gi, '$1')
+                .replace(/([?&])plain=1&?/gi, '$1')
+                .replace(/[?&]$/, '')
+              if (plain !== subtitleUrl && /^https?:\/\//i.test(plain)) {
+                if (!cancelled) {
+                  setLocalPlaylist((prev) => {
+                    const base = prev ?? item.playlist ?? []
+                    return base.map((row, i) =>
+                      i === playlistIndex ? { ...row, subtitleUrl: plain, subtitleKind: 'file' } : row,
+                    )
+                  })
+                }
+                break
+              }
+            }
+            if (sidecar && cues.length === 0 && (isJunkSubtitleText(text) || notASubtitle)) {
               if (!cancelled) {
                 setSubtitleCues([])
                 setSubsStatus('missing')
@@ -1452,7 +1871,21 @@ export function Player({
             }
           } else if (latestCount === 0 && httpStatus === 404) {
             if (/no subtitle track/i.test(httpBody)) {
-              // Probe finished: this release has no softsubs — stop the loading spinner.
+              // Probe finished: this release has no embedded softsubs — drop the
+              // local URL so Wyzie / OpenSubtitles / Nyaa can still attach.
+              if (!cancelled && !remoteSidecar) {
+                setSubtitleCues([])
+                setSubsStatus('idle')
+                movySubsSidecarRef.current = ''
+                setLocalPlaylist((prev) => {
+                  const base = prev ?? item.playlist ?? []
+                  return base.map((row, i) =>
+                    i === playlistIndex
+                      ? { ...row, subtitleUrl: undefined, subtitleKind: undefined }
+                      : row,
+                  )
+                })
+              }
               break
             }
             if (/not ready|timed out|read failed|could not read/i.test(httpBody)) {
@@ -1477,7 +1910,7 @@ export function Player({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- subtitleCues only used to avoid blanking on manual refetch
   }, [subtitleUrl, subtitleKind, playlistIndex, subsFetchTick])
 
-  /** Movy / Atlantic HLS often has no captions — Wyzie first, then Nyaa softsubs. */
+  /** Non-English / M2Box / Movy / anime: Wyzie → OpenSubtitles → Nyaa when needed. */
   useEffect(() => {
     if (subtitleUrl) return
     const isMovyPlay =
@@ -1490,25 +1923,40 @@ export function Player({
       /atlantic|totallyacdn|hls\.lol/i.test(
         String(item.httpReferrer || activePlaybackReferrerRef.current || ''),
       )
-    if (!isMovyPlay && !isAtlanticPlay && !rivestreamTmdbIdFromItem(item)) return
+    const isM2BoxPlay =
+      isM2BoxCatalogItem(item) || item.tags?.some((t) => /^m2box$/i.test(String(t)))
+    const canTitleLookup =
+      isM2BoxPlay ||
+      item.category === 'series' ||
+      item.category === 'anime' ||
+      item.category === 'kids'
+    if (
+      !isMovyPlay &&
+      !isAtlanticPlay &&
+      !rivestreamTmdbIdFromItem(item) &&
+      !canTitleLookup
+    ) {
+      return
+    }
 
-    const tmdbId = rivestreamTmdbIdFromItem(item)
-    const canWyzie = Boolean(tmdbId && isWyzieAvailable() && !skipWyzieSubsRef.current)
+    const knownTmdbId = rivestreamTmdbIdFromItem(item)
     const canNyaa =
       isTorrentPlaybackAvailable() &&
       (shouldTryNyaaForItem(item) ||
         item.category === 'series' ||
+        item.category === 'anime' ||
         item.category === 'kids' ||
         Boolean(item.rivestreamTmdbId) ||
-        Boolean(tmdbId))
-    if (!canWyzie && !canNyaa) return
+        Boolean(knownTmdbId) ||
+        isM2BoxPlay)
+    if (!knownTmdbId && !canTitleLookup && !canNyaa) return
 
     const epKey = playlistEpisodeKey(activePlaylistItem) || ''
     const sidecarKey = `${item.id}|${playlistIndex}|${epKey}`
     if (movySubsSidecarRef.current === sidecarKey) return
     movySubsSidecarRef.current = sidecarKey
 
-    const seMatch = /^S(\d{1,2})E(\d{1,3})$/i.exec(epKey)
+    const seMatch = /^S(\d{1,2})E(\d{1,4})$/i.exec(epKey)
     const season = seMatch ? Number(seMatch[1]) : 1
     const episode = seMatch ? Number(seMatch[2]) : playlistIndex + 1
     const showName = cleanShowDisplayTitle(item.title) || item.title
@@ -1536,13 +1984,35 @@ export function Player({
 
     ;(async () => {
       try {
-        if (canWyzie && tmdbId) {
+        if (knownTmdbId || canTitleLookup) {
           flash('Finding subtitles…')
-          const wyzie = await resolveWyzieSubtitle({ tmdbId, season, episode })
+          const soft = await ensureEpisodeSoftSubtitles({
+            title: showName,
+            item,
+            tmdbId: knownTmdbId || undefined,
+            season,
+            episode,
+            skipWyzie: skipWyzieSubsRef.current,
+            // Native series / anime pipes without captions should still try.
+            force:
+              isMovyPlay ||
+              isAtlanticPlay ||
+              isM2BoxPlay ||
+              shouldPreferRivestreamJapaneseAudio(item),
+          })
           if (cancelled) return
-          if (wyzie.ok) {
+          if (soft.subtitleUrl) {
             settled = true
-            applySubs(wyzie.subtitleUrl, wyzie.subtitleKind, 'Subtitles ready (Wyzie)')
+            const label =
+              soft.source === 'opensubtitles'
+                ? 'Subtitles ready (OpenSubtitles)'
+                : 'Subtitles ready (Wyzie)'
+            applySubs(soft.subtitleUrl, soft.subtitleKind, label)
+            return
+          }
+          // English titles that don't need softsubs — stop quietly.
+          if (!soft.needsSoftSubs) {
+            settled = true
             return
           }
         }
@@ -1553,7 +2023,7 @@ export function Player({
           }
           return
         }
-        flash('Finding subtitles from Nyaa…')
+        flash('Finding subtitles…')
         const subs = await resolveNyaaSubtitleSidecar({ showTitle: showName, season, episode })
         settled = true
         if (cancelled || movySubsSidecarRef.current !== sidecarKey) return
@@ -1575,13 +2045,29 @@ export function Player({
         movySubsSidecarRef.current = ''
       }
     }
-  }, [subtitleUrl, item, playlistIndex, activePlaylistItem])
+  }, [
+    subtitleUrl,
+    item.id,
+    item.category,
+    item.title,
+    item.rivestreamTmdbId,
+    item.cinetaroTmdbId,
+    item.netmirrorTmdbId,
+    item.m2boxSubjectId,
+    item.originalLanguage,
+    item.httpReferrer,
+    playlistIndex,
+    activePlaylistItem.episodeKey,
+    activePlaylistItem.title,
+    activePlaylistItem.fileName,
+  ])
 
   useEffect(() => {
-    // Each episode/release can have its own sync; don't carry delay across titles.
-    subtitleDelayRef.current = 0
-    setSubtitleDelaySec(0)
-  }, [subtitleUrl, playlistIndex])
+    // Per-episode sync — anime gets a default +delay so softsubs aren't ahead of audio.
+    const delay = initialSubtitleDelayForCategory(item.category)
+    subtitleDelayRef.current = delay
+    setSubtitleDelaySec(delay)
+  }, [subtitleUrl, playlistIndex, item.category])
 
   useEffect(() => {
     skipWyzieSubsRef.current = false
@@ -1676,6 +2162,14 @@ export function Player({
     const clamped = Math.max(-15, Math.min(15, next))
     subtitleDelayRef.current = clamped
     setSubtitleDelaySec(clamped)
+    if (item.category === 'anime') writeAnimeSubtitleDelay(clamped)
+    bumpChrome()
+  }
+
+  function resetSubtitleDelay() {
+    subtitleDelayRef.current = 0
+    setSubtitleDelaySec(0)
+    if (item.category === 'anime') writeAnimeSubtitleDelay(0)
     bumpChrome()
   }
 
@@ -1706,6 +2200,7 @@ export function Player({
       }
       subtitleDelayRef.current = result.delaySec
       setSubtitleDelaySec(result.delaySec)
+      if (item.category === 'anime') writeAnimeSubtitleDelay(result.delaySec)
       if (!subsEnabled) setSubsEnabled(true)
       flash(
         result.delaySec === 0
@@ -1736,11 +2231,21 @@ export function Player({
         title: meta.title,
       })
       if (!alt.ok) {
-        meta.busy = false
         return false
       }
       meta.tried = true
       activePlaybackReferrerRef.current = alt.referer || ATLANTIC_PLAY_REFERER
+      rememberLastGoodPlay(
+        playReliabilityKey({
+          itemId: item.id,
+          tmdbId: meta.tmdbId,
+          mediaType: meta.mediaType,
+          season: meta.season,
+          episode: meta.episode,
+        }),
+        'atlantic',
+        { provider: alt.provider },
+      )
       if (window.signalDesktop?.setPlaybackHeaders) {
         void window.signalDesktop.setPlaybackHeaders({
           url: alt.url,
@@ -1767,6 +2272,8 @@ export function Player({
           { allowUnknownDuration: true, playbackUrl: alt.url },
         )
         resumePendingRef.current = true
+        // Stall recovery: jump back to where they were once the new HLS is ready.
+        autoSeekResumeOnceRef.current = resumeAt
       }
       setLocalPlaylist((prev) => {
         const base = prev ?? item.playlist ?? []
@@ -1786,17 +2293,23 @@ export function Player({
       setStatus(`Playing · ${alt.provider}`)
       return true
     } catch {
-      if (hlsFallbackMetaRef.current) hlsFallbackMetaRef.current.busy = false
       return false
+    } finally {
+      if (hlsFallbackMetaRef.current) hlsFallbackMetaRef.current.busy = false
     }
   }
 
   async function selectPlaylistItem(
     index: number,
-    options?: { force?: boolean; rotateTorrent?: boolean },
+    options?: { force?: boolean; rotateTorrent?: boolean; rotateSource?: boolean },
   ) {
-    if (index < 0 || index >= playlist.length || episodeLoading) return
-    if (index === playlistIndex && !options?.force) return
+    if (index < 0 || index >= playlist.length) return
+    if (index === playlistIndex && !options?.force && !options?.rotateSource) return
+    // Never hard-block other episodes while one resolve is in flight — that left
+    // anime stuck after a mid-play stall (Next / Restart / other eps did nothing).
+    if (episodeLoading) {
+      episodeFailGenRef.current += 1
+    }
     const entry = playlist[index]
     const episodeKey = playlistEpisodeKey(entry) || ''
     let baseCandidates = [entry.torrentUri, ...(entry.torrentAlternates || [])].filter(
@@ -1821,27 +2334,36 @@ export function Player({
       !isM2BoxCatalogItem(item) &&
       (item.category === 'series' || item.category === 'kids') &&
       /^S\d{1,2}E\d{1,3}$/i.test(episodeKey)
+    const hasPlayableHttp =
+      Boolean(entry.url) &&
+      /^https?:\/\//i.test(entry.url) &&
+      !isEphemeralLocalStreamUrl(entry.url)
+    const movyStyleUrl =
+      isMovyStreamUrl(entry.url) || /[?&]type=m3u8\b/i.test(entry.url || '')
     // Always re-resolve torrent episodes. Sibling entries often still hold a
     // 127.0.0.1 remux URL from earlier, but torrentStop() kills that swarm —
     // reusing it shows "Native playback failed".
     const needsTorrent =
       (baseCandidates.length > 0 || useTorrentio) &&
       (options?.force ||
-        !entry.url ||
-        !/^https?:\/\//i.test(entry.url) ||
-        isEphemeralLocalStreamUrl(entry.url))
+        options?.rotateTorrent ||
+        options?.rotateSource ||
+        !hasPlayableHttp ||
+        isEphemeralLocalStreamUrl(entry.url || ''))
     const needsM2Box =
       isM2BoxCatalogItem(item) &&
-      (options?.force ||
-        !entry.url ||
-        !/^https?:\/\//i.test(entry.url) ||
-        /hakunaymatata\.com|aoneroom\.com/i.test(entry.url))
+      (Boolean(options?.rotateSource) ||
+        !hasPlayableHttp ||
+        /hakunaymatata\.com|aoneroom\.com/i.test(entry.url || ''))
     // If the playlist already carries Nyaa/torrent magnets, use those — don't
     // bounce back into Rive (which often only has a dead embed shell).
+    // Movy signed playlists expire — re-resolve on episode change / force / rotate.
     const needsRivestream =
       isRivestreamShow &&
       !entry.torrentUri &&
-      (options?.force || !entry.url || !/^https?:\/\//i.test(entry.url))
+      (options?.rotateSource ||
+        !hasPlayableHttp ||
+        (movyStyleUrl && (options?.force || index !== playlistIndex)))
 
     // Show the target episode in chrome immediately.
     setLoadingPlaylistIndex(index)
@@ -1871,11 +2393,18 @@ export function Player({
       setPlaylistIndex(index)
       clearVideoSource()
 
-      const dead = DEAD_SWARM_RE.test(message)
+      const epLabel = episodeKey || `episode ${index + 1}`
+      const userMessage = message.includes(epLabel)
+        ? message
+        : `${message} (${epLabel})`
+
+      // Auto-skip is torrent-only (dead magnet swarms). Movy/HLS misses must not
+      // silently jump E1 → E2 → E3 when a provider times out.
+      const dead = needsTorrent && DEAD_SWARM_RE.test(message)
       if (!dead) {
         episodeFailRef.current = { index: -1, fails: 0 }
-        setError(message)
-        setStatus(message)
+        setError(userMessage)
+        setStatus(userMessage)
         return
       }
 
@@ -1900,7 +2429,7 @@ export function Player({
           playlistEpisodeKey(playlist[next]) || `episode ${next + 1}`
         setError(null)
         setStatus('Fetching sources…')
-        flash(`Skipping dead episode → ${nextKey}`)
+        flash(`No working torrent for ${epLabel} — trying ${nextKey}`)
         episodeFailTimerRef.current = window.setTimeout(() => {
           if (episodeFailGenRef.current !== failGen) return
           void selectPlaylistItemRef.current(next)
@@ -1908,8 +2437,8 @@ export function Player({
         return
       }
 
-      setError(message)
-      setStatus(message)
+      setError(userMessage)
+      setStatus(userMessage)
     }
 
     if (needsM2Box) {
@@ -1918,7 +2447,7 @@ export function Player({
       setStatus('Loading episode…')
       setError(null)
       try {
-        const seMatch = /^S(\d{1,2})E(\d{1,3})$/i.exec(episodeKey)
+        const seMatch = /^S(\d{1,2})E(\d{1,4})$/i.exec(episodeKey)
         const season = seMatch ? Number(seMatch[1]) : 1
         const episode = seMatch ? Number(seMatch[2]) : index + 1
         const resolved = await resolveM2BoxPlay(item.detailUrl || item.url, {
@@ -1937,6 +2466,23 @@ export function Player({
             referrer: resolved.referer,
           })
         }
+        let subtitleUrl: string | undefined
+        let subtitleKind: 'file' | undefined
+        try {
+          const showName = cleanShowDisplayTitle(item.title) || item.title
+          const soft = await ensureEpisodeSoftSubtitles({
+            title: showName,
+            item,
+            season,
+            episode,
+            skipWyzie: skipWyzieSubsRef.current,
+          })
+          if (episodeFailGenRef.current !== failGen) return
+          subtitleUrl = soft.subtitleUrl
+          subtitleKind = soft.subtitleKind
+        } catch {
+          /* play without captions — softsub effect may still retry */
+        }
         setLocalPlaylist((prev) => {
           const base = prev ?? item.playlist ?? []
           return base.map((row, i) =>
@@ -1945,10 +2491,12 @@ export function Player({
                   ...row,
                   url: resolved.url,
                   episodeKey: row.episodeKey || episodeKey || undefined,
+                  ...(subtitleUrl ? { subtitleUrl, subtitleKind } : {}),
                 }
               : row,
           )
         })
+        if (subtitleUrl) setSubsFetchTick((n) => n + 1)
         setEpisodeLoading(false)
       } catch (err) {
         failOnEpisode(err instanceof Error ? err.message : 'Could not load M2Box episode')
@@ -1957,10 +2505,16 @@ export function Player({
     } else if (needsRivestream) {
       setEpisodeLoading(true)
       setMediaReady(false)
-      setStatus('Opening Movy…')
+      setStatus('Opening stream…')
       setError(null)
+      // Safety: never leave Next/Restart frozen if a resolve hangs past budget.
+      const loadingWatchdog = window.setTimeout(() => {
+        if (episodeFailGenRef.current !== failGen) return
+        setEpisodeLoading(false)
+        setLoadingPlaylistIndex(null)
+      }, item.category === 'anime' ? 40_000 : 25_000)
       try {
-        const seMatch = /^S(\d{1,2})E(\d{1,3})$/i.exec(episodeKey)
+        const seMatch = /^S(\d{1,2})E(\d{1,4})$/i.exec(episodeKey)
         const season = seMatch ? Number(seMatch[1]) : 1
         const episode = seMatch ? Number(seMatch[2]) : index + 1
         const showName = cleanShowDisplayTitle(item.title) || item.title
@@ -1981,18 +2535,21 @@ export function Player({
           if (candidates.length === 0) return 'skip'
           let result: TorrentStreamResult | null = null
           let usedUri = candidates[0]
-          let lastError = 'Could not start torrent'
+          let lastError = 'Could not start source'
           for (let i = 0; i < candidates.length; i++) {
             const uri = candidates[i]
             usedUri = uri
             setStatus(
               candidates.length > 1
-                ? `Loading torrent… (${i + 1}/${candidates.length})`
-                : 'Starting torrent…',
+                ? `Loading source… (${i + 1}/${candidates.length})`
+                : 'Opening source…',
             )
             try {
               const attempt = await withTimeout(
-                torrentStream(uri, { keepOthers: inMultiview }),
+                torrentStream(uri, {
+                  keepOthers: inMultiview,
+                  preferJapaneseAudio: shouldPreferRivestreamJapaneseAudio(item),
+                }),
                 TORRENT_CANDIDATE_TIMEOUT_MS,
                 'Release took too long to start — trying another source.',
               )
@@ -2033,11 +2590,24 @@ export function Player({
             ),
           )
           index = nyaa.playIndex
+          rememberLastGoodPlay(
+            playReliabilityKey({
+              itemId: item.id,
+              tmdbId: rivestreamTmdbIdFromItem(item),
+              mediaType: 'tv',
+              season,
+              episode,
+            }),
+            'nyaa',
+          )
           return 'played'
         }
 
         let tmdbId = rivestreamTmdbIdFromItem(item)
-        if (!tmdbId && isYmoviesCatalogItem(item)) {
+        if (item.category === 'anime') {
+          setStatus('Looking up show…')
+          tmdbId = (await resolveAnimeTmdbTvId(item.title, tmdbId)) || ''
+        } else if (!tmdbId && isYmoviesCatalogItem(item)) {
           setStatus('Looking up show…')
           tmdbId = (await lookupRivestreamTmdbId(item.title)) || ''
         }
@@ -2051,6 +2621,16 @@ export function Player({
           nyaaHandled = true
         } else if (!nyaaHandled) {
           const yearMatch = /\b(19|20)\d{2}\b/.exec(String(item.description || item.title || ''))
+          const reliabilityKey = playReliabilityKey({
+            itemId: item.id,
+            tmdbId,
+            mediaType: 'tv',
+            season,
+            episode,
+          })
+          // Stalled / Retry: don't pin the dead pipe that just failed.
+          if (options?.rotateSource) forgetLastGoodPlay(reliabilityKey)
+          const lastGood = getLastGoodPlay(reliabilityKey)
           const movy = await withTimeout(
             resolveMovyPlay({
               tmdbId,
@@ -2059,9 +2639,11 @@ export function Player({
               season,
               episode,
               year: yearMatch?.[0],
+              preferBackend: preferredResolveBackend(lastGood),
+              preferProvider: lastGood?.provider,
             }),
-            12_000,
-            'Movy lookup timed out.',
+            item.category === 'anime' ? 35_000 : 20_000,
+            'Source lookup timed out.',
           )
           if (episodeFailGenRef.current !== failGen) return
           if (movy.ok) {
@@ -2076,16 +2658,34 @@ export function Player({
               busy: false,
             }
             activePlaybackReferrerRef.current = movy.referer || MOVY_PLAY_REFERER
-            if (usedAtlantic) setStatus('Playing · atlantic')
+            if (usedAtlantic) setStatus('Playing')
+            rememberLastGoodPlay(reliabilityKey, movy.backend ?? 'movy', {
+              provider: movy.provider,
+              host: (() => {
+                try {
+                  return new URL(movy.url).hostname
+                } catch {
+                  return undefined
+                }
+              })(),
+            })
             let subtitleUrl = movy.subtitleUrl
             let subtitleKind = movy.subtitleKind
-            if (!subtitleUrl && isWyzieAvailable()) {
+            if (!subtitleUrl) {
               try {
-                const wyzie = await resolveWyzieSubtitle({ tmdbId, season, episode })
+                const soft = await ensureEpisodeSoftSubtitles({
+                  title: showName,
+                  item: { ...item, rivestreamTmdbId: tmdbId },
+                  tmdbId,
+                  season,
+                  episode,
+                  skipWyzie: skipWyzieSubsRef.current,
+                  force: item.category === 'anime',
+                })
                 if (episodeFailGenRef.current !== failGen) return
-                if (wyzie.ok) {
-                  subtitleUrl = wyzie.subtitleUrl
-                  subtitleKind = wyzie.subtitleKind
+                if (soft.subtitleUrl) {
+                  subtitleUrl = soft.subtitleUrl
+                  subtitleKind = soft.subtitleKind
                 }
               } catch {
                 /* play without captions */
@@ -2114,7 +2714,7 @@ export function Player({
           } else {
             // resolveMovyPlay already exhausted Movy + Atlantic — try Atlantic once more
             // here so resolve-time fallback stays visible at the call site, then Nyaa.
-            setStatus('Trying alternate HLS…')
+            setStatus('Trying another source…')
             let atlanticOk = false
             try {
               const alt = await resolveAtlanticPlay({
@@ -2137,6 +2737,17 @@ export function Player({
                   busy: false,
                 }
                 activePlaybackReferrerRef.current = alt.referer || ATLANTIC_PLAY_REFERER
+                rememberLastGoodPlay(
+                  playReliabilityKey({
+                    itemId: item.id,
+                    tmdbId,
+                    mediaType: 'tv',
+                    season,
+                    episode,
+                  }),
+                  'atlantic',
+                  { provider: alt.provider },
+                )
                 if (window.signalDesktop?.setPlaybackHeaders) {
                   void window.signalDesktop.setPlaybackHeaders({
                     url: alt.url,
@@ -2145,17 +2756,23 @@ export function Player({
                 }
                 let subtitleUrl: string | undefined
                 let subtitleKind: 'file' | 'embedded' | undefined
-                if (isWyzieAvailable()) {
-                  try {
-                    const wyzie = await resolveWyzieSubtitle({ tmdbId, season, episode })
-                    if (episodeFailGenRef.current !== failGen) return
-                    if (wyzie.ok) {
-                      subtitleUrl = wyzie.subtitleUrl
-                      subtitleKind = wyzie.subtitleKind
-                    }
-                  } catch {
-                    /* play without captions */
+                try {
+                  const soft = await ensureEpisodeSoftSubtitles({
+                    title: showName,
+                    item: { ...item, rivestreamTmdbId: tmdbId },
+                    tmdbId,
+                    season,
+                    episode,
+                    skipWyzie: skipWyzieSubsRef.current,
+                    force: item.category === 'anime',
+                  })
+                  if (episodeFailGenRef.current !== failGen) return
+                  if (soft.subtitleUrl) {
+                    subtitleUrl = soft.subtitleUrl
+                    subtitleKind = soft.subtitleKind
                   }
+                } catch {
+                  /* play without captions */
                 }
                 setLocalPlaylist((prev) => {
                   const base = prev ?? item.playlist ?? []
@@ -2171,7 +2788,7 @@ export function Player({
                       : row,
                   )
                 })
-                setStatus('Playing · atlantic')
+                setStatus('Playing')
               }
             } catch {
               /* fall through to Nyaa */
@@ -2179,31 +2796,97 @@ export function Player({
             if (atlanticOk) {
               /* playlist updated */
             } else {
-              const nyaa = await tryPlayFromNyaa()
-              if (nyaa === 'failed') return
-              if (nyaa === 'skip') {
-                failOnEpisode(movy.error || 'No stream for this episode')
-                return
+              // Movy/Atlantic miss — try bilibili.tv OGV (embed or HLS).
+              let biliOk = false
+              try {
+                setStatus('Checking Bilibili…')
+                const bili = await withTimeout(
+                  resolveBilibiliPlay({
+                    title: showName,
+                    season,
+                    episode,
+                    episodeCountHint: playlist.length || undefined,
+                    seasonId: item.bilibiliSeasonId,
+                  }),
+                  22_000,
+                  'Bilibili lookup timed out.',
+                )
+                if (episodeFailGenRef.current !== failGen) return
+                if (bili.ok) {
+                  if (bili.seasonId && bili.seasonId !== item.bilibiliSeasonId) {
+                    void upsertTorrentItems([{ ...item, bilibiliSeasonId: bili.seasonId }])
+                  }
+                  if (bili.mode === 'embed' || bili.mode === 'dash') {
+                    biliOk = true
+                    navigate(`/web?url=${encodeURIComponent(bili.url)}`, {
+                      replace: true,
+                      state: {
+                        from: `/watch/${item.id}`,
+                        playerMode: 'embed',
+                        pipOnBack: true,
+                      },
+                    })
+                    setEpisodeLoading(false)
+                    setLoadingPlaylistIndex(null)
+                    return
+                  }
+                  biliOk = true
+                  activePlaybackReferrerRef.current = bili.referer || BILIBILI_TV_PLAY_REFERER
+                  if (window.signalDesktop?.setPlaybackHeaders) {
+                    void window.signalDesktop.setPlaybackHeaders({
+                      url: bili.url,
+                      referrer: bili.referer || BILIBILI_TV_PLAY_REFERER,
+                    })
+                  }
+                  setLocalPlaylist((prev) => {
+                    const base = prev ?? item.playlist ?? []
+                    return base.map((row, i) =>
+                      i === index
+                        ? {
+                            ...row,
+                            url: bili.url,
+                            episodeKey: row.episodeKey || episodeKey || undefined,
+                          }
+                        : row,
+                    )
+                  })
+                  setStatus('Playing')
+                }
+              } catch {
+                /* fall through to Nyaa */
               }
-              nyaaHandled = true
+              if (!biliOk) {
+                const nyaa = await tryPlayFromNyaa()
+                if (nyaa === 'failed') return
+                if (nyaa === 'skip') {
+                  failOnEpisode(movy.error || 'No stream for this episode')
+                  return
+                }
+                nyaaHandled = true
+              }
             }
           }
         }
       } catch (err) {
         failOnEpisode(err instanceof Error ? err.message : 'Could not load episode')
         return
+      } finally {
+        window.clearTimeout(loadingWatchdog)
+        if (episodeFailGenRef.current === failGen) {
+          setEpisodeLoading(false)
+          setLoadingPlaylistIndex(null)
+        }
       }
-      setEpisodeLoading(false)
     } else if (needsTorrent) {
       if (!isTorrentPlaybackAvailable()) {
-        failOnEpisode('Torrent playback needs the Jiyu desktop app or Android torrent engine.')
+        failOnEpisode('Playback needs the Jiyu desktop app or Android source engine.')
         return
       }
       setEpisodeLoading(true)
       setMediaReady(false)
       setStatus(
         useTorrentio && hasRealDebridToken()
-          ? 'Checking debrid streams…'
+          ? 'Checking ready sources…'
           : useTorrentio
             ? 'Checking more sources…'
             : 'Loading episode…',
@@ -2229,7 +2912,7 @@ export function Player({
           if (episodeFailGenRef.current !== failGen) return
         }
         if (candidates.length === 0) {
-          failOnEpisode('No torrent link for this episode')
+          failOnEpisode('No source link for this episode')
           return
         }
 
@@ -2244,9 +2927,9 @@ export function Player({
           if (isDebridHttpPlayUrl(uri)) {
             setStatus(
               candidates.length > 1
-                ? `Starting debrid stream (${i + 1}/${candidates.length})…`
-                : 'Starting debrid stream…',
-            )
+                ? `Opening ready source (${i + 1}/${candidates.length})…`
+                : 'Opening ready source…',
+              )
             result = { ok: true, url: uri }
             break
           }
@@ -2260,6 +2943,7 @@ export function Player({
             attempt = await withTimeout(
               torrentStream(uri, {
                 keepOthers: inMultiview,
+                preferJapaneseAudio: shouldPreferRivestreamJapaneseAudio(item),
               }),
               TORRENT_CANDIDATE_TIMEOUT_MS,
               'Release took too long to start — trying another source.',
@@ -2351,11 +3035,17 @@ export function Player({
 
     // Always start a freshly selected episode at 0 — don't remux-seek into
     // undownloaded pieces from a prior resume point for another episode.
+    // Same-episode remint (stall / Retry rotateSource) must keep
+    // autoSeekResumeOnceRef so MANIFEST_PARSED can restore the playhead.
     watchClockRef.current = { lastTs: 0, accrued: 0 }
     timelineOffsetRef.current = 0
     setTimelineOffset(0)
     resumeKeyRef.current = null
     resumePendingRef.current = false
+    if (index !== playlistIndex) {
+      autoSeekResumeOnceRef.current = 0
+      stallHoldPlayheadRef.current = 0
+    }
     setResumeOffer(null)
     skipDismissedRef.current = null
     setSkipTarget(null)
@@ -2382,19 +3072,18 @@ export function Player({
     onClose()
   }
 
-  function bumpChrome() {
+  function bumpChrome(opts?: { delayMs?: number } | React.SyntheticEvent) {
     setChromeVisible(true)
     if (chromeTimer.current) window.clearTimeout(chromeTimer.current)
     // Keep chrome up while loading / episode list / PiP — Android was hiding
     // controls while still on "Loading HLS…" so Play was unreachable.
-    const loadingChrome =
-      !mediaReady ||
-      episodeLoading ||
-      /^(Connecting|Loading|Opening|Finding|Fetching|Starting|Seeking|Trying|Press play|Buffering|Stream stalled)/i.test(
-        status,
-      )
+    const loadingChrome = !mediaReady || episodeLoading || Boolean(error) || CHROME_HOLD_RE.test(status)
     if (playlistOpenRef.current || isPip || loadingChrome) return
-    chromeTimer.current = window.setTimeout(() => setChromeVisible(false), CHROME_IDLE_MS)
+    const delayMs =
+      opts && typeof opts === 'object' && 'delayMs' in opts && typeof opts.delayMs === 'number'
+        ? opts.delayMs
+        : CHROME_IDLE_MS
+    chromeTimer.current = window.setTimeout(() => setChromeVisible(false), delayMs)
   }
 
   function toggleChromeOnTap(e: React.PointerEvent) {
@@ -2407,11 +3096,7 @@ export function Player({
       if (visible) {
         if (chromeTimer.current) window.clearTimeout(chromeTimer.current)
         const loadingChrome =
-          !mediaReady ||
-          episodeLoading ||
-          /^(Connecting|Loading|Opening|Finding|Fetching|Starting|Seeking|Trying|Press play|Buffering|Stream stalled)/i.test(
-            status,
-          )
+          !mediaReady || episodeLoading || Boolean(error) || CHROME_HOLD_RE.test(status)
         if (loadingChrome) return true
         return false
       }
@@ -2439,20 +3124,21 @@ export function Player({
     hintTimer.current = window.setTimeout(() => setHint(null), 900)
   }
 
+  async function openMirrorSettings() {
+    flash('Open screen cast to mirror the phone')
+    try {
+      await androidOpenScreenCastSettings()
+    } catch {
+      flash('Could not open Cast settings')
+    }
+  }
+
   async function handleCast() {
     const playUrl = activePlaylistItem.url || item.url || videoRef.current?.currentSrc || ''
     const mode = castModeForPlayback(item, playUrl)
-    if (mode === 'none') {
-      flash('Cast unavailable')
-      return
-    }
-    if (mode === 'mirror') {
-      flash('No media URL — open screen cast to mirror')
-      try {
-        await androidOpenScreenCastSettings()
-      } catch {
-        flash('Could not open Cast settings')
-      }
+    // Prefer Chromecast when the SDK is up and we have a real media URL; otherwise mirror.
+    if (!(mode === 'media' && castAvailable)) {
+      await openMirrorSettings()
       return
     }
     if (casting) {
@@ -2469,7 +3155,7 @@ export function Player({
       return
     }
     if (!isCastableMediaUrl(playUrl)) {
-      flash('Cast unavailable for this stream')
+      await openMirrorSettings()
       return
     }
     const video = videoRef.current
@@ -2503,6 +3189,7 @@ export function Player({
       }
     } catch (err) {
       flash(err instanceof Error ? err.message : 'Cast failed')
+      await openMirrorSettings()
     }
   }
 
@@ -2577,11 +3264,118 @@ export function Player({
     }
   }
 
+  /**
+   * HLS / progressive seek that survives double-taps on Back/Forward.
+   * Stacks deltas off the pending target and nudges hls.js to load around it.
+   */
+  function applyNativeMediaSeek(absoluteSeconds: number, notice?: string) {
+    const video = videoRef.current
+    if (!video) return
+    if (!Number.isFinite(video.duration) || video.duration === Infinity) {
+      flash('Live — seek unavailable')
+      return
+    }
+    const target = Math.min(video.duration, Math.max(0, absoluteSeconds))
+    pendingNativeSeekRef.current = target
+    const gen = ++pendingNativeSeekGenRef.current
+    // Give fragments time to land before stall remounts tear the session down.
+    seekGuardUntilRef.current = Date.now() + 18_000
+    if (pendingNativeSeekClearTimerRef.current) {
+      window.clearTimeout(pendingNativeSeekClearTimerRef.current)
+      pendingNativeSeekClearTimerRef.current = 0
+    }
+    if (pendingNativeSeekHandlerRef.current) {
+      video.removeEventListener('seeked', pendingNativeSeekHandlerRef.current)
+      pendingNativeSeekHandlerRef.current = null
+    }
+
+    const clearPending = () => {
+      if (gen !== pendingNativeSeekGenRef.current) return
+      if (pendingNativeSeekRef.current == null) return
+      const aim = pendingNativeSeekRef.current
+      const at = Number.isFinite(video.currentTime) ? video.currentTime : 0
+      // Another Back/Forward may have moved the aim — wait until we land near it.
+      if (Math.abs(at - aim) > 2.5) return
+      pendingNativeSeekRef.current = null
+      if (pendingNativeSeekHandlerRef.current === clearPending) {
+        video.removeEventListener('seeked', clearPending)
+        pendingNativeSeekHandlerRef.current = null
+      }
+      if (pendingNativeSeekClearTimerRef.current) {
+        window.clearTimeout(pendingNativeSeekClearTimerRef.current)
+        pendingNativeSeekClearTimerRef.current = 0
+      }
+      watchClockRef.current = { lastTs: 0, accrued: absolutePlayhead(video) }
+      setError(null)
+      setStatus('Playing')
+      void video.play().catch(() => undefined)
+    }
+
+    pendingNativeSeekHandlerRef.current = clearPending
+    video.addEventListener('seeked', clearPending)
+    pendingNativeSeekClearTimerRef.current = window.setTimeout(() => {
+      if (gen !== pendingNativeSeekGenRef.current) return
+      pendingNativeSeekRef.current = null
+      pendingNativeSeekClearTimerRef.current = 0
+      if (pendingNativeSeekHandlerRef.current === clearPending) {
+        video.removeEventListener('seeked', clearPending)
+        pendingNativeSeekHandlerRef.current = null
+      }
+      // Soft heal instead of leaving a wedged MSE buffer after a long seek.
+      try {
+        const hls = hlsInstanceRef.current
+        if (hls) {
+          hls.startLoad(Number.isFinite(video.currentTime) ? video.currentTime : target)
+        }
+      } catch {
+        /* ignore */
+      }
+      void video.play().catch(() => undefined)
+      setStatus('Buffering…')
+    }, 12_000)
+
+    setError(null)
+    setStatus('Seeking…')
+    const hls = hlsInstanceRef.current
+    try {
+      // hls.js: stop before jumping so we don't keep fetching the old segment
+      // window — that race was wedging anime VOD after scrub and timing out.
+      if (hls) {
+        try {
+          hls.stopLoad()
+        } catch {
+          /* ignore */
+        }
+      }
+      video.currentTime = target
+      if (hls) {
+        try {
+          hls.startLoad(target)
+        } catch {
+          /* ignore */
+        }
+      }
+    } catch {
+      pendingNativeSeekRef.current = null
+      video.removeEventListener('seeked', clearPending)
+      flash('Seek unavailable')
+      return
+    }
+    watchClockRef.current = { lastTs: 0, accrued: target + timelineOffsetRef.current }
+    setPlaybackClock((prev) => ({
+      ...prev,
+      current: target + timelineOffsetRef.current,
+    }))
+    if (notice) flash(notice)
+    bumpChrome()
+  }
+
   function seekBy(seconds: number) {
     const video = videoRef.current
     if (!video) return
     const url = activePlaylistItem.url
     const notice = seconds < 0 ? `Back ${Math.abs(seconds)}s` : `Forward ${seconds}s`
+    seekGuardUntilRef.current = Date.now() + 18_000
 
     // Torrent remux pipes aren't byte-seekable — jump via ffmpeg -ss when needed.
     // Android WebView ignores currentTime on that pipe, so a buffered seek looks
@@ -2625,13 +3419,14 @@ export function Player({
       return
     }
 
-    if (!Number.isFinite(video.duration) || video.duration === Infinity) {
-      flash('Live — seek unavailable')
-      return
-    }
-    video.currentTime = Math.min(video.duration, Math.max(0, video.currentTime + seconds))
-    flash(notice)
-    bumpChrome()
+    // Stack rapid Back/Forward taps from the pending aim, not stale currentTime.
+    const base =
+      pendingNativeSeekRef.current != null
+        ? pendingNativeSeekRef.current
+        : Number.isFinite(video.currentTime)
+          ? video.currentTime
+          : 0
+    applyNativeMediaSeek(base + seconds, notice)
   }
 
   function seekToAbsolute(absoluteSeconds: number) {
@@ -2649,6 +3444,8 @@ export function Player({
             : 0
     let target = Math.max(0, absoluteSeconds)
     if (maxDur > 0) target = Math.min(target, Math.max(0, maxDur - 0.25))
+    // User scrub — keep stall remount from destroying the session mid-jump.
+    seekGuardUntilRef.current = Date.now() + 18_000
 
     if (isRemuxPlaybackUrl(url)) {
       const relative = target - timelineOffsetRef.current
@@ -2662,9 +3459,11 @@ export function Player({
         video.currentTime = Math.min(video.duration, Math.max(0, relative))
         watchClockRef.current = { lastTs: 0, accrued: target }
         setPlaybackClock((prev) => ({ ...prev, current: target }))
+        setError(null)
         bumpChrome()
         return
       }
+      setError(null)
       setStatus('Seeking…')
       setTimelineOffsetSeconds(target)
       watchClockRef.current = { lastTs: 0, accrued: target }
@@ -2686,15 +3485,8 @@ export function Player({
       return
     }
 
-    if (!Number.isFinite(video.duration) || video.duration === Infinity) {
-      flash('Live — seek unavailable')
-      return
-    }
     const relative = Math.max(0, target - timelineOffsetRef.current)
-    video.currentTime = Math.min(video.duration, Math.max(0, relative))
-    watchClockRef.current = { lastTs: 0, accrued: target }
-    setPlaybackClock((prev) => ({ ...prev, current: target }))
-    bumpChrome()
+    applyNativeMediaSeek(relative)
   }
 
   function skipAnimeInterval(
@@ -2764,8 +3556,9 @@ export function Player({
     osFullScreenRef.current = true
     setOsFullScreen(true)
     void enterOsFullscreen('native')
-    // Android WebView Fullscreen API crops/zooms the video — CSS + immersive bars only.
-    if (!isAndroidShell()) {
+    // Desktop Electron + Android: OS/immersive fullscreen + CSS `.is-os-fullscreen`.
+    // HTML Fullscreen API enter/leave was racing exitOsFullscreen (Full looked broken).
+    if (!usesOsFullscreenOnly()) {
       void stage.requestFullscreen().catch(() => undefined)
     }
     flash('Fullscreen')
@@ -2803,13 +3596,48 @@ export function Player({
       frame = requestAnimationFrame(fit)
     })
     observer.observe(stage)
-    window.addEventListener('orientationchange', fit)
+    // Orientation often fires before layout settles — clear stale picture size and re-fit.
+    // Android immersive + rotate can leave the WebView stuck at the old short edge;
+    // re-assert immersive and poke the visual viewport so the shell fills again.
+    const orientTimers: number[] = []
+    const onOrient = () => {
+      setFittedVideo(null)
+      fit()
+      if (!isPip && !isTile && (osFullScreenRef.current || usesOsFullscreenOnly())) {
+        void enterOsFullscreen('native')
+      }
+      try {
+        const root = document.documentElement
+        root.style.height = '100dvh'
+        root.style.minHeight = '100dvh'
+        if (document.body) {
+          document.body.style.height = '100dvh'
+          document.body.style.minHeight = '100dvh'
+        }
+      } catch {
+        /* ignore */
+      }
+      for (const ms of [80, 280, 600, 1000, 1600]) {
+        orientTimers.push(
+          window.setTimeout(() => {
+            fit()
+            window.dispatchEvent(new Event('resize'))
+          }, ms),
+        )
+      }
+    }
+    window.addEventListener('orientationchange', onOrient)
+    window.addEventListener('resize', fit)
+    window.visualViewport?.addEventListener('resize', fit)
     return () => {
       cancelAnimationFrame(frame)
       video.removeEventListener('loadedmetadata', fit)
       video.removeEventListener('resize', fit)
       observer.disconnect()
-      window.removeEventListener('orientationchange', fit)
+      window.removeEventListener('orientationchange', onOrient)
+      window.removeEventListener('resize', fit)
+      window.visualViewport?.removeEventListener('resize', fit)
+      for (const id of orientTimers) window.clearTimeout(id)
     }
   }, [isPip, isTile, osFullScreen, videoMountKey, mediaReady])
 
@@ -2826,6 +3654,51 @@ export function Player({
       void exitOsFullscreen({ onlyIfOwner: 'native', force: false })
     }
   }, [isPip])
+
+  // PiP / system-PiP: audio often keeps advancing while the opaque loader or a
+  // black frame makes the window look "stuck". Clear ready state and nudge paint.
+  useEffect(() => {
+    const inPipSurface = () =>
+      isPip || document.documentElement.classList.contains('is-system-pip')
+
+    const clearIfAudible = () => {
+      const video = videoRef.current
+      if (!video || video.error) return
+      const progressing =
+        !video.paused &&
+        !video.ended &&
+        video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+        (video.currentTime > 0.2 || (video.played?.length ?? 0) > 0)
+      if (progressing) setMediaReady(true)
+    }
+
+    const nudgePipSurface = () => {
+      clearIfAudible()
+      if (!inPipSurface()) return
+      const video = videoRef.current
+      if (video && video.paused === false) {
+        void video.play().catch(() => undefined)
+      }
+      window.requestAnimationFrame(() => {
+        clearIfAudible()
+        window.dispatchEvent(new Event('resize'))
+      })
+    }
+
+    nudgePipSurface()
+    window.addEventListener('resize', clearIfAudible)
+    // SystemPipBridge toggles html.is-system-pip after Home → PiP.
+    const mo = new MutationObserver(() => nudgePipSurface())
+    mo.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
+    const timer = window.setInterval(() => {
+      if (inPipSurface()) clearIfAudible()
+    }, 800)
+    return () => {
+      window.removeEventListener('resize', clearIfAudible)
+      mo.disconnect()
+      window.clearInterval(timer)
+    }
+  }, [isPip, videoMountKey])
 
   useEffect(() => {
     const stop = window.signalDesktop?.onFullScreenChange?.((state) => {
@@ -2866,8 +3739,8 @@ export function Player({
             void enterOsFullscreen('native')
             osFullScreenRef.current = true
             setOsFullScreen(true)
-            // Android: CSS immersive only — WebView requestFullscreen zooms/crops.
-            if (isAndroidShell()) return undefined
+            // Electron/Android: OS FS only — don't re-enter HTML FS (exit races Full).
+            if (usesOsFullscreenOnly()) return undefined
             return shell.requestFullscreen()
           })
           .catch(() => undefined)
@@ -2878,6 +3751,7 @@ export function Player({
       }
       // User pressed Esc / exited HTML fullscreen — drop OS fullscreen too,
       // but never yank Full from a web embed that owns the session.
+      // Desktop Electron Full is BrowserWindow FS; HTML FS ending must not clear it.
       if (
         !document.fullscreenElement &&
         osFullScreenRef.current &&
@@ -2885,6 +3759,14 @@ export function Player({
         getFullscreenOwner() !== 'web' &&
         !webSurfaceOwnsFullscreen()
       ) {
+        if (usesOsFullscreenOnly()) {
+          void window.signalDesktop?.isFullScreen?.().then((osFs) => {
+            if (osFs) return
+            osFullScreenRef.current = false
+            setOsFullScreen(false)
+          })
+          return
+        }
         osFullScreenRef.current = false
         setOsFullScreen(false)
         void exitOsFullscreen({ onlyIfOwner: 'native', force: true })
@@ -2978,6 +3860,73 @@ export function Player({
     let pausePrefetchTimer = 0
     let playPrefetchTimer = 0
     let leadBufferResumeTimer = 0
+    /**
+     * recoverMediaError() tears down MediaSource — calling it from stall + freeze
+     * + BUFFER_STALLED at once looked like mid-play restarts. One shot per window.
+     * Preserve playhead: recover resets currentTime to 0 unless we restore after
+     * MEDIA_ATTACHED + loadedmetadata.
+     */
+    let lastMediaRecoverAt = 0
+    const MEDIA_RECOVER_COOLDOWN_MS = 12_000
+    const restorePlayheadAfterAttach = (hlsInst: Hls, at: number) => {
+      if (!(at > 0.5)) return
+      const videoEl = videoRef.current
+      if (!videoEl) return
+      let done = false
+      const apply = () => {
+        if (done || cancelled) return
+        done = true
+        try {
+          videoEl.currentTime = at
+          hlsInst.startLoad(at)
+        } catch {
+          /* ignore */
+        }
+        void ensureVideoAutoplay(videoEl)
+      }
+      const onAttached = () => {
+        hlsInst.off(Hls.Events.MEDIA_ATTACHED, onAttached)
+        if (videoEl.readyState >= HTMLMediaElement.HAVE_METADATA) {
+          apply()
+          return
+        }
+        const onMeta = () => {
+          videoEl.removeEventListener('loadedmetadata', onMeta)
+          apply()
+        }
+        videoEl.addEventListener('loadedmetadata', onMeta)
+        window.setTimeout(() => {
+          videoEl.removeEventListener('loadedmetadata', onMeta)
+          apply()
+        }, 2_000)
+      }
+      hlsInst.on(Hls.Events.MEDIA_ATTACHED, onAttached)
+      // recoverMediaError sometimes reuses an already-attached media element.
+      window.setTimeout(() => {
+        if (!done && videoEl.readyState >= HTMLMediaElement.HAVE_METADATA) apply()
+      }, 80)
+    }
+    const tryRecoverMediaError = (hlsInst: Hls | null | undefined): boolean => {
+      if (!hlsInst) return false
+      const now = Date.now()
+      if (now - lastMediaRecoverAt < MEDIA_RECOVER_COOLDOWN_MS) return false
+      lastMediaRecoverAt = now
+      const videoEl = videoRef.current
+      const held = stallHoldPlayheadRef.current
+      const savedTime = Math.max(
+        held > 0.5 ? held : 0,
+        videoEl && Number.isFinite(videoEl.currentTime) ? videoEl.currentTime : 0,
+      )
+      // Pin the seek bar BEFORE MediaSource teardown reports t=0.
+      if (savedTime > 0.5) pinStallPlayhead(savedTime)
+      try {
+        hlsInst.recoverMediaError()
+        if (savedTime > 0.5) restorePlayheadAfterAttach(hlsInst, savedTime)
+        return true
+      } catch {
+        return false
+      }
+    }
     const clearStallWatch = () => {
       waitingSince = 0
       waitingOrigin = 0
@@ -3165,6 +4114,16 @@ export function Player({
         clearPausePrefetch()
         clearLeadBufferResume()
         leadBufferPauseRef.current = false
+        // Sustained play only — brief playing blips used to reset the remount
+        // budget and loop "Stream stalled — reloading…".
+        if (hlsStallRemountRef.current.count > 0) {
+          if (!hlsStallRemountRef.current.playStableSince) {
+            hlsStallRemountRef.current.playStableSince = Date.now()
+          } else if (Date.now() - hlsStallRemountRef.current.playStableSince >= 20_000) {
+            hlsStallRemountRef.current.count = 0
+            hlsStallRemountRef.current.playStableSince = 0
+          }
+        }
         setError(null)
         setStatus('Playing')
         setPaused(false)
@@ -3184,19 +4143,40 @@ export function Player({
     }
     const onWaiting = () => {
       if (cancelled) return
+      hlsStallRemountRef.current.playStableSince = 0
       setStatus('Buffering…')
-      bumpChrome()
+      // Don't bump chrome — Android HLS fires `waiting` often, and that was
+      // cancelling the hide timer for the whole episode.
+      // Immediate HLS nudge — never abort an in-flight fragment on Movy/Auto.
+      try {
+        const hlsInst = hlsInstanceRef.current
+        if (hlsInst) {
+          const t = video.currentTime
+          const onMovy =
+            isMovyStreamUrl(activePlaylistItem.url) ||
+            activePlaybackReferrerRef.current === MOVY_PLAY_REFERER ||
+            /movy\.sx/i.test(activePlaybackReferrerRef.current || '')
+          softHealHlsStall(hlsInst, Number.isFinite(t) ? t : NaN, {
+            allowAbrDownshift: onMovy && getViewingQuality() === 'auto',
+            onAbrCap: (height) => setEngineLabel(`hls · auto ≤${height}p`),
+          })
+        }
+      } catch {
+        /* ignore */
+      }
       // Remux can spin forever when peers stall — surface a recoverable error.
       // Movy HLS can also stall forever — switch to Atlantic/Cinecat after a soft wait.
+      // Plain Rivestream/anime HLS needs the same soft/hard stall watch (not only torrent/Movy).
       const playUrl = activePlaylistItem.url
       const isLocal = isEphemeralLocalStreamUrl(playUrl)
+      const isHlsVod = Boolean(hlsInstanceRef.current) && !isLivePlaybackItem(item)
       const meta = hlsFallbackMetaRef.current
       const canAtlantic =
         Boolean(meta) &&
         !meta!.tried &&
         !meta!.busy &&
         (isMovyStreamUrl(playUrl) || meta!.tmdbId.length > 0)
-      if (!isLocal && !canAtlantic) return
+      if (!isLocal && !canAtlantic && !isHlsVod) return
       const now = Date.now()
       if (!waitingSince) waitingSince = now
       if (!waitingOrigin) waitingOrigin = now
@@ -3204,19 +4184,58 @@ export function Player({
       // Soft limit: no meaningful buffer growth. Hard cap: never sit here forever
       // because tiny fragment arrivals kept resetting the soft timer.
       const perf = getPerformanceKnobs()
+      const onMovyHls =
+        isMovyStreamUrl(playUrl) ||
+        activePlaybackReferrerRef.current === MOVY_PLAY_REFERER ||
+        /movy\.sx/i.test(activePlaybackReferrerRef.current || '')
+      // Movy anime CDNs often need a longer first-buffer than sports HLS —
+      // swapping to Atlantic at 12s felt worse than waiting like the website.
       const stallLimitMs = canAtlantic
-        ? 12_000
-        : isRemuxPlaybackUrl(activePlaylistItem.url)
-          ? perf.remuxStallMs
-          : perf.localStallMs
+        ? onMovyHls
+          ? 28_000
+          : 12_000
+        : isHlsVod
+          ? onMovyHls
+            ? 24_000
+            : 14_000
+          : isRemuxPlaybackUrl(activePlaylistItem.url)
+            ? perf.remuxStallMs
+            : perf.localStallMs
       const hardCapMs = canAtlantic
-        ? 20_000
-        : Math.max(stallLimitMs * 2, 120_000)
+        ? onMovyHls
+          ? 45_000
+          : 20_000
+        : isHlsVod
+          ? onMovyHls
+            ? 48_000
+            : 28_000
+          : Math.max(stallLimitMs * 2, 120_000)
       let lastBufferedEnd = 0
       let bufferedAtOrigin = -1
       let lastMovingPlayhead = -1
+      let hlsHealTicks = 0
       stallTimer = window.setInterval(() => {
         if (cancelled || !waitingSince || !waitingOrigin) return
+        // User scrub / ±10s — heal with startLoad, don't remount (that was
+        // producing "HLS load timed out" after dragging the seekbar).
+        if (Date.now() < seekGuardUntilRef.current) {
+          const el = videoRef.current
+          if (el && hlsInstanceRef.current) {
+            const t = el.currentTime
+            softHealHlsStall(hlsInstanceRef.current, Number.isFinite(t) ? t : NaN, {
+              allowAbrDownshift: false,
+            })
+            void ensureVideoAutoplay(el)
+          }
+          return
+        }
+        // Fragment still downloading — don't treat slow CDN as a stall, and
+        // never reset the loader (that aborts the segment and freezes ABR).
+        if (hlsHasInFlightMainFrag(hlsInstanceRef.current)) {
+          waitingSince = Date.now()
+          setStatus('Buffering…')
+          return
+        }
         const videoEl = videoRef.current
         if (!videoEl) return
         const t = videoEl.currentTime
@@ -3226,11 +4245,9 @@ export function Player({
         else if (lastMovingPlayhead < 0) lastMovingPlayhead = t
         // Only clear when the playhead is actually advancing — HAVE_FUTURE_DATA
         // alone was true during frozen Movy stalls (tiny buffer, no progress).
-        if (
-          !videoEl.paused &&
-          videoEl.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA &&
-          playheadMoving
-        ) {
+        // Playhead moving means this is not a stall — HAVE_FUTURE_DATA was often
+        // false during normal HLS playback and the watch then reloaded from 0.
+        if (!videoEl.paused && playheadMoving) {
           clearStallWatch()
           setError(null)
           setStatus('Playing')
@@ -3245,8 +4262,9 @@ export function Player({
           /* ignore */
         }
         if (bufferedAtOrigin < 0) bufferedAtOrigin = bufferedEnd
-        // Swarm/remux still making progress — keep waiting, but don't erase the hard cap.
-        // For Movy/Atlantic fallback, buffer growth without playhead move does NOT reset soft stall.
+        // Swarm/remux/HLS still downloading — reset soft stall so we don't remount-loop
+        // a slow but healthy VOD (One Piece anime was restarting every ~14s).
+        // Movy→Atlantic path still ignores buffer blips (want a real source swap).
         if (bufferedEnd > lastBufferedEnd + 0.35) {
           lastBufferedEnd = bufferedEnd
           if (!canAtlantic) {
@@ -3254,6 +4272,23 @@ export function Player({
             setError(null)
             setStatus('Buffering…')
           }
+        }
+        // Soft heal: never abort an in-flight fragment. Movy Auto → ABR downshift
+        // instead of startLoad thrash that freezes on 1080p.
+        if (isHlsVod && hlsInstanceRef.current) {
+          hlsHealTicks += 1
+          if (Number.isFinite(t) && t > 0.5) pinStallPlayhead(t)
+          if (hlsHealTicks % 2 === 0) {
+            const onMovy =
+              isMovyStreamUrl(activePlaylistItem.url) ||
+              activePlaybackReferrerRef.current === MOVY_PLAY_REFERER ||
+              /movy\.sx/i.test(activePlaybackReferrerRef.current || '')
+            softHealHlsStall(hlsInstanceRef.current, t, {
+              allowAbrDownshift: onMovy && getViewingQuality() === 'auto',
+              onAbrCap: (height) => setEngineLabel(`hls · auto ≤${height}p`),
+            })
+          }
+          void ensureVideoAutoplay(videoEl)
         }
         // Stuck on the last seconds of a false remux duration (e.g. 1:01:25 / 1:01:35).
         const duration = videoEl.duration
@@ -3275,10 +4310,11 @@ export function Player({
         const hardStalled = Date.now() - waitingOrigin >= hardCapMs
         const almostNoLead = bufferedEnd - bufferedAtOrigin < 3
         if (!softStalled && !hardStalled) return
+        // Buffer still filling — don't remount/reload a working (slow) session.
         if (hardStalled && !almostNoLead && !softStalled && !canAtlantic) return
-        clearStallWatch()
         // Prefer Atlantic HLS before rotating torrent magnets.
         if (canAtlantic) {
+          clearStallWatch()
           const resumeAt = videoEl.currentTime || 0
           setStatus('Stream stalled — switching source…')
           bumpChrome()
@@ -3298,8 +4334,8 @@ export function Player({
               }
               setError(
                 isRemuxPlaybackUrl(activePlaylistItem.url)
-                  ? 'Still starting the stream — peers may be slow. Tap Resume if offered, or Retry / another quality.'
-                  : 'Still buffering after 45s — peers may be slow. Tap Retry, or try another episode/quality.',
+                  ? 'Still starting the stream — sources may be slow. Tap Resume if offered, or Retry / another quality.'
+                  : 'Still buffering after 45s — sources may be slow. Tap Retry, or try another episode/quality.',
               )
               setStatus('Buffering…')
               return
@@ -3309,6 +4345,45 @@ export function Player({
           })
           return
         }
+        if (isHlsVod) {
+          // Soft stall: never remount <video> — that blacks the frame and snaps
+          // the seek bar to 0. Keep the element; only startLoad around the playhead.
+          // Remount is for explicit Retry; remint only after a dead Movy URL.
+          if (Number.isFinite(t) && t > 0.5) pinStallPlayhead(t)
+          setError(null)
+          setStatus('Buffering…')
+          if (hlsInstanceRef.current) {
+            softHealHlsStall(hlsInstanceRef.current, t, {
+              allowAbrDownshift: onMovyHls && getViewingQuality() === 'auto',
+              onAbrCap: (height) => setEngineLabel(`hls · auto ≤${height}p`),
+            })
+          }
+          void ensureVideoAutoplay(videoEl)
+          // Movy playlist tokens can expire — after a long wedged stall, mint a
+          // fresh source (source switch, not a same-URL remount).
+          if (onMovyHls && hardStalled) {
+            clearStallWatch()
+            setStatus('Stream stalled — fetching a fresh source…')
+            if (hlsFallbackMetaRef.current) {
+              hlsFallbackMetaRef.current.busy = false
+              hlsFallbackMetaRef.current.tried = false
+            }
+            void selectPlaylistItemRef.current(playlistIndex, {
+              force: true,
+              rotateSource: true,
+            })
+            return
+          }
+          if (hardStalled) {
+            clearStallWatch()
+            setError('Stream stalled — tap Retry, or pick another episode/quality.')
+            return
+          }
+          // Soft heal kept the element alive — reset soft clock, keep the watch.
+          waitingSince = Date.now()
+          return
+        }
+        clearStallWatch()
         const hasAlt = (activePlaylistItem.torrentAlternates?.length || 0) > 0
         if (hasAlt) {
           setError(null)
@@ -3321,21 +4396,23 @@ export function Player({
         }
         setError(
           isRemuxPlaybackUrl(activePlaylistItem.url)
-            ? 'Still starting the stream — peers may be slow. Tap Resume if offered, or Retry / another quality.'
-            : 'Still buffering after 45s — peers may be slow. Tap Retry, or try another episode/quality.',
+            ? 'Still starting the stream — sources may be slow. Tap Resume if offered, or Retry / another quality.'
+            : 'Still buffering after 45s — sources may be slow. Tap Retry, or try another episode/quality.',
         )
         setStatus('Buffering…')
       }, 1000)
     }
 
-    // Playhead freeze watchdog — Movy often stalls without reliable `waiting` events
-    // (frozen frame, readyState still HAVE_*). Switch to Atlantic after ~12s.
+    // Playhead freeze watchdog — Movy/anime HLS often stalls without reliable
+    // `waiting` events (frozen frame, readyState still HAVE_*).
     let freezeLastTime = -1
     let freezeSince = 0
     let freezeTimer: number | null = null
+    let freezeNudges = 0
     const clearFreezeWatch = () => {
       freezeLastTime = -1
       freezeSince = 0
+      freezeNudges = 0
       if (freezeTimer != null) {
         window.clearInterval(freezeTimer)
         freezeTimer = null
@@ -3345,6 +4422,30 @@ export function Player({
       if (freezeTimer != null) return
       freezeTimer = window.setInterval(() => {
         if (cancelled) return
+        // waiting-event stall watch owns healing — dual recoverMediaError remounts
+        // looked like mid-play restarts while the clock kept ticking.
+        if (stallTimer != null) {
+          freezeLastTime = -1
+          freezeSince = 0
+          freezeNudges = 0
+          return
+        }
+        if (Date.now() < seekGuardUntilRef.current) {
+          const el = videoRef.current
+          if (el && hlsInstanceRef.current && !el.paused) {
+            const t = el.currentTime
+            softHealHlsStall(hlsInstanceRef.current, Number.isFinite(t) ? t : NaN, {
+              allowAbrDownshift: false,
+            })
+          }
+          return
+        }
+        // Slow segment in flight — reset freeze clock so we don't "heal" mid-download.
+        if (hlsHasInFlightMainFrag(hlsInstanceRef.current)) {
+          freezeLastTime = -1
+          freezeSince = 0
+          return
+        }
         const meta = hlsFallbackMetaRef.current
         const playUrl = activePlaylistItem.url
         const canAtlantic =
@@ -3352,11 +4453,13 @@ export function Player({
           !meta!.tried &&
           !meta!.busy &&
           (isMovyStreamUrl(playUrl) || meta!.tmdbId.length > 0)
-        if (!canAtlantic) return
+        const isHlsVod = Boolean(hlsInstanceRef.current) && !isLivePlaybackItem(item)
+        if (!canAtlantic && !isHlsVod) return
         const el = videoRef.current
         if (!el || el.paused || el.ended) {
           freezeLastTime = -1
           freezeSince = 0
+          freezeNudges = 0
           return
         }
         const t = el.currentTime
@@ -3368,18 +4471,79 @@ export function Player({
         if (t > freezeLastTime + 0.2) {
           freezeLastTime = t
           freezeSince = Date.now()
+          freezeNudges = 0
           return
         }
-        if (Date.now() - freezeSince < 12_000) return
-        clearFreezeWatch()
-        clearStallWatch()
-        setStatus('Stream stalled — switching source…')
-        bumpChrome()
-        void tryHlsFallbackRef.current(t).then((ok) => {
-          if (cancelled || ok) return
-          setError('Stream stalled — alternate source unavailable. Tap Retry.')
+        const frozenFor = Date.now() - freezeSince
+        // Soft heal: keep fetching around the freeze — don't rebuild MediaSource
+        // and don't abort fragments already downloading.
+        if (isHlsVod && hlsInstanceRef.current && frozenFor >= 4_000 && freezeNudges < 6) {
+          freezeNudges += 1
           setStatus('Buffering…')
-        })
+          if (Number.isFinite(t) && t > 0.5) pinStallPlayhead(t)
+          const frozenMovySoft =
+            isMovyStreamUrl(playUrl) ||
+            activePlaybackReferrerRef.current === MOVY_PLAY_REFERER ||
+            /movy\.sx/i.test(activePlaybackReferrerRef.current || '')
+          softHealHlsStall(hlsInstanceRef.current, t, {
+            allowAbrDownshift: frozenMovySoft && getViewingQuality() === 'auto',
+            onAbrCap: (height) => setEngineLabel(`hls · auto ≤${height}p`),
+          })
+          void ensureVideoAutoplay(el)
+        }
+        if (frozenFor < 12_000) return
+        // Atlantic is an explicit source switch — OK to leave this element.
+        if (canAtlantic) {
+          clearFreezeWatch()
+          clearStallWatch()
+          setStatus('Stream stalled — switching source…')
+          bumpChrome()
+          void tryHlsFallbackRef.current(t).then((ok) => {
+            if (cancelled || ok) return
+            setError('Stream stalled — alternate source unavailable. Tap Retry.')
+            setStatus('Buffering…')
+          })
+          return
+        }
+        if (isHlsVod) {
+          // Never remount on freeze. Keep the freeze clock (don't clearFreezeWatch)
+          // so soft startLoad can keep healing until ~22s, then remint/error.
+          if (Number.isFinite(t) && t > 0.5) pinStallPlayhead(t)
+          setError(null)
+          setStatus('Buffering…')
+          if (hlsInstanceRef.current) {
+            const frozenMovySoft =
+              isMovyStreamUrl(playUrl) ||
+              activePlaybackReferrerRef.current === MOVY_PLAY_REFERER ||
+              /movy\.sx/i.test(activePlaybackReferrerRef.current || '')
+            softHealHlsStall(hlsInstanceRef.current, t, {
+              allowAbrDownshift: frozenMovySoft && getViewingQuality() === 'auto',
+              onAbrCap: (height) => setEngineLabel(`hls · auto ≤${height}p`),
+            })
+          }
+          void ensureVideoAutoplay(el)
+          if (frozenFor < 22_000) return
+          clearFreezeWatch()
+          clearStallWatch()
+          const frozenMovy =
+            isMovyStreamUrl(playUrl) ||
+            activePlaybackReferrerRef.current === MOVY_PLAY_REFERER ||
+            /movy\.sx/i.test(activePlaybackReferrerRef.current || '')
+          if (frozenMovy) {
+            setStatus('Stream stalled — fetching a fresh source…')
+            if (hlsFallbackMetaRef.current) {
+              hlsFallbackMetaRef.current.busy = false
+              hlsFallbackMetaRef.current.tried = false
+            }
+            void selectPlaylistItemRef.current(playlistIndex, {
+              force: true,
+              rotateSource: true,
+            })
+            return
+          }
+          setError('Stream stalled — tap Retry, or pick another episode/quality.')
+          setStatus('Buffering…')
+        }
       }, 1000)
     }
     armFreezeWatch()
@@ -3437,7 +4601,7 @@ export function Player({
         })
         kickTorrentPrefetch()
         setStatus('Waiting for more download…')
-        flash('Waiting for more torrent data…')
+        flash('Waiting for more source data…')
         remuxContinueBusy = true
         if (remuxDeferTimer) window.clearTimeout(remuxDeferTimer)
         remuxDeferTimer = window.setTimeout(() => {
@@ -3448,7 +4612,7 @@ export function Player({
       }
       if (remuxRelays >= MAX_REMUX_RELAYS) {
         setError(
-          'Playback stopped mid-title — torrent buffer ran dry. Tap Retry, wait for more peers, or Restart.',
+          'Playback stopped mid-title — source buffer ran dry. Tap Retry, wait a moment, or Restart.',
         )
         setStatus('Stopped')
         return true
@@ -3479,7 +4643,7 @@ export function Player({
         kickTorrentPrefetch()
         setPaused(true)
         setStatus('Waiting for more download…')
-        flash('Torrent gap — waiting, then continuing from here')
+        flash('Source gap — waiting, then continuing from here')
         if (remuxDeferTimer) window.clearTimeout(remuxDeferTimer)
         remuxDeferTimer = window.setTimeout(() => {
           remuxDeferTimer = 0
@@ -3543,30 +4707,45 @@ export function Player({
       )
     }
 
-    const onEnded = () => {
-      // Torrent remux pipes often fire `ended` when the buffered fragment looks
-      // like the full title or ffmpeg hits a download gap.
-      if (continueRemuxPastGap('ended')) return
+    const shouldAutoAdvanceAfterEnd = (
+      playhead: number,
+      playbackUrl: string,
+      trusted: number,
+      reported: number,
+    ): boolean => {
+      const remux =
+        isRemuxPlaybackUrl(playbackUrl) || isLocalPlaybackUrl(playbackUrl)
+      // Remux: require trusted near-end — false EOF mid-title is common.
+      if (remux) {
+        return isTrustedDuration(trusted) && playhead / trusted >= 0.9
+      }
+      // HLS / native VOD: catalog runtime is often missing; media `ended` plus a
+      // sane reported duration (or a long enough playhead) is enough to advance.
+      if (isTrustedDuration(trusted) && playhead / trusted >= 0.9) return true
+      if (
+        isTrustedDuration(reported) &&
+        playhead / reported >= 0.9 &&
+        !isLikelyPartialDuration(reported, playhead, { playbackUrl })
+      ) {
+        return true
+      }
+      // Natural media end without a catalog runtime (typical Movy/anime HLS).
+      return video.ended && playhead >= 60
+    }
 
-      const playhead = effectivePlayhead(video)
-      const playbackUrl = activePlaylistItem.url
-      const trusted = remuxTrustedRuntime(playhead, playbackUrl)
-      saveContinueProgress()
-
-      const nearEnd =
-        isTrustedDuration(trusted) && playhead / trusted >= 0.9
-
-      if (cancelled || !nearEnd) return
-
+    const advanceToNextEpisodeOrWatchNext = () => {
+      if (cancelled || autoAdvanceLockRef.current) return
       if (playlistIndex < playlist.length - 1) {
-        // Re-resolve torrent URLs — don't just bump the index onto a dead remux link.
+        autoAdvanceLockRef.current = true
+        setStatus('Next episode…')
+        // Re-resolve — sibling rows often have empty / expired Movy URLs.
         void selectPlaylistItemRef.current(playlistIndex + 1)
         return
       }
-
       // Title / last episode finished — start the one-slot Up next queue.
       const queued = watchNextRef.current
       if (!queued || queued.id === item.id) return
+      autoAdvanceLockRef.current = true
       const next = takeWatchNext()
       if (!next) return
       flash(`Up next: ${next.title}`)
@@ -3575,9 +4754,50 @@ export function Player({
       }, 400)
     }
 
+    const onEnded = () => {
+      // Torrent remux pipes often fire `ended` when the buffered fragment looks
+      // like the full title or ffmpeg hits a download gap.
+      if (continueRemuxPastGap('ended')) return
+
+      const playhead = effectivePlayhead(video)
+      const playbackUrl = activePlaylistItem.url
+      const trusted = remuxTrustedRuntime(playhead, playbackUrl)
+      const reported = remuxReportedAbsolute()
+      saveContinueProgress()
+
+      if (cancelled) return
+      if (!shouldAutoAdvanceAfterEnd(playhead, playbackUrl, trusted, reported)) return
+      advanceToNextEpisodeOrWatchNext()
+    }
+
     const onRemuxGuard = () => {
       if (cancelled || remuxContinueBusy) return
       const playbackUrl = activePlaylistItem.url
+      // HLS/anime often never fire `ended` — advance when the playhead reaches
+      // the real media end so the next episode still starts.
+      if (!isRemuxPlaybackUrl(playbackUrl) && !isLocalPlaybackUrl(playbackUrl)) {
+        updatePlaybackClock(video)
+        if (autoAdvanceLockRef.current || episodeLoading) return
+        if (playlistIndex >= playlist.length - 1 && !watchNextRef.current) return
+        const playhead = effectivePlayhead(video)
+        const reported = remuxReportedAbsolute()
+        const trusted = remuxTrustedRuntime(playhead, playbackUrl)
+        const atMediaEnd =
+          Number.isFinite(video.duration) &&
+          video.duration > 0 &&
+          video.duration !== Infinity &&
+          video.currentTime >= video.duration - 1.25
+        const nearComplete =
+          (isTrustedDuration(trusted) && playhead / trusted >= 0.97) ||
+          (isTrustedDuration(reported) &&
+            playhead / reported >= 0.97 &&
+            !isLikelyPartialDuration(reported, playhead, { playbackUrl }))
+        if ((atMediaEnd || (nearComplete && (video.ended || video.paused))) && playhead >= 60) {
+          saveContinueProgress()
+          advanceToNextEpisodeOrWatchNext()
+        }
+        return
+      }
       if (!isRemuxPlaybackUrl(playbackUrl)) return
       updatePlaybackClock(video)
 
@@ -3642,6 +4862,7 @@ export function Player({
         hls.destroy()
         hls = null
       }
+      if (hlsInstanceRef.current) hlsInstanceRef.current = null
       if (tsPlayer) {
         try {
           tsPlayer.pause()
@@ -3709,7 +4930,7 @@ export function Player({
             resumePendingRef.current = false
             resumeKeyRef.current = null
             setStatus('Resume point not ready — tap Resume when more is downloaded')
-            flash('Torrent still buffering at resume point')
+            flash('Still buffering at resume point')
             settled = true
             window.clearTimeout(loadTimer)
             cleanup()
@@ -3827,47 +5048,66 @@ export function Player({
         setEngineLabel('hls')
         setStatus('Loading HLS…')
         const perf = getPerformanceKnobs()
-        const isLiveSports =
-          item.category === 'sports' ||
-          item.sourceKind === 'iptv' ||
-          item.tags?.some((t) =>
-            /^(iptv|local|live|live-now|ppv\.st|streamed|always-live)$/i.test(t),
-          )
-        const isIptv =
-          item.sourceKind === 'iptv' ||
-          item.tags?.some((t) => /^iptv$/i.test(t)) ||
-          item.tags?.some((t) => /^local$/i.test(t))
-        const liveMode = isLiveSports || isIptv
+        const liveMode = isLivePlaybackItem(item)
+        const playbackReferrer =
+          activePlaybackReferrerRef.current || item.httpReferrer || ''
+        const movyPlayback =
+          isMovyStreamUrl(activePlaylistItem.url) ||
+          playbackReferrer === MOVY_PLAY_REFERER ||
+          /movy\.sx/i.test(playbackReferrer)
         const playbackHeaders = {
           url: activePlaylistItem.url || item.url,
           userAgent: item.httpUserAgent,
-          referrer: activePlaybackReferrerRef.current || item.httpReferrer,
+          referrer: playbackReferrer || (movyPlayback ? MOVY_PLAY_REFERER : undefined),
         }
         if (window.signalDesktop?.setPlaybackHeaders) {
           void window.signalDesktop.setPlaybackHeaders(playbackHeaders)
         }
         hls = new Hls({
           enableWorker: perf.enableMediaWorkers,
-          // Low-latency mode fights unstable public IPTV / sports feeds.
-          lowLatencyMode: liveMode ? perf.liveHlsLowLatency : perf.hlsLowLatency,
+          // Live may use LL-HLS knobs; VOD (anime) must keep a normal cushion —
+          // lowLatencyMode on episode m3u8 was stalling mid-title as "Buffering…".
+          lowLatencyMode: liveMode ? perf.liveHlsLowLatency : false,
+          // Movy anime: bigger cushion — website ABR feels seamless; we were
+          // remounting on short buffers while paleoak/majorplay caught up.
           maxBufferLength: liveMode
             ? Math.max(perf.liveHlsMaxBufferLength, perf.hlsMaxBufferLength, 36)
-            : perf.hlsMaxBufferLength,
+            : Math.max(perf.hlsMaxBufferLength, movyPlayback ? 60 : 36),
           maxMaxBufferLength: liveMode
             ? Math.max(perf.liveHlsMaxBufferLength + 24, 72)
-            : undefined,
+            : Math.max(perf.hlsMaxBufferLength + 30, movyPlayback ? 120 : 72),
           // Stay several segments behind the edge so jitter doesn't empty the buffer.
           liveSyncDurationCount: liveMode ? perf.liveHlsSyncSegments : undefined,
           liveMaxLatencyDurationCount: liveMode
             ? Math.max(perf.liveHlsSyncSegments + 4, 10)
             : undefined,
-          fragLoadingTimeOut: liveMode ? 20_000 : 15_000,
-          manifestLoadingTimeOut: liveMode ? 15_000 : 10_000,
-          levelLoadingTimeOut: liveMode ? 15_000 : 10_000,
-          fragLoadingMaxRetry: liveMode ? 8 : 6,
-          manifestLoadingMaxRetry: liveMode ? 6 : 5,
-          levelLoadingMaxRetry: liveMode ? 6 : 5,
-          fragLoadingRetryDelay: liveMode ? 800 : 1000,
+          // Live sports: keep a back buffer so short stalls can recover without
+          // seeking to the live edge (which re-empties the forward cushion).
+          // VOD: keep recent segments so brief seeks/stalls can resume without reload.
+          backBufferLength: liveMode ? 90 : movyPlayback ? 90 : 60,
+          maxBufferHole: liveMode ? 1.5 : 1.0,
+          fragLoadingTimeOut: liveMode ? 20_000 : movyPlayback ? 30_000 : 20_000,
+          manifestLoadingTimeOut: liveMode ? 15_000 : movyPlayback ? 20_000 : 12_000,
+          levelLoadingTimeOut: liveMode ? 15_000 : movyPlayback ? 20_000 : 12_000,
+          fragLoadingMaxRetry: liveMode ? 8 : 8,
+          manifestLoadingMaxRetry: liveMode ? 6 : 6,
+          levelLoadingMaxRetry: liveMode ? 6 : 6,
+          fragLoadingRetryDelay: liveMode ? 800 : 800,
+          // Movy masters are true ladders (360/720/1080). Start near 720p
+          // bandwidth, downshift quickly, climb slowly — never lock max bitrate.
+          ...(movyPlayback && !liveMode
+            ? {
+                abrEwmaDefaultEstimate: 2_200_000,
+                startLevel: -1,
+                abrEwmaFastVoD: 2,
+                abrEwmaSlowVoD: 8,
+                abrBandWidthFactor: 0.7,
+                abrBandWidthUpFactor: 0.45,
+                maxStarvationDelay: 4,
+                maxLoadingDelay: 4,
+                abrMaxWithRealBitrate: true,
+              }
+            : {}),
           xhrSetup(xhr) {
             xhr.withCredentials = false
             const referrer = playbackHeaders.referrer
@@ -3877,6 +5117,11 @@ export function Player({
                 xhr.setRequestHeader('Referer', referrer)
               } catch {
                 /* some browsers block Referer header */
+              }
+              try {
+                xhr.setRequestHeader('Origin', new URL(referrer).origin)
+              } catch {
+                /* ignore */
               }
             }
             if (ua) {
@@ -3893,11 +5138,22 @@ export function Player({
             {
               referrer: playbackHeaders.referrer,
               userAgent: playbackHeaders.userAgent,
+              origin: playbackHeaders.referrer
+                ? (() => {
+                    try {
+                      return new URL(playbackHeaders.referrer).origin
+                    } catch {
+                      return 'https://www.movy.sx'
+                    }
+                  })()
+                : undefined,
             },
           ),
         })
         let recoveries = 0
+        let bufferStallNudges = 0
         let settled = false
+        let playRecoveries = 0
         // Movy can hang forever on "Loading HLS…" after a mid-episode stall —
         // fail fast so Atlantic / next engine can take over.
         const meta = hlsFallbackMetaRef.current
@@ -3905,7 +5161,9 @@ export function Player({
           Boolean(meta) &&
           !meta!.tried &&
           (isMovyStreamUrl(activePlaylistItem.url) || meta!.tmdbId.length > 0)
-        const hlsLoadBudgetMs = canAtlanticSoon ? 8_000 : liveMode ? 55_000 : 28_000
+        // Anime / long Movy manifests often need >8s before MANIFEST_PARSED —
+        // the short budget aborted into Atlantic/remount loops mid-open.
+        const hlsLoadBudgetMs = canAtlanticSoon ? 18_000 : liveMode ? 55_000 : 28_000
         const loadTimer = window.setTimeout(() => {
           if (settled || cancelled) return
           settled = true
@@ -3917,36 +5175,99 @@ export function Player({
           hls = null
           reject(new Error('HLS load timed out — stream stalled.'))
         }, hlsLoadBudgetMs)
+        const nudgeHlsAtPlayhead = () => {
+          if (!hls) return
+          const t = video.currentTime
+          if (Number.isFinite(t) && t > 0.5) pinStallPlayhead(t)
+          softHealHlsStall(hls, Number.isFinite(t) ? t : NaN, {
+            allowAbrDownshift: movyPlayback && getViewingQuality() === 'auto',
+            onAbrCap: (height) => setEngineLabel(`hls · auto ≤${height}p`),
+          })
+          void ensureVideoAutoplay(video)
+        }
         hls.loadSource(activePlaylistItem.url)
         hls.attachMedia(video)
+        hlsInstanceRef.current = hls
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
           if (cancelled || settled) return
           settled = true
           window.clearTimeout(loadTimer)
           applyHlsQuality()
-          // Prefer English audio groups when the HLS master lists multiple tracks.
-          try {
-            const tracks = hls?.audioTracks || []
-            if (tracks.length > 1 && !shouldPreferRivestreamJapaneseAudio(item)) {
+          // Prefer Japanese (anime) or English audio when the HLS master lists multiple tracks.
+          // MULTI packs often default to French — don't leave that as the active group.
+          const pickPreferredAudioTrack = () => {
+            try {
+              const tracks = hls?.audioTracks || []
+              if (tracks.length < 2) return
+              const wantJa = shouldPreferRivestreamJapaneseAudio(item)
               const scored = tracks.map((t, index) => {
                 const blob = `${t.name || ''} ${t.lang || ''} ${t.groupId || ''}`.toLowerCase()
                 let score = 0
-                if (/english|\beng\b|\ben-?us\b|\ben\b/.test(blob)) score += 20
-                if (
-                  /hindi|\bhin\b|arabic|spanish|french|german|portuguese|russian|turkish|tamil|telugu|urdu|korean|chinese|japanese|\bjp\b|\bja\b/.test(
-                    blob,
-                  )
-                ) {
-                  score -= 25
+                if (wantJa) {
+                  if (/japanese|\bjpn?\b|\bja\b|\bjp\b|nihongo/.test(blob)) score += 30
+                  else if (/english|\beng\b|\ben-?us\b|^en$|\ben-/.test(blob)) score += 12
+                  if (
+                    /hindi|\bhin\b|arabic|spanish|french|fran[cç]ais|\bfr\b|german|portuguese|russian|turkish|tamil|telugu|urdu|korean|chinese/.test(
+                      blob,
+                    )
+                  ) {
+                    score -= 25
+                  }
+                } else {
+                  if (/english|\beng\b|\ben-?us\b|^en$|\ben-/.test(blob)) score += 20
+                  if (
+                    /hindi|\bhin\b|arabic|spanish|french|fran[cç]ais|\bfr\b|german|portuguese|russian|turkish|tamil|telugu|urdu|korean|chinese|japanese|\bjp\b|\bja\b/.test(
+                      blob,
+                    )
+                  ) {
+                    score -= 25
+                  }
                 }
                 return { index, score }
               })
               scored.sort((a, b) => b.score - a.score)
               const best = scored[0]
-              if (best && best.score >= 0 && hls) hls.audioTrack = best.index
+              const second = scored[1]
+              // Switch when preferred language wins, or when the default track is clearly
+              // foreign and an unlabeled/neutral track scores higher.
+              if (
+                best &&
+                hls &&
+                (best.score >= 10 ||
+                  (second != null && best.score > second.score && best.score >= 0))
+              ) {
+                hls.audioTrack = best.index
+              }
+            } catch {
+              /* ignore */
             }
-          } catch {
-            /* ignore */
+          }
+          pickPreferredAudioTrack()
+          hls?.on(Hls.Events.AUDIO_TRACKS_UPDATED, pickPreferredAudioTrack)
+          // Movy Auto: seed the first fragment near 720p so ABR can climb/drop
+          // instead of opening on a choking 1080p estimate.
+          if (movyPlayback && !liveMode && getViewingQuality() === 'auto' && hls) {
+            try {
+              const levels = hls.levels
+              let best = -1
+              let bestDist = Number.POSITIVE_INFINITY
+              for (let i = 0; i < levels.length; i++) {
+                const h = levels[i]?.height || 0
+                if (h <= 0) continue
+                const dist = Math.abs(h - 720)
+                if (dist < bestDist) {
+                  bestDist = dist
+                  best = i
+                }
+              }
+              if (best >= 0) {
+                hls.startLevel = best
+                hls.nextLevel = best
+                hls.currentLevel = -1
+              }
+            } catch {
+              /* ignore */
+            }
           }
           setStatus('Ready')
           const saved = getContinueEntry(item.id)
@@ -3954,37 +5275,200 @@ export function Player({
             setResumeOffer(saved.currentTime)
             resumePendingRef.current = false
           }
-          void ensureVideoAutoplay(video).then((ok) => {
-            if (!ok) setStatus('Press play')
-          })
+          const autoAt = Math.max(
+            autoSeekResumeOnceRef.current,
+            stallHoldPlayheadRef.current > 0.5 ? stallHoldPlayheadRef.current : 0,
+          )
+          // Any stall past the first half-second should restore the playhead
+          // (was >= 5, which dropped early mid-open recovers back to 0).
+          if (autoAt > 0.5) {
+            autoSeekResumeOnceRef.current = 0
+            pinStallPlayhead(autoAt)
+            let jumped = false
+            const jump = () => {
+              if (jumped || cancelled) return
+              jumped = true
+              try {
+                video.currentTime = autoAt
+                hls?.startLoad(autoAt)
+              } catch {
+                /* ignore */
+              }
+              resumePendingRef.current = false
+              setResumeOffer(null)
+              // Silent resume — flashing "Resumed at…" made soft stalls feel like restarts.
+              setStatus('Buffering…')
+              void ensureVideoAutoplay(video).then((ok) => {
+                if (ok) {
+                  stallHoldPlayheadRef.current = 0
+                  setStatus('Playing')
+                }
+              })
+            }
+            // Wait for level/metadata — blind 350ms timeouts often seek before
+            // duration exists and the browser drops the target back to 0.
+            const onLevel = () => {
+              hls?.off(Hls.Events.LEVEL_LOADED, onLevel)
+              video.removeEventListener('loadedmetadata', onLevel)
+              if (video.readyState >= HTMLMediaElement.HAVE_METADATA) jump()
+              else {
+                const onMeta = () => {
+                  video.removeEventListener('loadedmetadata', onMeta)
+                  jump()
+                }
+                video.addEventListener('loadedmetadata', onMeta)
+                window.setTimeout(jump, 2_000)
+              }
+            }
+            hls?.on(Hls.Events.LEVEL_LOADED, onLevel)
+            video.addEventListener('loadedmetadata', onLevel)
+            window.setTimeout(onLevel, 2_500)
+          }
+          const bufferedAheadSec = () => {
+            try {
+              const t = Number.isFinite(video.currentTime) ? video.currentTime : 0
+              const b = video.buffered
+              for (let i = 0; i < b.length; i++) {
+                if (b.start(i) <= t + 0.35 && b.end(i) > t) return b.end(i) - t
+              }
+            } catch {
+              /* ignore */
+            }
+            return 0
+          }
+          const kickPlay = () => {
+            if (cancelled) return
+            void ensureVideoAutoplay(video).then((ok) => {
+              if (!ok && video.paused) setStatus('Press play')
+              else if (ok) setStatus('Playing')
+            })
+          }
+          // Movy: require ~2–3 full segments buffered before play() so ABR has
+          // room to breathe. Cap wait so opens still feel snappy.
+          if (movyPlayback && !liveMode) {
+            setStatus('Buffering…')
+            const segDur = hlsTargetSegmentDurationSec(hls)
+            const prebufferNeed = segDur * 2.5
+            const prebufferCapMs = Math.min(20_000, Math.max(12_000, segDur * 4_000))
+            const prebufferStarted = Date.now()
+            const waitCushion = () => {
+              if (cancelled) return
+              // Don't call play() while the first segments are still on the wire.
+              if (hlsHasInFlightMainFrag(hls) && Date.now() - prebufferStarted < prebufferCapMs) {
+                window.setTimeout(waitCushion, 250)
+                return
+              }
+              if (
+                bufferedAheadSec() >= prebufferNeed ||
+                Date.now() - prebufferStarted >= prebufferCapMs
+              ) {
+                kickPlay()
+                return
+              }
+              window.setTimeout(waitCushion, 350)
+            }
+            waitCushion()
+          } else {
+            kickPlay()
+          }
+          // Live IPTV/sports: first play() often races MEDIA_ATTACHED — retry briefly.
+          if (liveMode) {
+            window.setTimeout(kickPlay, 900)
+            window.setTimeout(kickPlay, 2800)
+          }
           resolve()
         })
         hls.on(Hls.Events.ERROR, (_event, data) => {
-          if (cancelled || !data.fatal || settled) return
-          if (recoveries < 2 && data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-            recoveries += 1
-            try {
-              hls?.startLoad()
+          if (cancelled || !hls) return
+          // Non-fatal buffer underrun — nudge the loader instead of sitting idle
+          // (VOD resume seeks often stall here until the user force-retries).
+          if (!data.fatal && data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR) {
+            const t = video.currentTime
+            if (Number.isFinite(t) && t > 0.5) pinStallPlayhead(t)
+            // Mid-title underrun: nudge the loader only. recoverMediaError here
+            // rewound the seek bar to 0 and blacked the frame for several seconds.
+            if (Number.isFinite(t) && t > 1 && !video.paused && !video.ended) {
+              setStatus('Buffering…')
+              nudgeHlsAtPlayhead()
               return
-            } catch {
-              /* fall through */
+            }
+            bufferStallNudges += 1
+            setStatus('Buffering…')
+            nudgeHlsAtPlayhead()
+            // Mid-title: never recoverMediaError (MediaSource teardown → black /
+            // seek bar 0). Remount only via explicit Retry. At cold start only.
+            const midTitle = Number.isFinite(t) && t > 1 && !video.paused && !video.ended
+            if (
+              !midTitle &&
+              bufferStallNudges >= 6 &&
+              bufferStallNudges % 6 === 0 &&
+              playRecoveries < 4
+            ) {
+              if (tryRecoverMediaError(hls)) playRecoveries += 1
+              nudgeHlsAtPlayhead()
+            }
+            return
+          }
+          if (!data.fatal) return
+
+          // Initial load: limited recoveries, then fail the engine promise.
+          if (!settled) {
+            if (recoveries < 2 && data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+              recoveries += 1
+              try {
+                hls.startLoad()
+                return
+              } catch {
+                /* fall through */
+              }
+            }
+            if (recoveries < 2 && data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+              if (tryRecoverMediaError(hls)) {
+                recoveries += 1
+                return
+              }
+            }
+            settled = true
+            window.clearTimeout(loadTimer)
+            const message = describeHlsError(data)
+            hls.destroy()
+            hls = null
+            reject(new Error(message))
+            return
+          }
+
+          // Mid-playback: keep recovering — the old `settled` gate dropped fatals
+          // and left anime frozen on "Buffering…" with no Retry path.
+          if (playRecoveries < 8) {
+            playRecoveries += 1
+            setStatus('Buffering…')
+            if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+              nudgeHlsAtPlayhead()
+              return
+            }
+            if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+              tryRecoverMediaError(hls)
+              nudgeHlsAtPlayhead()
+              return
             }
           }
-          if (recoveries < 2 && data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-            recoveries += 1
-            try {
-              hls?.recoverMediaError()
-              return
-            } catch {
-              /* fall through */
-            }
+
+          const fb = hlsFallbackMetaRef.current
+          const canAtlanticNow =
+            Boolean(fb) &&
+            !fb!.tried &&
+            !fb!.busy &&
+            (isMovyStreamUrl(activePlaylistItem.url) || fb!.tmdbId.length > 0)
+          if (canAtlanticNow) {
+            const resumeAt = Number.isFinite(video.currentTime) ? video.currentTime : 0
+            setStatus('Stream stalled — switching source…')
+            bumpChrome()
+            void tryHlsFallbackRef.current(resumeAt)
+            return
           }
-          settled = true
-          window.clearTimeout(loadTimer)
-          const message = describeHlsError(data)
-          hls?.destroy()
-          hls = null
-          reject(new Error(message))
+          setError('Stream stalled — tap Retry, or pick another episode/quality.')
+          setStatus('Buffering…')
+          bumpChrome()
         })
       })
 
@@ -3998,40 +5482,80 @@ export function Player({
         setStatus('Loading MPEG-TS…')
         let settled = false
         const perf = getPerformanceKnobs()
+        const liveMode = isLivePlaybackItem(item)
         // Stash absorbs jitter on public sports TS; latency chasing emptied the
         // buffer and stalled while other apps on the same network kept playing.
+        const stashSize = liveMode
+          ? Math.max(perf.mpegTsStashInitialSize, 512 * 1024)
+          : perf.mpegTsStashInitialSize
         tsPlayer = mpegts.createPlayer(
-          { type: 'mse', isLive: true, url: activePlaylistItem.url },
+          { type: 'mse', isLive: liveMode, url: activePlaylistItem.url },
           {
             enableWorker: perf.enableMediaWorkers,
-            enableStashBuffer: perf.mpegTsEnableStashBuffer,
-            stashInitialSize: perf.mpegTsStashInitialSize,
-            liveBufferLatencyChasing: perf.mpegTsLiveLatencyChasing,
-            liveBufferLatencyMaxLatency: perf.mpegTsLiveLatencyMaxLatency,
-            liveBufferLatencyMinRemain: Math.min(2, perf.mpegTsLiveLatencyMaxLatency / 3),
+            enableStashBuffer: liveMode ? true : perf.mpegTsEnableStashBuffer,
+            stashInitialSize: stashSize,
+            liveBufferLatencyChasing: liveMode ? false : perf.mpegTsLiveLatencyChasing,
+            liveBufferLatencyMaxLatency: liveMode
+              ? Math.max(perf.mpegTsLiveLatencyMaxLatency, 10)
+              : perf.mpegTsLiveLatencyMaxLatency,
+            liveBufferLatencyMinRemain: Math.min(
+              2.5,
+              Math.max(perf.mpegTsLiveLatencyMaxLatency, 10) / 3,
+            ),
             autoCleanupSourceBuffer: true,
           },
         )
+        const loadTimer = window.setTimeout(() => {
+          if (settled || cancelled) return
+          settled = true
+          try {
+            tsPlayer?.destroy()
+          } catch {
+            /* ignore */
+          }
+          tsPlayer = null
+          reject(new Error('MPEG-TS load timed out — stream stalled.'))
+        }, liveMode ? 55_000 : 28_000)
         tsPlayer.on(mpegts.Events.ERROR, () => {
           if (settled) return
           settled = true
+          window.clearTimeout(loadTimer)
           reject(new Error('MPEG-TS playback failed — stream offline or unsupported.'))
         })
         tsPlayer.attachMediaElement(video)
         tsPlayer.load()
+        const finishPlaying = () => {
+          if (settled || cancelled) return
+          settled = true
+          window.clearTimeout(loadTimer)
+          setStatus('Playing')
+          resolve()
+        }
+        const finishPaused = () => {
+          if (settled || cancelled) return
+          settled = true
+          window.clearTimeout(loadTimer)
+          setStatus('Press play')
+          resolve()
+        }
+        const tryStart = (attempt: number) => {
+          if (settled || cancelled) return
+          void ensureVideoAutoplay(video).then((ok) => {
+            if (settled || cancelled) return
+            if (ok || (!video.paused && !video.ended)) {
+              finishPlaying()
+              return
+            }
+            if (liveMode && attempt < 2) {
+              window.setTimeout(() => tryStart(attempt + 1), attempt === 0 ? 900 : 2000)
+              return
+            }
+            finishPaused()
+          })
+        }
         void tsPlayer.play().then(
-          () => {
-            if (settled || cancelled) return
-            settled = true
-            setStatus('Playing')
-            resolve()
-          },
-          () => {
-            if (settled || cancelled) return
-            settled = true
-            setStatus('Press play')
-            resolve()
-          },
+          () => finishPlaying(),
+          () => tryStart(0),
         )
       })
 
@@ -4109,7 +5633,7 @@ export function Player({
           playlistEpisodeKey(activePlaylistItem) ||
           parseEpisodeKey(item.title) ||
           ''
-        const seMatch = /^S(\d{1,2})E(\d{1,3})$/i.exec(epKey)
+        const seMatch = /^S(\d{1,2})E(\d{1,4})$/i.exec(epKey)
         const season = seMatch ? Number(seMatch[1]) : 1
         const episode = seMatch ? Number(seMatch[2]) : playlistIndex + 1
         const showName = cleanShowDisplayTitle(item.title) || item.title
@@ -4128,8 +5652,8 @@ export function Player({
         // Do NOT bounce back to "Trying Movy…" (that re-probes the dead CDN).
         if (tmdbId && onMovy && !onAtlantic) {
           setError(null)
-          setStatus('Trying alternate HLS…')
-          flash('Trying alternate HLS…')
+          setStatus('Trying another source…')
+          flash('Trying another source…')
           if (!meta) {
             hlsFallbackMetaRef.current = {
               tmdbId,
@@ -4153,9 +5677,17 @@ export function Player({
           Boolean(item.tags?.some((t) => /^rivestream$/i.test(t)))
         if (isRivestreamPlay && tmdbId && !onMovy && !onAtlantic) {
           const yearMatch = /\b(19|20)\d{2}\b/.exec(String(item.description || item.title || ''))
+          const reliabilityKey = playReliabilityKey({
+            itemId: item.id,
+            tmdbId,
+            mediaType: 'tv',
+            season,
+            episode,
+          })
+          const lastGood = getLastGoodPlay(reliabilityKey)
           setError(null)
-          setStatus('Trying Movy…')
-          flash('Trying Movy…')
+          setStatus('Trying sources…')
+          flash('Trying sources…')
           try {
             const movy = await withTimeout(
               resolveMovyPlay({
@@ -4165,9 +5697,11 @@ export function Player({
                 season,
                 episode,
                 year: yearMatch?.[0],
+                preferBackend: preferredResolveBackend(lastGood),
+                preferProvider: lastGood?.provider,
               }),
-              12_000,
-              'Movy lookup timed out.',
+              20_000,
+              'Source lookup timed out.',
             )
             if (cancelled) return
             if (movy.ok) {
@@ -4182,15 +5716,26 @@ export function Player({
                 busy: false,
               }
               activePlaybackReferrerRef.current = movy.referer || MOVY_PLAY_REFERER
+              rememberLastGoodPlay(reliabilityKey, movy.backend ?? 'movy', {
+                provider: movy.provider,
+              })
               let subtitleUrl = movy.subtitleUrl
               let subtitleKind = movy.subtitleKind
-              if (!subtitleUrl && isWyzieAvailable()) {
+              if (!subtitleUrl) {
                 try {
-                  const wyzie = await resolveWyzieSubtitle({ tmdbId, season, episode })
+                  const soft = await ensureEpisodeSoftSubtitles({
+                    title: showName,
+                    item: { ...item, rivestreamTmdbId: tmdbId },
+                    tmdbId,
+                    season,
+                    episode,
+                    skipWyzie: skipWyzieSubsRef.current,
+                    force: item.category === 'anime',
+                  })
                   if (cancelled) return
-                  if (wyzie.ok) {
-                    subtitleUrl = wyzie.subtitleUrl
-                    subtitleKind = wyzie.subtitleKind
+                  if (soft.subtitleUrl) {
+                    subtitleUrl = soft.subtitleUrl
+                    subtitleKind = soft.subtitleKind
                   }
                 } catch {
                   /* play without captions */
@@ -4218,8 +5763,8 @@ export function Player({
               })
               return
             }
-            setStatus('Trying alternate HLS…')
-            flash('Trying alternate HLS…')
+            setStatus('Trying another source…')
+            flash('Trying another source…')
             const alt = await resolveAtlanticPlay({
               tmdbId,
               mediaType: 'tv',
@@ -4342,14 +5887,26 @@ export function Player({
       persist()
       const video = videoRef.current
       if (video) updatePlaybackClock(video)
-      // Clear a stale load-timeout overlay if the stream is clearly progressing.
+      // Audio/playhead advancing — never leave the loading cover up over sound.
       if (
         video &&
         !video.error &&
-        video.currentTime > 0.5 &&
+        !video.paused &&
+        video.currentTime > 0.25 &&
         video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
       ) {
-        setError((prev) => (prev ? null : prev))
+        setMediaReady(true)
+        setErrorRaw((prev) => (prev ? null : prev))
+      }
+      // Hide Resume once the playhead is already at/past that point (stale button
+      // after a successful seek or after watching past the saved offset).
+      if (video) {
+        const playhead = effectivePlayhead(video)
+        setResumeOffer((offer) => {
+          if (offer == null) return offer
+          if (playhead + 8 >= offer) return null
+          return offer
+        })
       }
       if (video && skipIntervals.length > 0 && item.category === 'anime') {
         const playhead = absolutePlayhead(video)
@@ -4380,9 +5937,13 @@ export function Player({
     window.addEventListener('beforeunload', onBeforeUnload)
     document.addEventListener('visibilitychange', onVisibility)
     window.addEventListener(FORCE_SAVE_CONTINUE_EVENT, onForceSave)
-    // Interval backup — timeupdate is unreliable on some remux streams, and the
-    // video ref may not be ready on the first effect pass.
-    const interval = window.setInterval(persist, 2500)
+    // Interval backup — timeupdate is unreliable on some remux/HLS streams
+    // (playhead stalls → frozen seekbar). Keep the clock moving.
+    const interval = window.setInterval(() => {
+      persist()
+      const el = videoRef.current
+      if (el) updatePlaybackClock(el)
+    }, 1000)
 
     return () => {
       persist()
@@ -4514,6 +6075,19 @@ export function Player({
       if (chromeTimer.current) window.clearTimeout(chromeTimer.current)
     }
   }, [layout, item.id])
+
+  // Arm a 5s hide once the picture is up. Do not depend on status — Buffering
+  // blips were restarting this timer and leaving Android controls up.
+  useEffect(() => {
+    if (isPip || isTile || !mediaReady || episodeLoading) return
+    bumpChrome({ delayMs: CHROME_START_HIDE_MS })
+  }, [mediaReady, episodeLoading, isPip, isTile, item.id, activePlaylistItem.url])
+
+  // Fullscreen: show chrome briefly, then tuck it away so the picture stays clean.
+  useEffect(() => {
+    if (!osFullScreen || isPip || isTile || !mediaReady) return
+    bumpChrome({ delayMs: CHROME_START_HIDE_MS })
+  }, [osFullScreen, isPip, isTile, mediaReady])
 
   if (isTile) {
     return (
@@ -4723,16 +6297,14 @@ export function Player({
                 awaitingAdd
                   ? 'Cancel — next channel will replace this one'
                   : item.transport === 'torrent' || item.sourceKind === 'torrent'
-                    ? 'Add another stream beside this one (two torrents share bandwidth)'
+                    ? 'Add another stream beside this one (two sources share bandwidth)'
                     : 'Add the next channel to multi-view instead of replacing'
               }
             >
               {awaitingAdd ? 'Pick channel…' : 'Multi-view'}
             </button>
           )}
-          {!isPip &&
-            castAvailable &&
-            castModeForPlayback(item, activePlaylistItem.url || item.url) !== 'none' && (
+          {!isPip && isAndroidCastHost() && (
               <button
                 type="button"
                 className={`ghost-btn control-btn${casting ? ' is-armed' : ''}`}
@@ -4742,12 +6314,20 @@ export function Player({
                     ? castDevice
                       ? `Stop casting to ${castDevice}`
                       : 'Stop casting'
-                    : castModeForPlayback(item, activePlaylistItem.url || item.url) === 'mirror'
-                      ? 'No media URL — open screen cast to mirror the phone'
-                      : 'Cast this stream to a TV'
+                    : castAvailable &&
+                        castModeForPlayback(item, activePlaylistItem.url || item.url) === 'media'
+                      ? 'Cast this stream to a TV'
+                      : 'Mirror this phone to a nearby TV'
                 }
               >
-                {casting ? (castDevice ? `Cast · ${castDevice}` : 'Casting') : 'Cast'}
+                {casting
+                  ? castDevice
+                    ? `Cast · ${castDevice}`
+                    : 'Casting'
+                  : castAvailable &&
+                      castModeForPlayback(item, activePlaylistItem.url || item.url) === 'media'
+                    ? 'Cast'
+                    : 'Mirror'}
               </button>
             )}
           {!isPip && (
@@ -4763,11 +6343,20 @@ export function Player({
               onClick={() => {
                 const entry = playlist[playlistIndex]
                 const canRetorrent = Boolean(entry?.torrentUri)
+                // Explicit Retry may tear down <video>; soft stalls must not.
+                setHlsRemountNonce((n) => n + 1)
                 if (canRetorrent) {
-                  void selectPlaylistItem(playlistIndex, { force: true })
+                  void selectPlaylistItem(playlistIndex, {
+                    force: true,
+                    rotateTorrent: true,
+                  })
                   return
                 }
-                setRetryTick((n) => n + 1)
+                // Dead HLS — walk next pipe. Soft remount alone won't fix a dead CDN.
+                void selectPlaylistItem(playlistIndex, {
+                  force: true,
+                  rotateSource: true,
+                })
               }}
             >
               Retry
@@ -4836,11 +6425,7 @@ export function Player({
                     <button
                       type="button"
                       className={`ghost-btn control-btn sub-sync-btn${subtitleDelaySec !== 0 ? ' is-armed' : ''}`}
-                      onClick={() => {
-                        subtitleDelayRef.current = 0
-                        setSubtitleDelaySec(0)
-                        bumpChrome()
-                      }}
+                      onClick={resetSubtitleDelay}
                       title="Click to reset sync offset"
                     >
                       {subtitleDelaySec === 0
@@ -4883,19 +6468,15 @@ export function Player({
           {playbackClock.duration > 0 && (
             <label className="player-seek" title="Seek">
               <span className="sr-only">Seek</span>
-              <input
-                type="range"
-                min={0}
-                max={Math.max(1, Math.floor(playbackClock.duration))}
-                step={1}
-                value={Math.min(
-                  Math.max(0, Math.floor(playbackClock.current)),
-                  Math.max(1, Math.floor(playbackClock.duration)),
-                )}
-                onChange={(e) => {
-                  seekToAbsolute(Number(e.target.value) || 0)
+              <SeekSlider
+                value={playbackClock.current}
+                max={playbackClock.duration}
+                disabled={Boolean(error) || episodeLoading}
+                onScrub={() => bumpChrome()}
+                onCommit={(next) => {
+                  seekToAbsolute(next)
+                  bumpChrome()
                 }}
-                onPointerDown={() => bumpChrome()}
               />
             </label>
           )}
@@ -5014,6 +6595,24 @@ export function Player({
           >
             ▶
           </button>
+        )}
+        {isPip && playbackClock.duration > 0 && (
+          <label
+            className="player-pip-seek"
+            title="Seek"
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <span className="sr-only">Seek</span>
+            <SeekSlider
+              value={playbackClock.current}
+              max={playbackClock.duration}
+              disabled={Boolean(error) || episodeLoading}
+              onCommit={(next) => {
+                seekToAbsolute(next)
+              }}
+            />
+          </label>
         )}
         {hint && !isPip && <div className="player-hint">{hint}</div>}
         {error && !isPip && (

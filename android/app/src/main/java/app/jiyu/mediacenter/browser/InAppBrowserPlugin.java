@@ -100,6 +100,7 @@ public class InAppBrowserPlugin extends Plugin {
         }
         hideUnlockChrome();
         applyBounds(call);
+        ensureUsableBounds();
         gecko.setVisibility(View.VISIBLE);
         gecko.resume();
         notifyNav();
@@ -199,9 +200,19 @@ public class InAppBrowserPlugin extends Plugin {
           call.resolve(err);
           return;
         }
+        // resolveMedia parks the surface at 2×2 INVISIBLE — expand before paint
+        // or /web fallback stays a black stage with an off-screen Gecko.
+        ensureUsableBounds();
         gecko.setVisibility(View.VISIBLE);
         gecko.resume();
         gecko.ensureSession();
+        // Quietly drop any leftover Media3 sniff (no Capacitor double-resolve).
+        gecko.cancelMediaProbe("superseded");
+        try {
+          if (gecko.getView() != null) {
+            gecko.getView().setBackgroundColor(android.graphics.Color.BLACK);
+          }
+        } catch (Throwable ignored) {}
         gecko.noteUserNavigation();
         loading = true;
         notifyNav();
@@ -939,6 +950,89 @@ public class InAppBrowserPlugin extends Plugin {
     }
   }
 
+  /**
+   * Load an embed in Gecko (tiny / hidden) and sniff a playable media URL for Media3.
+   * On failure the caller should fall back to the normal /web embed path.
+   */
+  @PluginMethod
+  public void resolveMedia(PluginCall call) {
+    String url = call.getString("url", "");
+    if (url == null || url.trim().isEmpty()) {
+      JSObject err = new JSObject();
+      err.put("ok", false);
+      err.put("error", "Missing url");
+      call.resolve(err);
+      return;
+    }
+    final String target = url.trim();
+    Double timeoutObj = call.getDouble("timeoutMs", 12000.0);
+    final long timeoutMs =
+      timeoutObj == null ? 12_000L : Math.max(4_000L, Math.min(25_000L, timeoutObj.longValue()));
+    main.post(() -> {
+      try {
+        geckoMultiActive = false;
+        hideMultiForSingle();
+        ensureOverlay();
+        if (gecko == null || gecko.getView() == null) {
+          JSObject err = new JSObject();
+          err.put("ok", false);
+          err.put("error", "Could not attach browser view");
+          call.resolve(err);
+          return;
+        }
+        // Keep Gecko attached but not covering the UI while probing.
+        if (layoutParams != null) {
+          layoutParams.leftMargin = 0;
+          layoutParams.topMargin = 0;
+          layoutParams.width = 2;
+          layoutParams.height = 2;
+          gecko.setLayoutParams(layoutParams);
+        }
+        gecko.setVisibility(View.INVISIBLE);
+        gecko.resume();
+        gecko.ensureSession();
+        gecko.resolveMediaFromEmbed(
+          target,
+          timeoutMs,
+          (mediaUrl, pageUrl, error) -> {
+            JSObject out = new JSObject();
+            if (mediaUrl != null && !mediaUrl.isEmpty()) {
+              // Stop embed audio/CPU — Media3 takes over.
+              try {
+                gecko.pause();
+              } catch (Throwable ignored) {}
+              gecko.setVisibility(View.GONE);
+              // Reset probe parking so a later /web show/navigate is full-size.
+              resetOverlayBounds();
+              out.put("ok", true);
+              out.put("mediaUrl", mediaUrl);
+              out.put("pageUrl", pageUrl != null ? pageUrl : target);
+              out.put("referrer", pageUrl != null ? pageUrl : target);
+              call.resolve(out);
+            } else {
+              // Failed sniff — leave session on the embed URL but restore a
+              // usable full-size surface for the /web fallback path.
+              try {
+                gecko.resume();
+              } catch (Throwable ignored) {}
+              resetOverlayBounds();
+              gecko.setVisibility(View.GONE);
+              out.put("ok", false);
+              out.put("error", error != null ? error : "No media URL");
+              out.put("pageUrl", pageUrl != null ? pageUrl : target);
+              call.resolve(out);
+            }
+          }
+        );
+      } catch (Throwable t) {
+        JSObject err = new JSObject();
+        err.put("ok", false);
+        err.put("error", t.getMessage() != null ? t.getMessage() : "resolveMedia failed");
+        call.resolve(err);
+      }
+    });
+  }
+
   @PluginMethod
   public void execute(PluginCall call) {
     String script = call.getString("script", "");
@@ -1396,12 +1490,26 @@ public class InAppBrowserPlugin extends Plugin {
       layoutParams.width = Math.round(w.floatValue() * density);
       layoutParams.height = Math.round(h.floatValue() * density);
     } else {
-      layoutParams.leftMargin = 0;
-      layoutParams.topMargin = 0;
-      layoutParams.width = ViewGroup.LayoutParams.MATCH_PARENT;
-      layoutParams.height = ViewGroup.LayoutParams.MATCH_PARENT;
+      resetOverlayBounds();
+      return;
     }
     gecko.setLayoutParams(layoutParams);
+  }
+
+  /** Undo resolveMedia's 2×2 parking so show/navigate can paint a real stage. */
+  private void resetOverlayBounds() {
+    if (layoutParams == null) return;
+    layoutParams.leftMargin = 0;
+    layoutParams.topMargin = 0;
+    layoutParams.width = ViewGroup.LayoutParams.MATCH_PARENT;
+    layoutParams.height = ViewGroup.LayoutParams.MATCH_PARENT;
+    if (gecko != null) gecko.setLayoutParams(layoutParams);
+  }
+
+  private void ensureUsableBounds() {
+    if (layoutParams == null) return;
+    if (layoutParams.width >= 10 && layoutParams.height >= 10) return;
+    resetOverlayBounds();
   }
 
   /**

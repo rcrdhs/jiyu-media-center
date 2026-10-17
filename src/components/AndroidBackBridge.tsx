@@ -15,12 +15,33 @@ import { dismissTopOverlay } from '../lib/overlayDismiss'
 
 const EXIT_CONFIRM_MS = 2500
 
-function sectionPathFromLocation(path: string, returnTo?: string | null): string {
-  if (returnTo && returnTo.startsWith('/section/')) return returnTo
+function routeFromState(state: unknown): string | null {
+  if (
+    typeof state === 'object' &&
+    state &&
+    'from' in state &&
+    typeof (state as { from?: unknown }).from === 'string'
+  ) {
+    const from = (state as { from: string }).from.trim()
+    if (from && from !== '/' && !from.startsWith('/show') && !from.startsWith('/watch')) {
+      return from
+    }
+  }
+  return null
+}
+
+function sectionPathFromLocation(
+  path: string,
+  returnTo?: string | null,
+  routeFrom?: string | null,
+): string {
+  // Prefer the shelf that opened this title (MediaCard state.from), then player returnTo.
+  if (routeFrom?.startsWith('/section/')) return routeFrom
+  if (returnTo?.startsWith('/section/')) return returnTo
   if (path.startsWith('/section/')) return path
   const match = /^\/(show|watch)\/([^/?#]+)/.exec(path)
   if (match) {
-    // Prefer an explicit shelf return; otherwise land on Home sections entry.
+    if (routeFrom) return routeFrom
     if (returnTo && returnTo !== '/' && !returnTo.startsWith('/show') && !returnTo.startsWith('/watch')) {
       return returnTo
     }
@@ -50,6 +71,7 @@ export function AndroidBackBridge() {
 
   const snap = useRef({
     path: location.pathname,
+    routeFrom: routeFromState(location.state),
     mode,
     returnTo,
     webMode,
@@ -57,6 +79,7 @@ export function AndroidBackBridge() {
   })
   snap.current = {
     path: location.pathname,
+    routeFrom: routeFromState(location.state),
     mode,
     returnTo,
     webMode,
@@ -101,7 +124,10 @@ export function AndroidBackBridge() {
           void exitOsFullscreen({ force: true })
           if (s.mode === 'full') {
             minimizeToPip()
-            const dest = s.returnTo || '/'
+            const dest =
+              (s.returnTo && s.returnTo !== '/' ? s.returnTo : null) ||
+              s.routeFrom ||
+              '/'
             if (s.path.startsWith('/watch') || s.path.startsWith('/show')) {
               navigate(dest, { replace: true })
             }
@@ -114,7 +140,10 @@ export function AndroidBackBridge() {
           exitArmedUntil.current = 0
           setExitHint(null)
           minimizeToPip()
-          const dest = s.returnTo || '/'
+          const dest =
+            (s.returnTo && s.returnTo !== '/' ? s.returnTo : null) ||
+            s.routeFrom ||
+            '/'
           if (s.path.startsWith('/watch') || s.path.startsWith('/show')) {
             navigate(dest, { replace: true })
           }
@@ -140,7 +169,7 @@ export function AndroidBackBridge() {
         ) {
           exitArmedUntil.current = 0
           setExitHint(null)
-          const section = sectionPathFromLocation(path, s.returnTo)
+          const section = sectionPathFromLocation(path, s.returnTo, s.routeFrom)
           navigate(section === path ? '/' : section, { replace: true })
           return
         }

@@ -24,6 +24,8 @@ interface MultiViewProps {
   onSpotlight: (id: string) => void
   onRemove: (id: string) => void
   onCloseAll: () => void
+  /** Leave the grid; keep streams parked for remount. */
+  onDismount?: () => void
   onMinimize?: () => void
 }
 
@@ -33,10 +35,12 @@ export function MultiView({
   onSpotlight,
   onRemove,
   onCloseAll,
+  onDismount,
   onMinimize,
 }: MultiViewProps) {
   const navigate = useNavigate()
-  const { awaitingAdd, armMultiviewAdd, cancelMultiviewAdd } = usePlayback()
+  const { awaitingAdd, armMultiviewAdd, cancelMultiviewAdd, dismountMulti } =
+    usePlayback()
   const electron = isDesktopApp()
   const android = isAndroidInAppBrowser()
   const count = slots.length
@@ -138,13 +142,29 @@ export function MultiView({
       aria-label="Multi-view"
     >
       <header className="multi-view-bar">
-        <button type="button" className="ghost-btn control-btn" onClick={onCloseAll}>
-          ← Close all
+        <button
+          type="button"
+          className="ghost-btn control-btn"
+          onClick={() => {
+            void exitOsFullscreen({ onlyIfOwner: 'multi' })
+            if (onDismount) {
+              onDismount()
+              return
+            }
+            dismountMulti()
+            if (electron) void window.signalDesktop?.browserMultiHideAll?.({ blank: false })
+            else if (android) void androidBrowserMultiHideAll({ blank: false })
+            navigate('/section/sports')
+          }}
+          title="Leave the grid — streams stay parked until you open Multi-view again"
+        >
+          ← Browse
         </button>
         <div className="multi-view-meta">
           <strong>Multi-view</strong>
           <span>
-            {count} stream{count === 1 ? '' : 's'} · click a tile for audio
+            {count} stream{count === 1 ? '' : 's'}
+            {count > 1 ? ' · click a tile for audio' : ''}
             {awaitingAdd ? ' · pick another channel to add' : ''}
           </span>
         </div>
@@ -158,6 +178,7 @@ export function MultiView({
                 else {
                   armMultiviewAdd()
                   void exitOsFullscreen({ onlyIfOwner: 'multi' })
+                  dismountMulti()
                   // Detach tiles so the sports shelf isn't covered by native views.
                   if (electron) {
                     void window.signalDesktop?.browserMultiHideAll?.({ blank: false })
@@ -192,6 +213,14 @@ export function MultiView({
               PiP
             </button>
           )}
+          <button
+            type="button"
+            className="ghost-btn control-btn"
+            onClick={onCloseAll}
+            title="Stop every stream and leave multi-view"
+          >
+            Close all
+          </button>
         </div>
       </header>
       {isFullscreen ? (

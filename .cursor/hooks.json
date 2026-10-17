@@ -3,7 +3,14 @@
   "hooks": {
     "afterFileEdit": [
       {
-        "command": "node .cursor/hooks/mirror-twin.cjs"
+        "command": "node .cursor/hooks/mirror-twin.cjs",
+        "timeout": 15
+      }
+    ],
+    "postToolUse": [
+      {
+        "command": "node .cursor/hooks/mirror-twin.cjs",
+        "timeout": 15
       }
     ]
   }

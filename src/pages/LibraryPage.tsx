@@ -25,6 +25,8 @@ import {
   REAL_DEBRID_TOKEN_URL,
   setRealDebridToken,
 } from '../lib/debridSettings'
+import { ProgressSyncSettings } from '../components/ProgressSyncSettings'
+import { HideKeywordsSettings } from '../components/HideKeywordsSettings'
 import {
   getViewingQuality,
   setViewingQuality,
@@ -420,6 +422,8 @@ export function LibraryPage() {
                 Get API key
               </a>
             </p>
+            <ProgressSyncSettings />
+            <HideKeywordsSettings />
             <label className="check-toggle">
               <input
                 type="checkbox"

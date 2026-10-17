@@ -49,6 +49,26 @@ export function webSurfaceOwnsFullscreen(): boolean {
   )
 }
 
+/**
+ * True when Full should use OS/immersive fullscreen only — not the HTML
+ * Fullscreen API. Electron's HTML FS enter/leave races `exitOsFullscreen` and
+ * makes the Full button look broken; Android WebView requestFullscreen crops.
+ */
+export function usesOsFullscreenOnly(): boolean {
+  if (typeof window !== 'undefined' && window.signalDesktop?.setFullScreen) return true
+  try {
+    // Inline Capacitor check — avoid importing androidFullscreen at module load.
+    const cap = (
+      window as unknown as {
+        Capacitor?: { isNativePlatform?: () => boolean; getPlatform?: () => string }
+      }
+    ).Capacitor
+    return Boolean(cap?.isNativePlatform?.() && cap.getPlatform?.() === 'android')
+  } catch {
+    return false
+  }
+}
+
 export async function enterOsFullscreen(nextOwner: Exclude<FullscreenOwner, null>): Promise<void> {
   owner = nextOwner
   notify()

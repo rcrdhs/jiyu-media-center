@@ -15,4 +15,6 @@ ext {
     cordovaAndroidVersion = '14.0.1'
     /** Release-channel GeckoView — in-app browser overlay only (not Capacitor UI). */
     geckoviewVersion = '140.0.20250707120347'
+    /** Android sports / IPTV native playback (Gecko resolves embeds → Media3 plays). */
+    media3Version = '1.5.1'
 }

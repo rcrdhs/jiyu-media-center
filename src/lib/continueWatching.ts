@@ -239,11 +239,25 @@ export function repairContinueWithRuntime(
 
 export function removeContinueEntry(id: string) {
   writeAll(readAll().filter((entry) => entry.id !== id))
+  void import('./progressSync').then((mod) => {
+    mod.queueProgressSyncDelete(id)
+  })
 }
 
 export function clearContinueWatching() {
+  const ids = readAll().map((entry) => entry.id)
   localStorage.removeItem(KEY)
   window.dispatchEvent(new CustomEvent(CONTINUE_WATCHING_EVENT))
+  if (ids.length > 0) {
+    void import('./progressSync').then((mod) => {
+      for (const id of ids) mod.queueProgressSyncDelete(id)
+    })
+  }
+}
+
+/** Apply a merged Continue watching list from cross-device sync (trims per shelf). */
+export function applySyncedContinueEntries(entries: ContinueWatchingEntry[]) {
+  writeAll(entries)
 }
 
 /** Rebuild a playable catalog-shaped item from a continue row (movies / series / anime). */
@@ -558,6 +572,12 @@ export function upsertContinueEntry(
   // Replace only this title id — never drop other categories' resumes.
   const others = readAll().filter((item) => item.id !== next.id)
   writeAll([next, ...others])
+
+  // Cross-device sync (no-op when unsigned / unconfigured). Dynamic import
+  // avoids a static cycle with progressSync.
+  void import('./progressSync').then((mod) => {
+    mod.queueProgressSyncPush(next)
+  })
 }
 
 /**

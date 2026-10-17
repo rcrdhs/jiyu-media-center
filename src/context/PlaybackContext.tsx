@@ -23,6 +23,11 @@ interface PlaybackState {
   mode: PlaybackMode
   /** When true, the next play() adds a tile instead of replacing */
   awaitingAdd: boolean
+  /**
+   * When mode is multi: full tile grid is on screen (mounted).
+   * false = dismounted — browse the app; streams stay in memory / hidden views.
+   */
+  multiMounted: boolean
   /** Route to open when leaving the full player (e.g. /guide) */
   returnTo: string | null
   /** Stream displaced when opening another from Guide — restore on Back */
@@ -44,12 +49,17 @@ interface PlaybackContextValue {
   primaryId: string | null
   mode: PlaybackMode
   awaitingAdd: boolean
+  multiMounted: boolean
   returnTo: string | null
   resumeItem: StreamItem | null
   play: (item: StreamItem, options?: PlayOptions) => void
   addToMultiview: (item: StreamItem) => void
   armMultiviewAdd: () => void
   cancelMultiviewAdd: () => void
+  /** Hide the multi grid and keep streams (browse / add). */
+  dismountMulti: () => void
+  /** Show the multi grid again with the same slots. */
+  mountMulti: () => void
   minimizeToPip: () => void
   expand: () => void
   stop: () => void
@@ -103,6 +113,7 @@ const emptyState = (): PlaybackState => ({
   primaryId: null,
   mode: 'off',
   awaitingAdd: false,
+  multiMounted: true,
   returnTo: null,
   resumeItem: null,
 })
@@ -136,6 +147,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
           primaryId: next.id,
           mode,
           awaitingAdd: false,
+          multiMounted: true,
           returnTo,
           resumeItem: resumeItem ?? null,
         }
@@ -147,6 +159,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
           primaryId: next.id,
           mode: 'full',
           awaitingAdd: false,
+          multiMounted: true,
           returnTo,
           resumeItem: prev.resumeItem,
         }
@@ -156,8 +169,10 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
       return {
         slots: added.slots,
         primaryId: added.primaryId,
-        mode: added.slots.length > 1 ? 'multi' : 'full',
+        mode: added.slots.length > 1 ? 'multi' : prev.mode === 'multi' ? 'multi' : 'full',
         awaitingAdd: false,
+        // Remount the grid when a stream is added from a dismounted session.
+        multiMounted: true,
         returnTo,
         resumeItem: prev.resumeItem,
       }
@@ -173,6 +188,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
           primaryId: next.id,
           mode: 'full',
           awaitingAdd: true,
+          multiMounted: true,
           returnTo: prev.returnTo,
           resumeItem: prev.resumeItem,
         }
@@ -183,6 +199,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
         primaryId: added.primaryId,
         mode: added.slots.length > 1 ? 'multi' : 'full',
         awaitingAdd: false,
+        multiMounted: true,
         returnTo: prev.returnTo,
         resumeItem: prev.resumeItem,
       }
@@ -195,6 +212,25 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
 
   const cancelMultiviewAdd = useCallback(() => {
     setState((prev) => ({ ...prev, awaitingAdd: false }))
+  }, [])
+
+  const dismountMulti = useCallback(() => {
+    setState((prev) => {
+      if (prev.mode !== 'multi' || prev.slots.length === 0) return prev
+      return { ...prev, multiMounted: false }
+    })
+  }, [])
+
+  const mountMulti = useCallback(() => {
+    setState((prev) => {
+      if (prev.slots.length === 0) return prev
+      return {
+        ...prev,
+        mode: prev.slots.length >= 1 ? 'multi' : prev.mode,
+        multiMounted: true,
+        awaitingAdd: false,
+      }
+    })
   }, [])
 
   const clearReturnTo = useCallback(() => {
@@ -210,6 +246,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
         primaryId: resume.id,
         mode: 'pip',
         awaitingAdd: false,
+        multiMounted: true,
         returnTo: null,
         resumeItem: null,
       })
@@ -230,6 +267,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
       primaryId: next.id,
       mode: 'full',
       awaitingAdd: false,
+      multiMounted: true,
       returnTo: null,
       resumeItem: null,
     })
@@ -249,6 +287,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
         mode: 'pip',
         // Keep armed so "Multi-view → pick channel" still adds after minimizing
         awaitingAdd: prev.awaitingAdd,
+        multiMounted: prev.multiMounted,
         returnTo: null,
         resumeItem: prev.resumeItem,
       }
@@ -258,8 +297,10 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
   const expand = useCallback(() => {
     setState((prev) => {
       if (prev.slots.length === 0) return prev
-      if (prev.slots.length > 1) return { ...prev, mode: 'multi' }
-      return { ...prev, mode: 'full' }
+      if (prev.mode === 'multi' || prev.slots.length > 1) {
+        return { ...prev, mode: 'multi', multiMounted: true }
+      }
+      return { ...prev, mode: 'full', multiMounted: true }
     })
   }, [])
 
@@ -287,7 +328,10 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
           : nextSlots[0].id
       let nextMode = prev.mode
       if (nextSlots.length === 1) {
-        nextMode = prev.mode === 'pip' ? 'pip' : 'full'
+        // Stay in multi with one tile — collapsing to full unmounts WebEmbedTile,
+        // blanks the survivor, then reloads /web (black / 00:00).
+        if (prev.mode === 'multi') nextMode = 'multi'
+        else nextMode = prev.mode === 'pip' ? 'pip' : 'full'
       } else if (prev.mode === 'full') {
         nextMode = 'multi'
       }
@@ -296,6 +340,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
         primaryId: nextPrimary,
         mode: nextMode,
         awaitingAdd: prev.awaitingAdd,
+        multiMounted: prev.multiMounted,
         returnTo: prev.returnTo,
         resumeItem: prev.resumeItem,
       }
@@ -311,12 +356,15 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
       primaryId: state.primaryId,
       mode: state.mode,
       awaitingAdd: state.awaitingAdd,
+      multiMounted: state.multiMounted,
       returnTo: state.returnTo,
       resumeItem: state.resumeItem,
       play,
       addToMultiview,
       armMultiviewAdd,
       cancelMultiviewAdd,
+      dismountMulti,
+      mountMulti,
       minimizeToPip,
       expand,
       stop,
@@ -332,12 +380,15 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
       state.primaryId,
       state.mode,
       state.awaitingAdd,
+      state.multiMounted,
       state.returnTo,
       state.resumeItem,
       play,
       addToMultiview,
       armMultiviewAdd,
       cancelMultiviewAdd,
+      dismountMulti,
+      mountMulti,
       minimizeToPip,
       expand,
       stop,

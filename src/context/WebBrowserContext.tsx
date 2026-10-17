@@ -105,7 +105,22 @@ type WebBrowserContextValue = {
 
 const WebBrowserContext = createContext<WebBrowserContextValue | null>(null)
 
-/** CSS→native overlay bounds; on Android, clamp away from sidebar chrome. */
+/** True when an Android chrome surface is painted and should reserve space. */
+function isPaintedChrome(el: HTMLElement | null): el is HTMLElement {
+  if (!el) return false
+  try {
+    const style = getComputedStyle(el)
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+      return false
+    }
+    const rect = el.getBoundingClientRect()
+    return rect.width > 8 && rect.height > 8
+  } catch {
+    return false
+  }
+}
+
+/** CSS→native overlay bounds; on Android, clamp away from sidebar / web chrome. */
 export function boundsFromElement(el: HTMLElement): BrowserBounds {
   const rect = el.getBoundingClientRect()
   let x = Math.round(rect.left)
@@ -113,41 +128,38 @@ export function boundsFromElement(el: HTMLElement): BrowserBounds {
   let width = Math.max(1, Math.round(rect.width))
   let height = Math.max(1, Math.round(rect.height))
 
-  // Android: native Gecko sits above Capacitor — never cover the sidebar chrome
-  // (logo / Sections menu). After rotation, frame rects can briefly overlap it.
-  // Multi-view owns the whole window, so tiles must use the full stage.
+  // Android: native Gecko sits above Capacitor — never cover the control strip
+  // (Back / Mute / Full) or the app rail when it is visible. Multi-view owns
+  // the whole window, so tiles must use the full stage.
   try {
     if (document.documentElement.classList.contains('multiview-open')) {
       return { x, y, width, height }
     }
+    let minY = 0
+    let minX = 0
     const chrome = document.querySelector(
       '.web-browser-page .web-chrome',
     ) as HTMLElement | null
-    if (chrome) {
-      const cr = chrome.getBoundingClientRect()
-      const minY = Math.ceil(cr.bottom)
-      if (cr.height > 8 && y < minY) {
-        height = Math.max(1, height - (minY - y))
-        y = minY
-      }
+    if (isPaintedChrome(chrome)) {
+      minY = Math.max(minY, Math.ceil(chrome.getBoundingClientRect().bottom))
     }
     const sidebar = document.querySelector('.sidebar.sidebar-android') as HTMLElement | null
-    if (sidebar) {
+    if (isPaintedChrome(sidebar)) {
       const sr = sidebar.getBoundingClientRect()
       const landscape = window.matchMedia('(orientation: landscape)').matches
       if (landscape) {
-        const minX = Math.ceil(sr.right)
-        if (x < minX) {
-          width = Math.max(1, width - (minX - x))
-          x = minX
-        }
+        minX = Math.max(minX, Math.ceil(sr.right))
       } else {
-        const minY = Math.ceil(sr.bottom)
-        if (y < minY) {
-          height = Math.max(1, height - (minY - y))
-          y = minY
-        }
+        minY = Math.max(minY, Math.ceil(sr.bottom))
       }
+    }
+    if (minY > 0 && y < minY) {
+      height = Math.max(1, height - (minY - y))
+      y = minY
+    }
+    if (minX > 0 && x < minX) {
+      width = Math.max(1, width - (minX - x))
+      x = minX
     }
   } catch {
     /* ignore */
@@ -199,9 +211,19 @@ function pipFullscreenBounds(): BrowserBounds {
 
 function topChromeClearance(): number {
   try {
+    let top = FULLSCREEN_CHROME
     const chrome = document.querySelector('.web-browser-page .web-chrome') as HTMLElement | null
-    const bottom = chrome ? Math.ceil(chrome.getBoundingClientRect().bottom) : 0
-    return Math.max(FULLSCREEN_CHROME, bottom)
+    if (isPaintedChrome(chrome)) {
+      top = Math.max(top, Math.ceil(chrome.getBoundingClientRect().bottom))
+    }
+    const sidebar = document.querySelector('.sidebar.sidebar-android') as HTMLElement | null
+    if (isPaintedChrome(sidebar)) {
+      const landscape = window.matchMedia('(orientation: landscape)').matches
+      if (!landscape) {
+        top = Math.max(top, Math.ceil(sidebar.getBoundingClientRect().bottom))
+      }
+    }
+    return top
   } catch {
     return FULLSCREEN_CHROME
   }
@@ -396,6 +418,30 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
           } catch (_) { return 'idle'; }
         })();`)
         if (check?.result === 'playing') return
+        // Paused after a prior start (ads / stall) — play() only; no toggle click.
+        await androidBrowserExecute(`(() => {
+          try {
+            const videos = Array.from(document.querySelectorAll('video'));
+            for (const video of videos) {
+              if (!video || video.ended || !video.paused) continue;
+              video.muted = true;
+              const p = video.play();
+              if (p && typeof p.then === 'function') {
+                p.then(() => { try { video.muted = false; } catch (_) {} }).catch(() => {});
+              }
+            }
+            return 'resume';
+          } catch (_) { return 'error'; }
+        })();`)
+        const again = await androidBrowserExecute(`(() => {
+          try {
+            const v = Array.from(document.querySelectorAll('video')).find(
+              (m) => !m.paused && !m.ended
+            );
+            return v ? 'playing' : 'idle';
+          } catch (_) { return 'idle'; }
+        })();`)
+        if (again?.result === 'playing') return
         // play() from the page is not a user gesture, so the play glyph stays up.
         // tapPlay sends the two taps these embeds need, and skips a live stream.
         if (aggressive) await androidBrowserTapPlay()
@@ -408,11 +454,14 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
     runAds()
     if (isSportsOrReplay) {
       if (android) {
-        // Stagger kicks — first paint often has no <video> yet.
+        // Match Electron sports poll window — slow Clappr/JW mounts miss early kicks.
         sportsKick(false)
         autoplayTimers.current.push(window.setTimeout(() => sportsKick(false), 700))
+        autoplayTimers.current.push(window.setTimeout(() => sportsKick(false), 1600))
         autoplayTimers.current.push(window.setTimeout(() => sportsKick(false), 3200))
-        // Page load is not the play button. Wait 3s, then keep looking until it is on screen.
+        autoplayTimers.current.push(window.setTimeout(() => sportsKick(true), 5200))
+        autoplayTimers.current.push(window.setTimeout(() => sportsKick(false), 8500))
+        // Page load is not the play button. Wait ~3s, then keep looking until it is on screen.
         autoplayTimers.current.push(
           window.setTimeout(() => {
             void androidBrowserTapPlay()
@@ -648,6 +697,20 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
         await showAt(boundsFromElement(frameRef.current))
       }
       const result = await hostNavigate(target)
+      // After Media3 unwrap, frame may mount a tick later — re-apply bounds so
+      // Gecko is not left at the probe's 2×2 parking size.
+      const placeAgain = () => {
+        if (frameRef.current && modeRef.current === 'page') {
+          void showAt(boundsFromElement(frameRef.current))
+        }
+      }
+      placeAgain()
+      requestAnimationFrame(() => {
+        placeAgain()
+        requestAnimationFrame(placeAgain)
+      })
+      window.setTimeout(placeAgain, 120)
+      window.setTimeout(placeAgain, 400)
       if (result && !result.ok) {
         setStatus(result.error || 'Failed to open')
         setNav((current) => ({ ...current, loading: false, title: 'Failed' }))
@@ -680,9 +743,9 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
       const preferred =
         (url && isEmbedPlayerHost(url) ? url : '') ||
         (current && isEmbedPlayerHost(current) ? current : '') ||
-        lastEmbedUrlRef.current ||
-        url ||
-        current ||
+        (lastEmbedUrlRef.current && isEmbedPlayerHost(lastEmbedUrlRef.current)
+          ? lastEmbedUrlRef.current
+          : '') ||
         ''
       const target = toAutoplayUrl(preferred || '')
       // Never PiP a blank/black placeholder — that leaves a black box over Sports/Home.
@@ -693,7 +756,7 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
         if (options?.navigateTo) navigate(options.navigateTo)
         return
       }
-      if (isEmbedPlayerHost(target)) lastEmbedUrlRef.current = target
+      lastEmbedUrlRef.current = target
       // Cancel any pending detachFrame → browserHide (pause/mute) from /web unmount.
       detachGeneration.current += 1
       setFullscreen(false)
@@ -939,6 +1002,27 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
     if (frameRef.current) void showAt(boundsFromElement(frameRef.current))
   }, [android, desktop, fullscreen, showAt])
 
+  // Immersive Full toggles sidebar/safe-area after the first showAt — re-fit so
+  // Gecko stays under the compact control strip instead of covering it.
+  useEffect(() => {
+    if (!android || !desktop || mode === 'off') return
+    const timers = [50, 160, 400].map((ms) =>
+      window.setTimeout(() => {
+        if (modeRef.current === 'off') return
+        if (fullscreenRef.current) {
+          void showAt(letterboxedFullscreenBounds(embedAspectRef.current))
+        } else if (modeRef.current === 'pip') {
+          void showAt(pipStageBounds())
+        } else if (frameRef.current) {
+          void showAt(boundsFromElement(frameRef.current))
+        }
+      }, ms),
+    )
+    return () => {
+      for (const id of timers) window.clearTimeout(id)
+    }
+  }, [android, desktop, mode, fullscreen, showAt])
+
   useEffect(() => {
     if (!desktop) return
     if (electron && window.signalDesktop?.onBrowserNav) {
@@ -1025,13 +1109,21 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
       void syncPageBounds()
     }
     // Orientation changes often fire before layout settles — resync a few times.
+    // Also re-show (not only setBounds) so Gecko doesn't keep a stale portrait rect.
+    const orientTimers: number[] = []
     const onOrient = () => {
-      onLayout()
-      window.setTimeout(onLayout, 80)
-      window.setTimeout(onLayout, 280)
-      window.setTimeout(onLayout, 600)
+      const resync = () => {
+        void syncPageBounds()
+        if (frameRef.current && modeRef.current === 'page' && !fullscreen) {
+          void showAt(boundsFromElement(frameRef.current))
+        }
+      }
+      resync()
+      for (const ms of [80, 280, 600, 1000]) {
+        orientTimers.push(window.setTimeout(resync, ms))
+      }
       if (android) {
-        window.setTimeout(() => softResumePlayback(), 700)
+        orientTimers.push(window.setTimeout(() => softResumePlayback(), 700))
       }
     }
     stage?.addEventListener('scroll', onLayout, { passive: true })
@@ -1047,8 +1139,9 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
       window.removeEventListener('orientationchange', onOrient)
       window.removeEventListener('scroll', onLayout, true)
       window.visualViewport?.removeEventListener('resize', onLayout)
+      for (const id of orientTimers) window.clearTimeout(id)
     }
-  }, [android, desktop, mode, fullscreen, syncPageBounds, softResumePlayback])
+  }, [android, desktop, mode, fullscreen, syncPageBounds, softResumePlayback, showAt])
 
   useEffect(() => {
     if (!desktop || mode !== 'pip' || !fullscreen) return

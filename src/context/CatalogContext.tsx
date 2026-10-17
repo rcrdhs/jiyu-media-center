@@ -36,9 +36,9 @@ import { maskActivityMessage } from '../lib/sourceMask'
 import { listTorrentCatalog, loadTorrentCatalogMeta } from '../lib/torrentCatalogStore'
 import {
   filterShelfVisibleItems,
+  isCatalogAutosyncSource,
   isEztvSource,
   isM2BoxUrl,
-  isCinetaroUrl,
   isSeriesWebCatalogItem,
   isSubsPleaseUrl,
   isZenoxUrl,
@@ -74,6 +74,7 @@ import {
 import { clearTorrentSyncStatus, setTorrentSyncMessage } from '../lib/torrentSyncStatus'
 import { isKidsModeEnabled, subscribeKidsMode } from '../lib/kidsMode'
 import {
+  fetchStreamedAllMatches,
   fetchStreamedLiveMatches,
   fetchStreamedSports,
   mergeStreamedLiveCatalog,
@@ -84,6 +85,7 @@ import { fetchLivextvReplayCatalog, isLivextvReplayCatalogItem } from '../lib/li
 import {
   fetchFullmatchShowsReplayCatalog,
   isFullmatchShowsCatalogItem,
+  mergeSportsReplayShelfItems,
 } from '../lib/fullmatchShows'
 
 function setSyncProgressMessage(message: string, percent: number | null): void {
@@ -142,17 +144,30 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
   const [streamedItems, setStreamedItems] = useState<StreamItem[]>([])
   const [ppvStItems, setPpvStItems] = useState<StreamItem[]>([])
   const [livextvReplayItems, setLivextvReplayItems] = useState<StreamItem[]>([])
-  const [fullmatchShowsItems, setFullmatchShowsItems] = useState<StreamItem[]>([])
   const [streamedSports, setStreamedSports] = useState<StreamedSport[]>([])
   const [englishOnly, setEnglishOnlyState] = useState(() => getEnglishOnlyPref())
   const [hideDuplicates, setHideDuplicatesState] = useState(() => getHideDuplicatesPref())
   const [kidsMode, setKidsMode] = useState(isKidsModeEnabled)
   const [torrentSourceRevision, setTorrentSourceRevision] = useState(0)
+  const [hideKeywordsTick, setHideKeywordsTick] = useState(0)
 
   useEffect(() => {
     const bump = () => setTorrentSourceRevision((n) => n + 1)
     window.addEventListener(TORRENT_SOURCES_CHANGED, bump)
     return () => window.removeEventListener(TORRENT_SOURCES_CHANGED, bump)
+  }, [])
+
+  useEffect(() => {
+    let stop: (() => void) | undefined
+    let cancelled = false
+    void import('../lib/hideKeywords').then(({ subscribeHideKeywords }) => {
+      if (cancelled) return
+      stop = subscribeHideKeywords(() => setHideKeywordsTick((n) => n + 1))
+    })
+    return () => {
+      cancelled = true
+      stop?.()
+    }
   }, [])
 
   const setEnglishOnly = useCallback((value: boolean) => {
@@ -323,7 +338,6 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
       ...streamedItems,
       ...ppvStItems,
       ...livextvReplayItems,
-      ...fullmatchShowsItems,
       ...torrentItems,
       ...imported,
     ]
@@ -336,7 +350,6 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
     streamedItems,
     ppvStItems,
     livextvReplayItems,
-    fullmatchShowsItems,
     hideDuplicates,
     kidsMode,
   ])
@@ -345,14 +358,16 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
   // and re-sorting ~20k YMovies rows on every visit.
   const seriesShelfItems = useMemo(() => {
     void torrentSourceRevision
+    void hideKeywordsTick
     let base = items.filter((item) => item.category === 'series')
     base = filterShelfVisibleItems(base)
     return base.filter(isSeriesWebCatalogItem)
-  }, [items, torrentSourceRevision])
+  }, [items, torrentSourceRevision, hideKeywordsTick])
 
   const byCategory = useCallback(
     (id: CategoryId) => {
       void torrentSourceRevision
+      void hideKeywordsTick
       if (id === 'series') {
         if (!englishOnly || !shouldApplyEnglishFilter(id)) return seriesShelfItems
         return seriesShelfItems.filter(isLikelyEnglish)
@@ -368,7 +383,7 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
           isLikelyEnglish(item),
       )
     },
-    [items, englishOnly, torrentSourceRevision, seriesShelfItems],
+    [items, englishOnly, torrentSourceRevision, hideKeywordsTick, seriesShelfItems],
   )
 
   const getById = useCallback(
@@ -547,7 +562,7 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
 
   const syncAllTorrentWebsites = useCallback(async () => {
     const queued = await enqueueTorrentSyncTask(async () => {
-      const list = loadTorrentSources().filter((source) => !source.hiddenFromShelves)
+      const list = loadTorrentSources().filter(isCatalogAutosyncSource)
       if (list.length === 0) return { added: 0, sources: 0 }
       setTorrentSyncMessage('Starting catalog update…', 1)
       const results = await syncAllTorrentSources(list, applySyncProgress)
@@ -612,19 +627,20 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
       }
       if (versionStale) {
         // Scraper bumps re-sync web catalogs + TMDB anime (Ended / complete filter).
+        // Skip shelf-hidden backups (Cinetaro / YMovies) so TMDB stays the Series feed.
+        // Zenox stays Library-hidden but is included via isCatalogAutosyncSource.
         const seriesWeb = websites.filter(
           (source) =>
-            isM2BoxUrl(source.url) ||
-            // YMovies skipped: ~20k titles already, and CF Verify is disruptive.
-            isCinetaroUrl(source.url) ||
-            source.id === TMDB_TV_SOURCE_ID ||
-            isTmdbTvFeedUrl(source.url) ||
-            source.id === TMDB_ANIME_SOURCE_ID ||
-            isTmdbAnimeFullFeedUrl(source.url) ||
-            source.id === TMDB_KIDS_SOURCE_ID ||
-            isTmdbKidsShowsFeedUrl(source.url) ||
-            source.id === ZENOX_SOURCE_ID ||
-            isZenoxUrl(source.url),
+            isCatalogAutosyncSource(source) &&
+            (isM2BoxUrl(source.url) ||
+              source.id === TMDB_TV_SOURCE_ID ||
+              isTmdbTvFeedUrl(source.url) ||
+              source.id === TMDB_ANIME_SOURCE_ID ||
+              isTmdbAnimeFullFeedUrl(source.url) ||
+              source.id === TMDB_KIDS_SOURCE_ID ||
+              isTmdbKidsShowsFeedUrl(source.url) ||
+              source.id === ZENOX_SOURCE_ID ||
+              isZenoxUrl(source.url)),
         )
         if (seriesWeb.length > 0) {
           // One shared session for the whole batch (same as sync-all).
@@ -656,16 +672,15 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
       }
       const unsynced = websites.filter(
         (source) =>
-          !source.hiddenFromShelves && (meta.bySource[source.id]?.count ?? 0) === 0,
+          isCatalogAutosyncSource(source) && (meta.bySource[source.id]?.count ?? 0) === 0,
       )
-      // Series shelves truncated on older Android builds (Popular hardCap ~400).
-      // Re-pull when TMDB TV / Cinetaro look severely underfilled vs desktop.
+      // Re-pull when TMDB Series / Zenox Animation are well under target.
       const SERIES_MIN_COUNT: Record<string, number> = {
-        [TMDB_TV_SOURCE_ID]: 1500,
-        'builtin-cinetaro': 1500,
+        [TMDB_TV_SOURCE_ID]: 7500,
+        [ZENOX_SOURCE_ID]: 7500,
       }
       const underfilled = websites.filter((source) => {
-        if (source.hiddenFromShelves) return false
+        if (!isCatalogAutosyncSource(source)) return false
         const min = SERIES_MIN_COUNT[source.id]
         if (!min) return false
         return (meta.bySource[source.id]?.count ?? 0) < min
@@ -787,17 +802,18 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
     }
   }, [ready, syncTorrentWebsite])
 
-  // TMDB Series + Anime + Kids Shows — daily only (skip if synced within 24h).
+  // TMDB Series + Anime + Kids + Zenox Animation — daily only (skip if synced within 24h).
   useEffect(() => {
     if (!ready) return
     const DAY_MS = 24 * 60 * 60 * 1000
-    const isTmdbSource = (entry: { id: string; url: string }) =>
-      entry.id === TMDB_TV_SOURCE_ID ||
-      entry.id === TMDB_ANIME_SOURCE_ID ||
-      entry.id === TMDB_KIDS_SOURCE_ID ||
-      entry.id === ZENOX_SOURCE_ID ||
-      isTmdbTvFeedUrl(entry.url) ||
-      isZenoxUrl(entry.url)
+    const isTmdbSource = (entry: { id: string; url: string; hiddenFromShelves?: boolean }) =>
+      (entry.id === TMDB_TV_SOURCE_ID ||
+        entry.id === TMDB_ANIME_SOURCE_ID ||
+        entry.id === TMDB_KIDS_SOURCE_ID ||
+        entry.id === ZENOX_SOURCE_ID ||
+        isZenoxUrl(entry.url) ||
+        isTmdbTvFeedUrl(entry.url)) &&
+      isCatalogAutosyncSource(entry)
 
     const refreshTmdb = (opts?: { forceKidsIfEmpty?: boolean }) => {
       const sources = loadTorrentSources().filter(isTmdbSource)
@@ -845,19 +861,25 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
     let failStreak = 0
     let retryTimer: number | undefined
     const refresh = async () => {
-      const [sportsResult, liveResult, popularResult, ppvResult] = await Promise.all([
-        fetchStreamedSports(),
-        fetchStreamedLiveMatches(false),
-        fetchStreamedLiveMatches(true),
-        fetchPpvStLiveCatalog(),
-      ])
+      const [sportsResult, liveResult, popularResult, allResult, ppvResult] =
+        await Promise.all([
+          fetchStreamedSports(),
+          fetchStreamedLiveMatches(false),
+          fetchStreamedLiveMatches(true),
+          fetchStreamedAllMatches(),
+          fetchPpvStLiveCatalog(),
+        ])
       if (cancelled) return
-      const streamedOk = liveResult.ok || popularResult.ok
+      const streamedOk = liveResult.ok || popularResult.ok || allResult.ok
       const ppvOk = ppvResult.ok
       if (!streamedOk) {
         console.warn(
-          'Streamed live matches unavailable:',
-          liveResult.ok ? popularResult.error : liveResult.error,
+          'Streamed matches unavailable:',
+          liveResult.ok
+            ? popularResult.ok
+              ? allResult.error
+              : popularResult.error
+            : liveResult.error,
         )
       }
       if (!ppvOk) {
@@ -865,9 +887,10 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
       }
       const live = liveResult.ok ? liveResult.matches : []
       const popular = popularResult.ok ? popularResult.matches : []
+      const all = allResult.ok ? allResult.matches : []
       startTransition(() => {
         if (sportsResult.ok) setStreamedSports(sportsResult.sports)
-        if (streamedOk) setStreamedItems(mergeStreamedLiveCatalog(live, popular))
+        if (streamedOk) setStreamedItems(mergeStreamedLiveCatalog(live, popular, all))
         if (ppvOk) setPpvStItems(ppvResult.items)
       })
       // Startup / brief outages: retry soon instead of waiting for the 90s poll.
@@ -893,7 +916,7 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
     }
   }, [ready, kidsMode])
 
-  // LiveXTV + FullMatchShows full-match replays — heavier payload; refresh less often than live.
+  // Sports replays: FullMatchShows football (Playmate) + LiveXTV (non-dead parts).
   useEffect(() => {
     if (!ready || kidsMode) return
     let cancelled = false
@@ -917,10 +940,12 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
       }
       failStreak = 0
       startTransition(() => {
-        if (livextv.ok) setLivextvReplayItems(livextv.items)
-        if (fms.ok) setFullmatchShowsItems(fms.items)
-        else if (!fms.ok) console.warn('FullMatchShows replays unavailable:', fms.error)
-        if (!livextv.ok) console.warn('LiveXTV replays unavailable:', livextv.error)
+        setLivextvReplayItems(
+          mergeSportsReplayShelfItems(
+            livextv.ok ? livextv.items : [],
+            fms.ok ? fms.items : [],
+          ),
+        )
       })
     }
     void refresh()

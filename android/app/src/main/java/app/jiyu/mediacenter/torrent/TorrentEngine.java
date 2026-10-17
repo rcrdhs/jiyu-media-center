@@ -66,6 +66,11 @@ public final class TorrentEngine {
     t.setDaemon(true);
     return t;
   });
+  private final ScheduledExecutorService subtitleWorkers = Executors.newSingleThreadScheduledExecutor(r -> {
+    Thread t = new Thread(r, "jiyu-torrent-subs");
+    t.setDaemon(true);
+    return t;
+  });
 
   public static synchronized TorrentEngine get(Context context) {
     if (instance == null) {
@@ -103,6 +108,16 @@ public final class TorrentEngine {
     Integer fileIndex,
     String fileNameHint
   ) {
+    return stream(uri, keepOthers, fileIndex, fileNameHint, false);
+  }
+
+  public synchronized StreamResult stream(
+    String uri,
+    boolean keepOthers,
+    Integer fileIndex,
+    String fileNameHint,
+    boolean preferJapaneseAudio
+  ) {
     if (uri == null || uri.trim().isEmpty()) {
       return StreamResult.fail("Missing torrent URI");
     }
@@ -124,7 +139,8 @@ public final class TorrentEngine {
       ActiveTorrent existing = active.get(hash);
       if (existing != null && existing.videoFile != null && existing.videoFile.exists()) {
         existing.touch();
-        return StreamResult.ok(existing, httpServer.baseUrl());
+        existing.kickSubtitleExtract(httpServer.baseUrl());
+        return StreamResult.ok(existing, httpServer.baseUrl(), preferJapaneseAudio);
       }
 
       if (!keepOthers) {
@@ -144,13 +160,20 @@ public final class TorrentEngine {
       Priority[] priorities = new Priority[info.numFiles()];
       Arrays.fill(priorities, Priority.IGNORE);
       priorities[selected] = Priority.DEFAULT;
+      // Companion .srt/.ass are tiny — keep them downloading for softsubs.
+      for (int i = 0; i < info.numFiles(); i++) {
+        if (i == selected) continue;
+        if (isSubtitleName(info.files().fileName(i))) {
+          priorities[i] = Priority.DEFAULT;
+        }
+      }
 
       torrent_flags_t flags = TorrentFlags.SEQUENTIAL_DOWNLOAD;
       session.download(info, saveDir, null, priorities, null, flags);
 
       TorrentHandle handle = waitForHandle(info, 20);
       if (handle == null || !handle.isValid()) {
-        return StreamResult.fail("Torrent failed to start");
+        return StreamResult.fail("Source failed to start");
       }
 
       prioritizeOpening(handle, selected);
@@ -167,15 +190,16 @@ public final class TorrentEngine {
         int peers = st != null ? st.numPeers() : 0;
         stop(hash);
         if (peers <= 0) {
-          return StreamResult.fail("No peers — swarm may be dead");
+          return StreamResult.fail("No working sources — source may be empty");
         }
-        return StreamResult.fail("Torrent took too long to buffer");
+        return StreamResult.fail("Source took too long to buffer");
       }
 
-      return StreamResult.ok(slot, httpServer.baseUrl());
+      slot.kickSubtitleExtract(httpServer.baseUrl());
+      return StreamResult.ok(slot, httpServer.baseUrl(), preferJapaneseAudio);
     } catch (Exception e) {
       Log.e(TAG, "stream failed", e);
-      return StreamResult.fail(e.getMessage() != null ? e.getMessage() : "Torrent engine error");
+      return StreamResult.fail(e.getMessage() != null ? e.getMessage() : "Source engine error");
     }
   }
 
@@ -474,6 +498,16 @@ public final class TorrentEngine {
       || n.endsWith(".ts") || n.endsWith(".m2ts") || n.endsWith(".wmv");
   }
 
+  private static boolean isSubtitleName(String name) {
+    String n = name.toLowerCase(Locale.US);
+    return n.endsWith(".srt") || n.endsWith(".ass") || n.endsWith(".ssa") || n.endsWith(".vtt");
+  }
+
+  private static boolean mayHaveSoftSubs(String name) {
+    String n = name == null ? "" : name.toLowerCase(Locale.US);
+    return n.endsWith(".mkv") || n.endsWith(".mp4") || n.endsWith(".m4v") || n.endsWith(".mov");
+  }
+
   private TorrentHandle waitForHandle(TorrentInfo info, int timeoutSec) throws InterruptedException {
     long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSec);
     while (System.nanoTime() < deadline) {
@@ -538,26 +572,50 @@ public final class TorrentEngine {
     final String error;
     final ActiveTorrent torrent;
     final String baseUrl;
+    final boolean preferJapaneseAudio;
 
-    private StreamResult(boolean ok, String error, ActiveTorrent torrent, String baseUrl) {
+    private StreamResult(
+      boolean ok,
+      String error,
+      ActiveTorrent torrent,
+      String baseUrl,
+      boolean preferJapaneseAudio
+    ) {
       this.ok = ok;
       this.error = error;
       this.torrent = torrent;
       this.baseUrl = baseUrl;
+      this.preferJapaneseAudio = preferJapaneseAudio;
     }
 
-    static StreamResult ok(ActiveTorrent t, String baseUrl) {
-      return new StreamResult(true, null, t, baseUrl);
+    static StreamResult ok(ActiveTorrent t, String baseUrl, boolean preferJapaneseAudio) {
+      return new StreamResult(true, null, t, baseUrl, preferJapaneseAudio);
     }
 
     static StreamResult fail(String error) {
-      return new StreamResult(false, error, null, null);
+      return new StreamResult(false, error, null, null, false);
     }
 
     String playUrl() {
       if (torrent == null || baseUrl == null) return null;
       // Player treats ?source= as a remux pipe (ffmpeg -ss resume, longer start budget).
-      return baseUrl + "/stream.mp4?source=" + torrent.infoHash;
+      // anime=1 → remuxer maps Japanese audio (MULTI packs often put French on a:0).
+      String url = baseUrl + "/stream.mp4?source=" + torrent.infoHash;
+      if (preferJapaneseAudio) url += "&anime=1";
+      return url;
+    }
+
+    /** Softsub VTT from embedded ASS/SRT (or companion file) — player polls until ready. */
+    String subtitleUrl() {
+      if (torrent == null || baseUrl == null) return null;
+      if (!mayHaveSoftSubs(torrent.videoFile != null ? torrent.videoFile.getName() : "")) {
+        return null;
+      }
+      return baseUrl + "/subs.vtt?source=" + torrent.infoHash;
+    }
+
+    String subtitleKind() {
+      return subtitleUrl() != null ? "embedded" : null;
     }
   }
 
@@ -597,6 +655,9 @@ public final class TorrentEngine {
     int lastPiece;
     int prepareCount;
     volatile long lastTouch = System.currentTimeMillis();
+    final AtomicBoolean subtitleExtractStarted = new AtomicBoolean(false);
+    final AtomicBoolean subtitleMissing = new AtomicBoolean(false);
+    volatile File subtitleVtt;
 
     ActiveTorrent(String infoHash, String name, TorrentHandle handle, int fileIndex, File videoFile, long length) {
       this.infoHash = infoHash;
@@ -610,6 +671,54 @@ public final class TorrentEngine {
 
     void touch() {
       lastTouch = System.currentTimeMillis();
+    }
+
+    void kickSubtitleExtract(String baseUrl) {
+      if (!mayHaveSoftSubs(videoFile != null ? videoFile.getName() : "")) return;
+      if (subtitleVtt != null && subtitleVtt.isFile() && subtitleVtt.length() > 16) return;
+      if (subtitleMissing.get()) return;
+      if (!subtitleExtractStarted.compareAndSet(false, true)) return;
+      final String rawUrl = baseUrl + "/stream/" + infoHash;
+      final File out = new File(videoFile.getParentFile(), "jiyu-subs-" + infoHash + ".vtt");
+      subtitleWorkers.execute(() -> {
+        try {
+          // Prefer a companion .srt/.ass once it lands (tiny; often ready early).
+          for (int i = 0; i < 20; i++) {
+            if (!active.containsKey(infoHash)) return;
+            File companion = TorrentSubtitleExtractor.findCompanionSubtitle(videoFile);
+            if (companion != null && companion.length() > 32) {
+              if (TorrentSubtitleExtractor.convertCompanionFile(companion, out)) {
+                subtitleVtt = out;
+                subtitleMissing.set(false);
+                return;
+              }
+            }
+            Thread.sleep(500);
+          }
+          // Let remux claim the opening pieces first, then probe embedded softsubs.
+          Thread.sleep(6_000);
+          if (!active.containsKey(infoHash)) return;
+          boolean ok = TorrentSubtitleExtractor.extractBestEnglish(appContext, rawUrl, out);
+          if (ok) {
+            subtitleVtt = out;
+            subtitleMissing.set(false);
+          } else {
+            subtitleMissing.set(true);
+          }
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          subtitleExtractStarted.set(false);
+        } catch (Throwable t) {
+          Log.w(TAG, "subtitle extract failed", t);
+          subtitleMissing.set(true);
+        }
+      });
+    }
+
+    File readySubtitleVtt() {
+      File f = subtitleVtt;
+      if (f != null && f.isFile() && f.length() > 16) return f;
+      return null;
     }
 
     boolean isPrepared() {

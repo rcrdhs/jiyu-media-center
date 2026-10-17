@@ -370,6 +370,10 @@ export async function resolveAtlanticPlay(
 /** True when the playable URL looks like Movy / zenoak Direct (stall → Atlantic). */
 export function isMovyStreamUrl(url: string | undefined): boolean {
   if (!url) return false
-  // Hosts rotate (zenoak → paleoak / sun.*); match the family, not one CDN name.
-  return /zenoak|paleoak|wecollege\.net|movy\.sx|\bmoon\.|\bsun\./i.test(url)
+  // Hosts rotate (zenoak → paleoak / sun.* / majorplay Auto + disguised chunks).
+  return (
+    /zenoak|paleoak|wecollege\.net|movy\.sx|majorplay\.net|\bmoon\.|\bsun\./i.test(url) ||
+    /[?&]type=m3u8\b/i.test(url) ||
+    /\/v\/[a-f0-9]{16,}\/style\/(?:chunk|image|page|vec)-/i.test(url)
+  )
 }

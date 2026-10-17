@@ -52,6 +52,8 @@ final class GeckoOverlayController {
   private final Map<Long, EvalCallback> pendingEval = new HashMap<>();
 
   private GeckoView view;
+  /** Black cover over Gecko until the first page paints (empty compositor is white). */
+  @Nullable private View loadCover;
   private GeckoSession session;
   private FrameLayout.LayoutParams layoutParams;
   private NavListener navListener;
@@ -61,6 +63,8 @@ final class GeckoOverlayController {
   private final Map<Long, String> pendingEvalBest = new HashMap<>();
   private final java.util.ArrayList<PendingEval> bridgeQueue = new java.util.ArrayList<>();
   private String currentUrl = "";
+  /** Last known player/embed URL — restore if an ad hijacks the top-level document. */
+  private String lastPlayerEmbedUrl = "";
   /** URL we already sent the start taps for. Buffering must not tap again. */
   private String playTapUrl = "";
   private String currentTitle = "";
@@ -68,6 +72,27 @@ final class GeckoOverlayController {
   private boolean canGoForward;
   private boolean loading;
   @Nullable private Runnable pageStopListener;
+  /** Active embed→media URL probe (Media3 path). */
+  @Nullable private MediaResolveProbe mediaProbe;
+
+  interface MediaResolveCallback {
+    void onResult(@Nullable String mediaUrl, @Nullable String pageUrl, @Nullable String error);
+  }
+
+  private static final class MediaResolveProbe {
+    final String pageUrl;
+    final long deadlineMs;
+    final MediaResolveCallback callback;
+    @Nullable String bestMediaUrl;
+    boolean finished;
+    int pollCount;
+
+    MediaResolveProbe(String pageUrl, long timeoutMs, MediaResolveCallback callback) {
+      this.pageUrl = pageUrl;
+      this.deadlineMs = System.currentTimeMillis() + Math.max(3000, timeoutMs);
+      this.callback = callback;
+    }
+  }
 
   private static final class PendingEval {
     final long id;
@@ -123,10 +148,6 @@ final class GeckoOverlayController {
 
   int getVisibility() {
     return view == null ? View.GONE : view.getVisibility();
-  }
-
-  void setVisibility(int visibility) {
-    if (view != null) view.setVisibility(visibility);
   }
 
   int getWidth() {
@@ -253,6 +274,10 @@ final class GeckoOverlayController {
   void setLayoutParams(FrameLayout.LayoutParams lp) {
     layoutParams = lp;
     if (view != null) view.setLayoutParams(lp);
+    if (loadCover != null) {
+      FrameLayout.LayoutParams coverLp = new FrameLayout.LayoutParams(lp);
+      loadCover.setLayoutParams(coverLp);
+    }
   }
 
   void ensureAttached(FrameLayout parent) {
@@ -273,8 +298,44 @@ final class GeckoOverlayController {
     view.setVisibility(View.GONE);
     parent.addView(view);
 
+    loadCover = new View(parent.getContext());
+    loadCover.setBackgroundColor(Color.BLACK);
+    loadCover.setLayoutParams(new FrameLayout.LayoutParams(layoutParams));
+    loadCover.setVisibility(View.GONE);
+    loadCover.setClickable(false);
+    parent.addView(loadCover);
+
     installBridge(session);
   }
+
+  void setVisibility(int visibility) {
+    if (view != null) view.setVisibility(visibility);
+    if (loadCover != null) {
+      // Cover only while loading and the surface is meant to be seen.
+      if (visibility == View.VISIBLE && loading) {
+        loadCover.setVisibility(View.VISIBLE);
+      } else if (visibility != View.VISIBLE) {
+        loadCover.setVisibility(View.GONE);
+      }
+    }
+  }
+
+  private void showLoadCover(boolean show) {
+    if (loadCover == null) return;
+    if (show) {
+      if (view != null && view.getVisibility() == View.VISIBLE) {
+        loadCover.setVisibility(View.VISIBLE);
+        // Safety: never leave the cover forever if onPageStop never fires.
+        main.removeCallbacks(hideLoadCoverRunnable);
+        main.postDelayed(hideLoadCoverRunnable, 12_000);
+      }
+    } else {
+      main.removeCallbacks(hideLoadCoverRunnable);
+      loadCover.setVisibility(View.GONE);
+    }
+  }
+
+  private final Runnable hideLoadCoverRunnable = () -> showLoadCover(false);
 
   /** Build delegates + open a new GeckoSession (view may already exist). */
   private void openFreshSession() {
@@ -333,6 +394,7 @@ final class GeckoOverlayController {
         @Override
         public void onPageStop(GeckoSession s, boolean success) {
           loading = false;
+          showLoadCover(false);
           emitNav();
           if (pageStopListener != null) {
             Runnable listener = pageStopListener;
@@ -354,11 +416,57 @@ final class GeckoOverlayController {
           GeckoSession s,
           GeckoSession.NavigationDelegate.LoadRequest request
         ) {
-          if (request != null && isStreamRefererOnlyUrl(request.uri)) {
-            android.util.Log.w("JiyuGecko", "denied stream-referer nav " + request.uri);
+          if (request == null) return GeckoResult.fromValue(AllowOrDeny.ALLOW);
+          String uri = request.uri;
+          noteMediaCandidate(uri);
+          // During Media3 unwrap, capture playlist navigations without leaving the embed.
+          if (mediaProbe != null && !mediaProbe.finished && isSniffableMediaUrl(uri)) {
+            return GeckoResult.fromValue(AllowOrDeny.DENY);
+          }
+          if (BrowserAdBlock.shouldBlockNavigation(uri)) {
+            android.util.Log.w("JiyuGecko", "denied ad/hijack nav " + safeUrl(uri));
+            restorePlayerEmbedIfNeeded("blocked-nav");
+            return GeckoResult.fromValue(AllowOrDeny.DENY);
+          }
+          // Top-level leave from a locked player/embed (sports) → adware landing pages.
+          boolean topLevel =
+            request.target == GeckoSession.NavigationDelegate.TARGET_WINDOW_CURRENT
+              || request.target == GeckoSession.NavigationDelegate.TARGET_WINDOW_NEW
+              || request.isDirectNavigation;
+          String lockedFrom =
+            BrowserAdBlock.isPlayerEmbedHost(currentUrl)
+              ? currentUrl
+              : lastPlayerEmbedUrl;
+          if (topLevel
+            && BrowserAdBlock.isPlayerEmbedHost(lockedFrom)
+            && !BrowserAdBlock.isAllowedPlayerNav(lockedFrom, uri)) {
+            android.util.Log.w("JiyuGecko", "denied embed hijack " + safeUrl(uri));
+            restorePlayerEmbedIfNeeded("embed-hijack");
             return GeckoResult.fromValue(AllowOrDeny.DENY);
           }
           return GeckoResult.fromValue(AllowOrDeny.ALLOW);
+        }
+
+        @Override
+        public GeckoResult<AllowOrDeny> onSubframeLoadRequest(
+          GeckoSession s,
+          GeckoSession.NavigationDelegate.LoadRequest request
+        ) {
+          if (request != null) {
+            noteMediaCandidate(request.uri);
+            if (BrowserAdBlock.shouldBlockNavigation(request.uri)) {
+            android.util.Log.w("JiyuGecko", "denied subframe ad " + safeUrl(request.uri));
+            return GeckoResult.fromValue(AllowOrDeny.DENY);
+            }
+          }
+          return GeckoResult.fromValue(AllowOrDeny.ALLOW);
+        }
+
+        @Override
+        public GeckoResult<GeckoSession> onNewSession(GeckoSession s, String uri) {
+          // Sports embeds open adware as window.open / tabup — never spawn a session.
+          android.util.Log.w("JiyuGecko", "denied popup session " + safeUrl(uri));
+          return GeckoResult.fromValue(null);
         }
 
         @Override
@@ -369,7 +477,15 @@ final class GeckoOverlayController {
           Boolean hasUserGesture
         ) {
           if (url != null && !url.isEmpty()) {
+            if (BrowserAdBlock.shouldBlockNavigation(url)) {
+              android.util.Log.w("JiyuGecko", "restore after location hijack " + safeUrl(url));
+              restorePlayerEmbedIfNeeded("location");
+              return;
+            }
             currentUrl = url;
+            if (BrowserAdBlock.isPlayerEmbedHost(url)) {
+              lastPlayerEmbedUrl = url;
+            }
             emitNav();
           }
         }
@@ -1041,44 +1157,263 @@ final class GeckoOverlayController {
   }
 
   void loadUrl(String url) {
-    loadUrl(url, false);
+    loadUrl(url, shouldStripDocumentReferer(url));
+  }
+
+  /**
+   * Load an embed page and sniff the first playable media URL for Media3.
+   * Keeps the SurfaceView tiny/invisible-ish; caller should hide afterward.
+   */
+  void resolveMediaFromEmbed(String pageUrl, long timeoutMs, MediaResolveCallback callback) {
+    if (pageUrl == null || pageUrl.isEmpty()) {
+      if (callback != null) callback.onResult(null, null, "Missing url");
+      return;
+    }
+    cancelMediaProbe("superseded");
+    mediaProbe = new MediaResolveProbe(pageUrl, timeoutMs, callback);
+    loadUrl(pageUrl, shouldStripDocumentReferer(pageUrl));
+    scheduleMediaProbePoll(0);
+  }
+
+  /** embed.st / embedhd.st return a black stub player when any Referer is sent. */
+  static boolean shouldStripDocumentReferer(String url) {
+    String host = hostOf(url);
+    if (host.isEmpty()) return false;
+    return host.equals("embed.st")
+      || host.endsWith(".embed.st")
+      || host.equals("embedhd.st")
+      || host.endsWith(".embedhd.st");
+  }
+
+  void cancelMediaProbe(@Nullable String reason) {
+    MediaResolveProbe probe = mediaProbe;
+    if (probe == null || probe.finished) {
+      mediaProbe = null;
+      return;
+    }
+    probe.finished = true;
+    mediaProbe = null;
+    // "superseded" = quiet replace for a new probe.
+    if (probe.callback != null && reason != null && !"superseded".equals(reason)) {
+      main.post(() -> probe.callback.onResult(null, probe.pageUrl, reason));
+    }
+  }
+
+  private void noteMediaCandidate(@Nullable String uri) {
+    MediaResolveProbe probe = mediaProbe;
+    if (probe == null || probe.finished || uri == null || uri.isEmpty()) return;
+    if (!isSniffableMediaUrl(uri)) return;
+    if (BrowserAdBlock.isAdHijackUrl(uri) || BrowserAdBlock.shouldBlockNavigation(uri)) return;
+    // Prefer playlists over single segments.
+    int score = mediaUrlScore(uri);
+    int prev = probe.bestMediaUrl == null ? -1 : mediaUrlScore(probe.bestMediaUrl);
+    if (score >= prev) {
+      probe.bestMediaUrl = uri;
+      android.util.Log.i("JiyuGecko", "media candidate score=" + score + " " + safeUrl(uri));
+      if (score >= 50) finishMediaProbe(probe, uri);
+    }
+  }
+
+  private void scheduleMediaProbePoll(int attempt) {
+    MediaResolveProbe probe = mediaProbe;
+    if (probe == null || probe.finished) return;
+    if (System.currentTimeMillis() > probe.deadlineMs) {
+      if (probe.bestMediaUrl != null) finishMediaProbe(probe, probe.bestMediaUrl);
+      else {
+        probe.finished = true;
+        mediaProbe = null;
+        MediaResolveCallback cb = probe.callback;
+        main.post(() -> {
+          if (cb != null) cb.onResult(null, probe.pageUrl, "No media URL found");
+        });
+      }
+      return;
+    }
+    // Ask the page for <video> src / HLS hints + install fetch/XHR hooks once.
+    evaluateJavascript(
+      "(() => {try{"
+        + "if(!window.__jiyuMediaHook){"
+        + "window.__jiyuMediaHook=1;window.__jiyuMediaHits=[];"
+        + "const push=u=>{try{const s=String(u||'');"
+        + "if(/m3u8|\\.mpd|format=m3u8|\\/hls\\/|\\.m4s|mime=video/i.test(s))"
+        + "window.__jiyuMediaHits.push(s);}catch(e){}};"
+        + "const of=window.fetch;if(typeof of==='function'){"
+        + "window.fetch=function(i,n){try{push(i&&i.url?i.url:i);}catch(e){}"
+        + "return of.apply(this,arguments);};}"
+        + "const xo=XMLHttpRequest.prototype.open;"
+        + "XMLHttpRequest.prototype.open=function(m,u){try{push(u);}catch(e){}"
+        + "return xo.apply(this,arguments);};"
+        + "}"
+        + "const urls=[...(window.__jiyuMediaHits||[])];"
+        + "window.__jiyuMediaHits=[];"
+        + "document.querySelectorAll('video').forEach(v=>{"
+        + "if(v.currentSrc)urls.push(v.currentSrc);if(v.src)urls.push(v.src);"
+        + "v.querySelectorAll('source').forEach(s=>{if(s.src)urls.push(s.src);});"
+        + "});"
+        + "return urls.filter(Boolean).slice(0,16).join('\\n');"
+        + "}catch(e){return '';}})()",
+      (json) -> {
+        MediaResolveProbe p = mediaProbe;
+        if (p == null || p.finished) return;
+        String raw = json == null ? "" : String.valueOf(json);
+        if (raw.startsWith("\"") && raw.endsWith("\"")) {
+          raw = raw.substring(1, raw.length() - 1).replace("\\n", "\n").replace("\\\"", "\"");
+        }
+        for (String line : raw.split("\n")) {
+          String u = line.trim();
+          if (u.startsWith("iframe:")) continue;
+          noteMediaCandidate(u);
+        }
+        p.pollCount += 1;
+        // Nudge play so Clappr starts fetching segments.
+        if (p.pollCount == 2 || p.pollCount == 5) {
+          evaluateJavascript(
+            "(() => {try{document.querySelectorAll('video').forEach(v=>{try{v.muted=true;v.play();}catch(e){}});"
+              + "return 'kick';}catch(e){return 'x';}})()",
+            null
+          );
+        }
+        main.postDelayed(() -> scheduleMediaProbePoll(attempt + 1), 700);
+      }
+    );
+  }
+
+  private void finishMediaProbe(MediaResolveProbe probe, String mediaUrl) {
+    if (probe.finished) return;
+    probe.finished = true;
+    if (mediaProbe == probe) mediaProbe = null;
+    MediaResolveCallback cb = probe.callback;
+    main.post(() -> {
+      if (cb != null) cb.onResult(mediaUrl, probe.pageUrl, null);
+    });
+  }
+
+  static boolean isSniffableMediaUrl(String url) {
+    if (url == null || url.isEmpty()) return false;
+    if (!url.startsWith("http://") && !url.startsWith("https://")) return false;
+    String u = url.toLowerCase();
+    if (u.contains(".m3u8") || u.contains("format=m3u8") || u.contains("/hls/")) return true;
+    if (u.contains(".mpd") || u.contains("dash")) return true;
+    if (u.contains(".m4s") || u.contains("fragmented") || u.contains("cmaf")) return true;
+    if (u.matches("(?i).*\\.(ts|mp4|m4v)(\\?|#|$).*")) return true;
+    if (u.contains("mime=video") || u.contains("contenttype=video")) return true;
+    return false;
+  }
+
+  static int mediaUrlScore(String url) {
+    String u = url.toLowerCase();
+    if (u.contains(".m3u8") || u.contains("format=m3u8")) return 80;
+    if (u.contains(".mpd")) return 75;
+    if (u.contains(".mp4") && !u.contains(".m4s")) return 60;
+    if (u.contains(".m4s")) return 40;
+    if (u.endsWith(".ts") || u.contains(".ts?")) return 20;
+    return 30;
   }
 
   /** Movy / Atlantic origins are HLS Referers only — never open as documents. */
   private static boolean isStreamRefererOnlyUrl(String url) {
-    if (url == null || url.isEmpty()) return false;
-    try {
-      String host = new java.net.URI(url).getHost();
-      if (host == null) return false;
-      host = host.replaceFirst("^www\\.", "").toLowerCase();
-      if (host.equals("atlantic.st") || host.endsWith(".atlantic.st")) return true;
-      if (host.equals("movy.sx") || host.endsWith(".movy.sx")) return true;
-      return false;
-    } catch (Throwable t) {
-      return false;
-    }
+    return BrowserAdBlock.isStreamRefererOnlyUrl(url);
+  }
+
+  private static String safeUrl(String url) {
+    if (url == null) return "";
+    return url.length() > 160 ? url.substring(0, 160) : url;
+  }
+
+  private void restorePlayerEmbedIfNeeded(String reason) {
+    if (lastPlayerEmbedUrl == null || lastPlayerEmbedUrl.isEmpty()) return;
+    if (lastPlayerEmbedUrl.equals(currentUrl)) return;
+    android.util.Log.i("JiyuGecko", "restoring embed after " + reason + " → " + safeUrl(lastPlayerEmbedUrl));
+    main.post(() -> loadUrl(lastPlayerEmbedUrl, shouldStripDocumentReferer(lastPlayerEmbedUrl)));
   }
 
   void loadUrl(String url, boolean stripReferer) {
     if (session == null || url == null || url.isEmpty()) return;
-    if (isStreamRefererOnlyUrl(url)) {
-      android.util.Log.w("JiyuGecko", "blocked stream-referer page " + url);
+    if (isStreamRefererOnlyUrl(url) || BrowserAdBlock.shouldBlockNavigation(url)) {
+      android.util.Log.w("JiyuGecko", "blocked stream-referer/ad page " + safeUrl(url));
       return;
     }
+    try {
+      session.setActive(true);
+    } catch (Throwable ignored) {}
     loading = true;
     currentUrl = url;
+    if (BrowserAdBlock.isPlayerEmbedHost(url)) {
+      lastPlayerEmbedUrl = url;
+    }
     emitNav();
+    // Empty Gecko compositor is white — keep a black cover until first paint.
+    showLoadCover(true);
     try {
       GeckoSession.Loader loader = new GeckoSession.Loader().uri(url);
+      Map<String, String> headers = new HashMap<>();
+      headers.put("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+      headers.put("Accept-Language", "en-US,en;q=0.9");
       if (stripReferer) {
-        Map<String, String> headers = new HashMap<>();
-        headers.put("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
-        headers.put("Accept-Language", "en-US,en;q=0.9");
-        loader.additionalHeaders(headers);
+        // embed.st / embedhd.st: any Referer yields a black stub (~1KB) player.
+        // Explicit empty overrides Gecko's automatic previous-page Referer.
+        headers.put("Referer", "");
+      } else {
+        String referer = documentRefererForUrl(url);
+        if (referer != null && !referer.isEmpty()) {
+          headers.put("Referer", referer);
+        }
       }
+      loader.additionalHeaders(headers);
       session.load(loader);
     } catch (Throwable t) {
-      session.loadUri(url);
+      try {
+        session.loadUri(url);
+      } catch (Throwable ignored) {}
+    }
+  }
+
+  /**
+   * Document Referer for embeds that 404/blank without a site identity
+   * (mirrors electron/main.cjs httpReferrerForBrowserUrl).
+   */
+  @Nullable
+  static String documentRefererForUrl(String url) {
+    String host = hostOf(url);
+    if (host.isEmpty()) return null;
+    if (host.equals("playmate.to") || host.endsWith(".playmate.to")) {
+      return "https://fullmatchshows.com/";
+    }
+    if (host.equals("playmogo.com") || host.endsWith(".playmogo.com")) {
+      return "https://fullmatchshows.com/";
+    }
+    if (host.equals("fullmatchshows.com") || host.endsWith(".fullmatchshows.com")) {
+      return "https://fullmatchshows.com/";
+    }
+    if (host.equals("soccerfull.net") || host.endsWith(".soccerfull.net")) {
+      return "https://livextv.hybrows.workers.dev/";
+    }
+    if (host.contains("livextv")) {
+      return "https://livextv.hybrows.workers.dev/";
+    }
+    if (host.equals("fstream365.com") || host.endsWith(".fstream365.com")) {
+      return "https://ww.ymovies.vip/";
+    }
+    if (host.equals("vsembed.ru") || host.endsWith(".vsembed.ru")) {
+      return "https://freemovies.lol/";
+    }
+    if (host.equals("embedindia.st") || host.endsWith(".embedindia.st")) {
+      return "https://ppv.st/";
+    }
+    if (host.equals("rivestream.ru") || host.endsWith(".rivestream.ru")) {
+      return "https://rivestream.ru/";
+    }
+    return null;
+  }
+
+  private static String hostOf(String url) {
+    if (url == null || url.isEmpty()) return "";
+    try {
+      String host = new java.net.URI(url).getHost();
+      if (host == null) return "";
+      return host.replaceFirst("^www\\.", "").toLowerCase();
+    } catch (Throwable t) {
+      return "";
     }
   }
 
@@ -1140,10 +1475,29 @@ final class GeckoOverlayController {
   }
 
   void blank() {
-    // about:blank is white. A black document matches the player stage if a load is still settling.
-    loadUrl("data:text/html,<html><body style='background:%23000'></body></html>");
+    // about:blank is white. Prefer a real black document via byte data —
+    // the data:text/html,string form can paint white empty pages in GeckoView
+    // (same bug we fixed for multiview loadHtml).
     currentUrl = "";
+    lastPlayerEmbedUrl = "";
     currentTitle = "";
+    if (session == null) return;
+    loading = true;
+    emitNav();
+    try {
+      String html = "<html><body style=\"background:#000;margin:0\"></body></html>";
+      session.load(
+        new GeckoSession.Loader()
+          .data(html.getBytes(java.nio.charset.StandardCharsets.UTF_8), "text/html")
+      );
+    } catch (Throwable t) {
+      try {
+        session.loadUri(
+          "data:text/html;charset=utf-8,"
+            + android.net.Uri.encode("<html><body style='background:#000'></body></html>")
+        );
+      } catch (Throwable ignored) {}
+    }
   }
 
   /**
@@ -1219,6 +1573,7 @@ final class GeckoOverlayController {
     session = null;
     bridgePorts.clear();
     currentUrl = "";
+    lastPlayerEmbedUrl = "";
     currentTitle = "";
     canGoBack = false;
     canGoForward = false;
@@ -1249,6 +1604,13 @@ final class GeckoOverlayController {
     } catch (Throwable ignored) {}
     session = null;
     bridgePorts.clear();
+    if (loadCover != null) {
+      try {
+        ViewGroup parent = (ViewGroup) loadCover.getParent();
+        if (parent != null) parent.removeView(loadCover);
+      } catch (Throwable ignored) {}
+      loadCover = null;
+    }
     if (view != null) {
       try {
         ViewGroup parent = (ViewGroup) view.getParent();

@@ -1,7 +1,10 @@
 import type { StreamItem } from '../types'
 import { isFootballSportsItem } from './sportsLeagues'
 import { LIVEXTV_REPLAY_MAX_AGE_MS } from './livextvReplays'
-import { isSportsReplayCatalogItem } from './fullmatchShows'
+import {
+  isFullmatchShowsCatalogItem,
+  isSportsReplayCatalogItem,
+} from './fullmatchShows'
 
 export type FavoriteSport = 'football' | 'basketball' | 'cricket' | 'american-football'
 
@@ -227,6 +230,8 @@ export function favoriteTeamMatches(
     if (!active.some((team) => itemMatchesFavorite(item, team))) continue
 
     if (isFavoriteReplay(item)) {
+      // LiveXTV-only on Your teams / Replay — skip FullMatchShows duplicates.
+      if (isFullmatchShowsCatalogItem(item)) continue
       // Same expiry as Sports → Replay shelf (~3 days). Older VODs leave Your teams.
       if (replayAgeMs(item, now) > REPLAY_WINDOW_MS) continue
       seen.add(item.id)

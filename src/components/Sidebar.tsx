@@ -22,6 +22,7 @@ import {
 } from '../lib/androidUpdate'
 import { pushOverlayDismiss } from '../lib/overlayDismiss'
 import { CatalogSyncBar } from './CatalogSyncBar'
+import { openFeatureGuide } from './WelcomeTour'
 
 const isAndroidShell =
   typeof window !== 'undefined' &&
@@ -367,9 +368,11 @@ export function Sidebar() {
 
   const multiLabel = awaitingAdd
     ? 'Multi-view…'
-    : slots.length > 1
+    : mode === 'multi' && slots.length >= 1
       ? `Multi-view (${slots.length})`
-      : 'Multi-view'
+      : slots.length > 1
+        ? `Multi-view (${slots.length})`
+        : 'Multi-view'
 
   const sectionsCurrentLabel = useMemo(() => {
     if (location.pathname === '/' || location.pathname === '') return 'Home'
@@ -441,6 +444,16 @@ export function Sidebar() {
       {isAndroidShell ? (
         <div className="side-nav-group">
           <p className="side-nav-label">App</p>
+          <button
+            type="button"
+            className="nav-link"
+            onClick={() => {
+              setSectionsMenuOpen(false)
+              openFeatureGuide()
+            }}
+          >
+            How Jiyu works
+          </button>
           {updater.status !== 'idle' && updaterLabel ? (
             <p className="android-update-status">{updaterLabel}</p>
           ) : null}
@@ -479,7 +492,8 @@ export function Sidebar() {
       <div className="sidebar-glow" aria-hidden />
 
       <div className="sidebar-chrome">
-        <div className="brand-wrap" ref={brandRef}>
+        <div className="brand-row">
+          <div className="brand-wrap" ref={brandRef}>
           <button
             type="button"
             className="brand brand-btn"
@@ -532,6 +546,17 @@ export function Sidebar() {
                 <strong>{APP_VERSION_LABEL}</strong>
                 {updaterLabel ? <p className="brand-menu-updater">{updaterLabel}</p> : null}
               </div>
+              <button
+                type="button"
+                className="brand-menu-item"
+                role="menuitem"
+                onClick={() => {
+                  setBrandMenuOpen(false)
+                  openFeatureGuide()
+                }}
+              >
+                How Jiyu works
+              </button>
               {updater.status === 'available' ? (
                 <button
                   type="button"
@@ -605,6 +630,20 @@ export function Sidebar() {
               </div>
             </div>
           )}
+          </div>
+          <button
+            type="button"
+            className="feature-guide-btn brand-help-btn"
+            title="How Jiyu works"
+            aria-label="How Jiyu works"
+            onClick={() => {
+              setSectionsMenuOpen(false)
+              setBrandMenuOpen(false)
+              openFeatureGuide()
+            }}
+          >
+            ?
+          </button>
         </div>
 
         {isAndroidShell ? (

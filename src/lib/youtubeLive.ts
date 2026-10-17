@@ -65,10 +65,24 @@ export function extractYouTubeVideoId(html: string): string | null {
   return null
 }
 
+/** IFrame API rejects unmute commands when origin doesn't match the real page. */
+function youtubeEmbedOrigin(): string {
+  if (typeof window !== 'undefined') {
+    try {
+      const origin = window.location.origin
+      if (origin && origin !== 'null' && /^https?:\/\//i.test(origin)) return origin
+    } catch {
+      /* ignore */
+    }
+  }
+  return 'https://jiyu.app'
+}
+
 function playUrlsForVideoId(videoId: string): Omit<
   Extract<YouTubeLivePlayResult, { ok: true }>,
   'ok'
 > {
+  const origin = encodeURIComponent(youtubeEmbedOrigin())
   const qs =
     'autoplay=1&mute=1&controls=0&rel=0&modestbranding=1&playsinline=1&enablejsapi=1'
   return {
@@ -76,9 +90,9 @@ function playUrlsForVideoId(videoId: string): Omit<
     watchUrl: `https://www.youtube.com/watch?v=${videoId}&autoplay=1`,
     // Full Watch prefers watchUrl in WebContentsView; embed is for iframes.
     // origin= helps some embed configs; Referer is still required (Error 153).
-    embedUrl: `https://www.youtube.com/embed/${videoId}?autoplay=1&rel=0&modestbranding=1&playsinline=1&origin=${encodeURIComponent('https://jiyu.app')}`,
+    embedUrl: `https://www.youtube.com/embed/${videoId}?autoplay=1&rel=0&modestbranding=1&playsinline=1&origin=${origin}`,
     // Card preview: nocookie + muted autoplay (allowed after frame-src CSP).
-    previewUrl: `https://www.youtube-nocookie.com/embed/${videoId}?${qs}&origin=${encodeURIComponent('https://jiyu.app')}`,
+    previewUrl: `https://www.youtube-nocookie.com/embed/${videoId}?${qs}&origin=${origin}`,
     posterUrl: `https://i.ytimg.com/vi/${videoId}/hqdefault_live.jpg`,
   }
 }
@@ -206,11 +220,24 @@ export async function isYouTubeLiveNow(liveUrl: string): Promise<boolean> {
   return resolved.ok
 }
 
+const resolveCache = new Map<string, { at: number; result: YouTubeLivePlayResult }>()
+const RESOLVE_CACHE_TTL_MS = 90_000
+
 /**
  * Resolve a channel `/live` URL into a playable watch/embed when on-air.
  * Prefers Innertube (ANDROID) so HTML bot-walls don't false-offline local channels.
+ * Short TTL cache so Home card preview + Watch click share one resolve.
  */
 export async function resolveYouTubeLivePlay(liveUrl: string): Promise<YouTubeLivePlayResult> {
+  const key = String(liveUrl || '').trim()
+  const hit = key ? resolveCache.get(key) : undefined
+  if (hit && Date.now() - hit.at < RESOLVE_CACHE_TTL_MS) return hit.result
+
+  const store = (result: YouTubeLivePlayResult) => {
+    if (key) resolveCache.set(key, { at: Date.now(), result })
+    return result
+  }
+
   try {
     // 1) Innertube resolve_url → videoId → player isLive (most reliable).
     const innertubeId = await resolveLiveVideoIdViaInnertube(liveUrl)
@@ -218,37 +245,37 @@ export async function resolveYouTubeLivePlay(liveUrl: string): Promise<YouTubeLi
       const state = await playerSaysLive(innertubeId)
       if (state === 'live' || state === 'unknown') {
         // unknown: still open the resolved /live video — better than false offline.
-        return { ok: true, ...playUrlsForVideoId(innertubeId) }
+        return store({ ok: true, ...playUrlsForVideoId(innertubeId) })
       }
       if (state === 'offline') {
-        return { ok: false, error: 'This channel is not live on YouTube right now' }
+        return store({ ok: false, error: 'This channel is not live on YouTube right now' })
       }
     }
 
     // 2) HTML fallback when Innertube is unavailable.
     const html = await fetchPageHtml(liveUrl)
     if (looksLikeBotWall(html)) {
-      return {
+      return store({
         ok: false,
         error: 'YouTube blocked the live check — open Watch once, then try again',
-      }
+      })
     }
     if (looksOffline(html)) {
-      return { ok: false, error: 'This channel is not live on YouTube right now' }
+      return store({ ok: false, error: 'This channel is not live on YouTube right now' })
     }
     if (looksLive(html)) {
       const videoId = extractYouTubeVideoId(html)
-      if (videoId) return { ok: true, ...playUrlsForVideoId(videoId) }
-      return {
+      if (videoId) return store({ ok: true, ...playUrlsForVideoId(videoId) })
+      return store({
         ok: true,
         videoId: '',
         watchUrl: liveUrl,
         embedUrl: liveUrl,
         previewUrl: liveUrl,
-      }
+      })
     }
 
-    return { ok: false, error: 'This channel is not live on YouTube right now' }
+    return store({ ok: false, error: 'This channel is not live on YouTube right now' })
   } catch (err) {
     return {
       ok: false,

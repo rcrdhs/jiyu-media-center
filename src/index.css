@@ -40,6 +40,24 @@ body,
   height: 100%;
 }
 
+/* Phones: prefer dynamic viewport min-height (keep body scrollable on shelves). */
+html.is-android,
+html.is-android body,
+html.is-android #root {
+  min-height: 100dvh;
+}
+
+/* While the player owns the screen, lock the document to the live viewport so
+   rotate out of landscape immersive can't leave a short stale layout height. */
+html.is-android.android-player-fs,
+html.is-android.android-player-fs body,
+html.is-android.android-player-fs #root {
+  height: 100dvh;
+  max-height: 100dvh;
+  overflow: hidden;
+  background: #000;
+}
+
 body {
   background:
     radial-gradient(1200px 700px at 85% -10%, rgba(240, 180, 41, 0.12), transparent 55%),
@@ -205,6 +223,22 @@ code {
   gap: 0.8rem;
   align-items: center;
   padding: 0.55rem 0.65rem;
+}
+
+.brand-row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.brand-row .brand-wrap {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.brand-help-btn {
+  flex: 0 0 auto;
+  align-self: center;
 }
 
 .brand-wrap {
@@ -570,6 +604,9 @@ code {
 .hero-frame .growth-hit {
   font-style: normal;
   font-size: 0.95rem;
+  /* Buttons center by default; keep this on the same left edge as Total titles. */
+  align-self: stretch;
+  text-align: left;
 }
 
 .new-titles-backdrop {
@@ -1016,6 +1053,17 @@ html.is-android .new-titles-head h2 {
   color: var(--text);
 }
 
+.hero-aside {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-self: end;
+  align-self: start;
+  width: 100%;
+  max-width: 14rem;
+  gap: 0.45rem;
+}
+
 .hero-panel {
   position: relative;
   width: 100%;
@@ -1027,8 +1075,17 @@ html.is-android .new-titles-head h2 {
   background:
     linear-gradient(160deg, rgba(255, 255, 255, 0.04), transparent 40%),
     url('https://images.unsplash.com/photo-1489599849927-2ee91cede3dd?w=1200&q=80') center/cover;
-  justify-self: end;
-  align-self: start;
+}
+
+.hero-saved-hit {
+  align-self: flex-start;
+  text-align: left;
+  width: auto;
+  max-width: 100%;
+  margin: 0;
+  padding: 0 0 0 1.15rem;
+  font-style: normal;
+  font-size: 0.95rem;
 }
 
 .hero-glow {
@@ -1105,6 +1162,18 @@ html.is-android .new-titles-head h2 {
   background: rgba(240, 180, 41, 0.06);
 }
 
+.favorite-teams-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.favorite-teams-head-copy {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
 .favorite-teams .section-head h2 {
   margin: 0 0 0.25rem;
   font-size: 1.15rem;
@@ -1114,6 +1183,29 @@ html.is-android .new-titles-head h2 {
   margin: 0;
   color: var(--muted);
   font-size: 0.85rem;
+}
+
+.feature-guide-btn {
+  flex: 0 0 auto;
+  width: 2rem;
+  height: 2rem;
+  margin: 0;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid rgba(240, 180, 41, 0.45);
+  background: rgba(240, 180, 41, 0.12);
+  color: #f0b429;
+  font: inherit;
+  font-size: 1.05rem;
+  font-weight: 800;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.feature-guide-btn:hover,
+.feature-guide-btn:focus-visible {
+  background: rgba(240, 180, 41, 0.22);
+  outline: none;
 }
 
 .favorite-teams-form {
@@ -1195,18 +1287,24 @@ html.is-android .new-titles-head h2 {
   background: rgba(240, 180, 41, 0.05);
 }
 
-/* Shrink to the cards on hand — don't leave empty auto-fill columns. */
+/* Exactly two match cards visible; swipe horizontally for the rest. */
 .favorite-matches .catalog-grid {
   display: grid;
+  grid-template-columns: none;
   grid-auto-flow: column;
-  grid-auto-columns: minmax(11.5rem, 14rem);
+  grid-auto-columns: calc((100% - 0.85rem) / 2);
+  gap: 0.85rem;
   justify-content: start;
   overflow-x: auto;
+  overflow-y: hidden;
   padding-bottom: 0.45rem;
-  scroll-snap-type: x proximity;
+  scroll-snap-type: x mandatory;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
 }
 
 .favorite-matches .catalog-grid > * {
+  min-width: 0;
   scroll-snap-align: start;
 }
 
@@ -1346,6 +1444,20 @@ html.is-android .new-titles-head h2 {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+.recommended-not-interested {
+  margin-top: 0.25rem;
+  padding: 0.15rem 0.35rem;
+  font-size: 0.68rem;
+  line-height: 1.2;
+  color: var(--muted);
+  opacity: 0.85;
+}
+
+.recommended-not-interested:hover {
+  opacity: 1;
+  color: var(--text);
 }
 
 .continue-card-wrap {
@@ -1646,6 +1758,118 @@ html.is-android .new-titles-head h2 {
   flex: 1 1 16rem;
 }
 
+.hide-keywords-library {
+  margin-top: 1.25rem;
+}
+
+.hide-keywords-library-grid {
+  display: grid;
+  gap: 1rem;
+  margin-top: 0.75rem;
+}
+
+.hide-keywords-library-block {
+  padding: 0.75rem 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(16, 20, 26, 0.45);
+}
+
+.hide-keywords-library-heading {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 650;
+  color: var(--text);
+}
+
+.hide-keywords-library .field-hint,
+.hide-keywords-section-body .field-hint {
+  margin-top: 0.25rem;
+  opacity: 0.75;
+}
+
+.hide-keywords-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.35rem;
+}
+
+.hide-keywords-form .url-input {
+  flex: 1 1 12rem;
+}
+
+.hide-keywords-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  list-style: none;
+  margin: 0.65rem 0 0;
+  padding: 0;
+}
+
+.hide-keywords-chip {
+  font-size: 0.82rem;
+  padding: 0.25rem 0.55rem;
+}
+
+.hide-keywords-empty,
+.hide-keywords-note {
+  margin-top: 0.45rem;
+  opacity: 0.7;
+}
+
+.hide-keywords-note {
+  opacity: 0.85;
+}
+
+.hide-keywords-section {
+  margin: 0.35rem 0 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(16, 20, 26, 0.55);
+  overflow: hidden;
+}
+
+.hide-keywords-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  width: 100%;
+  margin: 0;
+  padding: 0.7rem 0.9rem;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.92rem;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.hide-keywords-toggle:hover,
+.hide-keywords-toggle:focus-visible {
+  background: rgba(255, 255, 255, 0.04);
+  outline: none;
+}
+
+.hide-keywords-count {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.hide-keywords-chevron {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.hide-keywords-section-body {
+  padding: 0 0.9rem 0.85rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
 .check-toggle {
   display: inline-flex;
   align-items: center;
@@ -1717,6 +1941,12 @@ html.is-android .new-titles-head h2 {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(175px, 1fr));
   gap: 0.85rem;
+}
+
+/* Sports match cards need more width — logos + title read better larger. */
+.catalog-grid:has(.media-card.is-sports) {
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 1rem;
 }
 
 .media-card {
@@ -1921,6 +2151,43 @@ html.is-android .new-titles-head h2 {
   gap: 0.35rem;
 }
 
+.card-heart-btn {
+  flex: 0 0 auto;
+  min-width: 2.1rem;
+  padding: 0.28rem 0.45rem;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.35);
+  color: var(--muted);
+  font: inherit;
+  font-size: 1.05rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.card-heart-btn:hover {
+  color: #f0b429;
+  border-color: rgba(240, 180, 41, 0.4);
+}
+
+.card-heart-btn.is-saved {
+  color: #f0b429;
+  border-color: rgba(240, 180, 41, 0.55);
+  background: rgba(240, 180, 41, 0.12);
+}
+
+.show-page-quick-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.65rem;
+}
+
+.show-save-btn.is-saved {
+  color: #f0b429;
+  border-color: rgba(240, 180, 41, 0.45);
+}
+
 .card-check-btn.is-queued {
   color: var(--accent);
   border-color: rgba(240, 180, 41, 0.55);
@@ -1987,16 +2254,17 @@ html.is-android .new-titles-head h2 {
 }
 
 .media-card.is-sports .media-card-body h3 {
-  -webkit-line-clamp: 4;
+  -webkit-line-clamp: 2;
   min-height: 0;
-  font-size: 0.92rem;
-  line-height: 1.32;
+  font-size: 1.02rem;
+  line-height: 1.28;
   overflow-wrap: anywhere;
   word-break: break-word;
 }
 
 .media-card.is-sports .media-card-art {
   background: #0a0c10;
+  aspect-ratio: 16 / 9;
 }
 
 .media-card.is-sports .media-card-art img {
@@ -2004,18 +2272,81 @@ html.is-android .new-titles-head h2 {
   object-position: center;
 }
 
+.media-card-art.has-sports-vs {
+  background:
+    linear-gradient(135deg, #1a2332 0%, #121820 50%, #0d3b2e 100%);
+}
+
+.sports-vs-art {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.65rem 0.55rem;
+}
+
+.sports-vs-side {
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  min-width: 0;
+  padding: 0.45rem 0.3rem;
+  align-self: stretch;
+}
+
+.sports-vs-side.is-home {
+  background: rgba(30, 58, 95, 0.45);
+}
+
+.sports-vs-side.is-away {
+  background: rgba(26, 77, 58, 0.45);
+}
+
+.sports-vs-logo {
+  width: 3.5rem;
+  height: 3.5rem;
+  object-fit: contain;
+  background: rgba(243, 246, 251, 0.92);
+  border-radius: 999px;
+  padding: 0.32rem;
+  box-sizing: border-box;
+}
+
+.sports-vs-logo.is-empty {
+  display: block;
+  background: rgba(243, 246, 251, 0.12);
+  border: 1px dashed rgba(232, 238, 248, 0.28);
+}
+
+.sports-vs-pill {
+  z-index: 1;
+  width: 2.1rem;
+  height: 2.1rem;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  background: #0b1220;
+  border: 1.5px solid #e8eef8;
+  color: #e8eef8;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
 .media-card.is-sports .media-card-body {
-  padding: 0.7rem 0.75rem 0.85rem;
-  gap: 0.28rem;
+  padding: 0.8rem 0.85rem 0.95rem;
+  gap: 0.35rem;
 }
 
 .media-card-body .media-card-match-detail {
   margin: 0;
   color: var(--muted);
-  font-size: 0.78rem;
+  font-size: 0.8rem;
   line-height: 1.35;
   display: -webkit-box;
-  -webkit-line-clamp: 3;
+  -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
   max-height: none;
@@ -2664,6 +2995,31 @@ select.url-input {
   cursor: default;
 }
 
+/* Compact scrubber over the PiP stage — shell is pointer-events:none. */
+.player-shell-pip .player-pip-seek {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  margin: 0;
+  padding: 0.65rem 0.5rem 0.45rem;
+  background: linear-gradient(
+    to top,
+    rgba(8, 10, 13, 0.88) 0%,
+    rgba(8, 10, 13, 0.45) 65%,
+    transparent 100%
+  );
+  pointer-events: auto !important;
+  touch-action: none;
+}
+
+.player-shell-pip .player-pip-seek input[type='range'] {
+  pointer-events: auto !important;
+}
+
 .multi-view {
   z-index: 40;
   background: #000;
@@ -3171,6 +3527,14 @@ html.is-android .multi-view-full.is-fullscreen {
   background: #0a0a0a;
 }
 
+.local-channel-live-hit {
+  position: absolute;
+  inset: 0;
+  display: block;
+  color: inherit;
+  text-decoration: none;
+}
+
 .local-channel-live-poster,
 .local-channel-live-video {
   position: absolute;
@@ -3218,6 +3582,38 @@ html.is-android .multi-view-full.is-fullscreen {
 
 .local-channel-live-badge.is-connecting {
   background: rgba(202, 138, 4, 0.92);
+}
+
+.local-channel-audio-btn {
+  position: absolute;
+  right: 0.45rem;
+  bottom: 0.45rem;
+  z-index: 2;
+  width: 2.1rem;
+  height: 2.1rem;
+  border: 0;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  background: rgba(20, 24, 32, 0.72);
+  backdrop-filter: blur(6px);
+  cursor: pointer;
+  padding: 0;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+}
+
+.local-channel-audio-btn:hover {
+  background: rgba(20, 24, 32, 0.9);
+}
+
+.local-channel-audio-btn:focus-visible {
+  outline: 2px solid var(--accent, #f0b429);
+  outline-offset: 2px;
+}
+
+.local-channel-audio-btn.is-muted {
+  color: rgba(255, 255, 255, 0.92);
 }
 
 .local-channel-live-meta {
@@ -3310,6 +3706,11 @@ html.is-android .multi-view-full.is-fullscreen {
   padding-bottom: 1.25rem;
 }
 
+.native-stream-page .native-stream-stage {
+  min-height: 42vh;
+  background: #000;
+}
+
 .web-browser-page.is-watching {
   gap: 0.45rem;
   padding-top: 0.15rem;
@@ -3322,11 +3723,6 @@ html.is-android .multi-view-full.is-fullscreen {
   min-height: 100%;
 }
 
-html.is-android.android-player-fs,
-html.is-android.android-player-fs body,
-html.is-android.android-player-fs #root {
-  background: #000;
-}
 
 .web-browser-header {
   margin-bottom: 0;
@@ -4386,18 +4782,46 @@ html.is-android .player-bar {
   padding-right: max(1rem, env(safe-area-inset-right, 0px));
 }
 
-/* Full Android player covers the nav rail — no Library strip beside the picture. */
+/* Android never uses the desktop 248px sidebar inset (landscape phones exceed 860px). */
+html.is-android {
+  --sidebar: 0px;
+}
+
+/* Full Android player covers the nav rail — no Library strip beside the picture.
+   Use dvh (not %) so a stale WebView layout height after rotate can't shrink the shell. */
 html.is-android .player-shell:not(.player-shell-pip):not(.player-shell-tile) {
+  position: fixed !important;
+  inset: 0 !important;
   left: 0 !important;
   right: 0 !important;
   top: 0 !important;
   bottom: 0 !important;
+  width: 100vw !important;
+  max-width: 100vw !important;
+  height: 100dvh !important;
+  max-height: 100dvh !important;
+  min-height: 100dvh !important;
   z-index: 250000;
 }
 
 html.is-android body:has(.player-shell:not(.player-shell-pip):not(.player-shell-tile)) .sidebar.sidebar-android {
   visibility: hidden !important;
   pointer-events: none !important;
+}
+
+/* Watching: don't reserve the landscape rail — sidebar is hidden but the grid
+   column was still eating ~4.75rem and leaving the picture shifted right. */
+html.is-android body:has(.player-shell:not(.player-shell-pip):not(.player-shell-tile)) .app-shell,
+html.is-android body:has(.web-browser-page.is-embed-player.is-watching) .app-shell {
+  grid-template-columns: 1fr !important;
+  grid-template-rows: 1fr !important;
+}
+
+html.is-android body:has(.player-shell:not(.player-shell-pip):not(.player-shell-tile)) .main-stage,
+html.is-android body:has(.web-browser-page.is-embed-player.is-watching) .main-stage {
+  width: 100%;
+  max-width: 100vw;
+  min-width: 0;
 }
 
 /* Drop the verbose Playing/hls/Vol/Subs strip on phones — keep errors only. */
@@ -4473,7 +4897,13 @@ html.is-android .web-chrome {
   padding-right: max(0.5rem, env(safe-area-inset-right, 0px));
 }
 
-/* Embed playback: keep Back / Mute / Full on screen and the video below them. */
+/* Embed playback: one compact control strip (like native player). Hide the app
+   rail so we don't stack Jiyu header + Back/Mute/Full — that was the "big then
+   small/hidden" flip when Full/immersive covered one of the two bars. */
+html.is-android body:has(.web-browser-page.is-embed-player.is-watching) .sidebar.sidebar-android {
+  display: none !important;
+}
+
 html.is-android .main-stage:has(.web-browser-page.is-embed-player.is-watching) {
   overflow: hidden;
 }
@@ -4483,46 +4913,65 @@ html.is-android .web-browser-page.is-embed-player.is-watching {
   min-height: 0;
   max-height: 100%;
   overflow: hidden;
-  padding-bottom: 0;
+  padding: 0;
+  gap: 0;
 }
 
 html.is-android .web-browser-page.is-embed-player.is-watching .web-chrome {
   position: relative;
   top: auto;
   flex: 0 0 auto;
+  z-index: 30;
+  border-radius: 0;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: rgba(8, 10, 13, 0.96);
+  /* Own the status-bar inset once — sidebar is gone while watching. */
+  padding-top: max(0.45rem, env(safe-area-inset-top, 0px));
+  padding-bottom: 0.35rem;
   padding-left: max(0.7rem, env(safe-area-inset-left, 0px));
   padding-right: max(0.85rem, env(safe-area-inset-right, 0px));
 }
 
 html.is-android .web-browser-page.is-embed-player.is-watching .web-chrome-bar {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
-  gap: 0.35rem;
+  gap: 0.3rem;
 }
 
 html.is-android .web-browser-page.is-embed-player.is-watching .web-chrome-meta {
-  flex: 1 1 6rem;
+  flex: 1 1 auto;
   min-width: 0;
+}
+
+html.is-android .web-browser-page.is-embed-player.is-watching .web-chrome-title {
+  font-size: 0.85rem;
+}
+
+html.is-android .web-browser-page.is-embed-player.is-watching .web-chrome-host {
+  display: none;
 }
 
 html.is-android .web-browser-page.is-embed-player.is-watching .web-chrome-actions {
-  flex: 1 1 auto;
-  flex-wrap: wrap;
+  flex: 0 1 auto;
+  flex-wrap: nowrap;
   min-width: 0;
   justify-content: flex-end;
+  gap: 0.25rem;
 }
 
 html.is-android .web-browser-page.is-embed-player.is-watching .web-chrome-actions .control-btn {
-  padding: 0.38rem 0.62rem;
+  padding: 0.32rem 0.5rem;
+  font-size: 0.78rem;
 }
 
 html.is-android .web-browser-page.is-embed-player.is-watching .web-volume-control {
-  min-width: 4.4rem;
+  min-width: 3.6rem;
 }
 
 html.is-android .web-browser-page.is-embed-player.is-watching .web-volume-control input[type='range'] {
-  width: 4.4rem;
+  width: 3.6rem;
 }
 
 html.is-android .web-browser-page.is-embed-player.is-watching .web-player-tile,
@@ -4534,8 +4983,9 @@ html.is-android .web-browser-page.is-embed-player.is-watching .web-frame {
 }
 
 html.is-android .web-browser-page.is-embed-player.is-watching .web-player-tile {
-  /* Fill leftover Rivestream chrome height so the Gecko stage isn't a white strip. */
-  min-height: calc(100dvh - 4.75rem);
+  /* Flex fills leftover height under the compact chrome — don't force a
+     viewport-sized tile that races Gecko over the control strip. */
+  min-height: 0;
 }
 
 .player-controls {
@@ -4602,16 +5052,78 @@ html.is-android .web-browser-page.is-embed-player.is-watching .web-player-tile {
   align-items: center;
   width: 100%;
   margin: 0;
-  padding: 0 0.1rem 0.15rem;
+  padding: 0.15rem 0.1rem 0.2rem;
+  pointer-events: auto;
+  touch-action: none;
+  position: relative;
+  z-index: 2;
 }
 
-.player-seek input[type='range'] {
+.player-seek input[type='range'],
+.player-pip-seek input[type='range'] {
+  -webkit-appearance: none;
+  appearance: none;
   width: 100%;
-  height: 1.35rem;
+  height: 1.55rem;
   margin: 0;
+  background: transparent;
   accent-color: var(--accent);
   cursor: pointer;
   touch-action: none;
+  pointer-events: auto;
+  /* Larger finger target without changing the drawn track height much. */
+  padding: 0.45rem 0;
+  box-sizing: border-box;
+}
+
+.player-seek input[type='range']::-webkit-slider-runnable-track,
+.player-pip-seek input[type='range']::-webkit-slider-runnable-track {
+  height: 0.28rem;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--accent, #f0b429) 0%,
+    var(--accent, #f0b429) var(--seek-pct, 0%),
+    rgba(255, 255, 255, 0.22) var(--seek-pct, 0%),
+    rgba(255, 255, 255, 0.22) 100%
+  );
+}
+
+.player-seek input[type='range']::-moz-range-track,
+.player-pip-seek input[type='range']::-moz-range-track {
+  height: 0.28rem;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--accent, #f0b429) 0%,
+    var(--accent, #f0b429) var(--seek-pct, 0%),
+    rgba(255, 255, 255, 0.22) var(--seek-pct, 0%),
+    rgba(255, 255, 255, 0.22) 100%
+  );
+}
+
+.player-seek input[type='range']::-webkit-slider-thumb,
+.player-pip-seek input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 1.05rem;
+  height: 1.05rem;
+  margin-top: -0.38rem;
+  border-radius: 50%;
+  background: var(--accent, #f0b429);
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+  pointer-events: auto;
+}
+
+.player-seek input[type='range']::-moz-range-thumb,
+.player-pip-seek input[type='range']::-moz-range-thumb {
+  width: 1.05rem;
+  height: 1.05rem;
+  border-radius: 50%;
+  background: var(--accent, #f0b429);
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  pointer-events: auto;
 }
 
 .player-shell.chrome-hidden .player-bottom-bar {
@@ -4952,16 +5464,22 @@ html.is-android .player-video.is-remux {
   height: 100% !important;
 }
 
-/* Android: CSS fullscreen (no Fullscreen API) — edge-to-edge over the top chrome. */
-html.is-android .player-shell.is-os-fullscreen {
+/* Desktop Electron + Android: OS/immersive Full — edge-to-edge over the sidebar. */
+.player-shell.is-os-fullscreen {
   position: fixed !important;
   inset: 0 !important;
   width: 100vw !important;
-  height: 100dvh !important;
+  height: 100vh !important;
   max-width: 100vw !important;
-  max-height: 100dvh !important;
+  max-height: 100vh !important;
   z-index: 250000 !important;
   border-radius: 0 !important;
+}
+
+/* Android: prefer dynamic viewport height when the system bars hide. */
+html.is-android .player-shell.is-os-fullscreen {
+  height: 100dvh !important;
+  max-height: 100dvh !important;
 }
 
 html.is-android.android-player-fs .sidebar.sidebar-android {
@@ -5176,7 +5694,8 @@ html.is-system-pip .player-subtitles span {
 .player-skip-intro {
   position: absolute;
   right: 1.25rem;
-  bottom: clamp(4.5rem, 12vh, 7rem);
+  /* Sit above seek + control rows so the thumb/range don't cover the tap target. */
+  bottom: clamp(7.25rem, 18vh, 10rem);
   z-index: 7;
   margin: 0;
   padding: 0.7rem 1.15rem;
@@ -5202,17 +5721,23 @@ html.is-system-pip .player-subtitles span {
   z-index: 41;
 }
 
+/* Phone chrome stacks seek + transport + sub sync — give Skip Intro more clearance. */
+html.is-android .player-skip-intro {
+  bottom: clamp(8.25rem, 22vh, 11.5rem);
+}
+
 .player-episode-strip {
   position: absolute;
   top: 5.4rem;
   left: 0;
-  right: 0;
+  right: auto;
+  width: min(22rem, calc(100% - 1.25rem));
   z-index: 28;
-  padding: 0 1rem 0.65rem;
+  padding: 0 0.75rem 0.75rem;
   background: linear-gradient(
     to bottom,
-    rgba(8, 10, 13, 0.9) 0%,
-    rgba(8, 10, 13, 0.55) 75%,
+    rgba(8, 10, 13, 0.92) 0%,
+    rgba(8, 10, 13, 0.72) 70%,
     transparent 100%
   );
   pointer-events: none;
@@ -5220,28 +5745,33 @@ html.is-system-pip .player-subtitles span {
 
 .player-episode-strip-scroll {
   display: flex;
-  gap: 0.4rem;
-  overflow-x: auto;
-  overscroll-behavior-x: contain;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.35rem;
+  max-height: min(42vh, 18rem);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
   padding: 0.15rem 0.1rem 0.35rem;
   pointer-events: auto;
   scrollbar-width: thin;
-  scroll-snap-type: x proximity;
 }
 
 .player-episode-strip-item {
   flex: 0 0 auto;
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 0.4rem;
-  max-width: 14rem;
-  padding: 0.4rem 0.7rem;
+  gap: 0.45rem;
+  width: 100%;
+  max-width: none;
+  padding: 0.45rem 0.7rem;
   border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 999px;
-  background: rgba(12, 14, 18, 0.82);
+  border-radius: 12px;
+  background: rgba(12, 14, 18, 0.88);
   color: var(--text);
   cursor: pointer;
   white-space: nowrap;
+  text-align: left;
 }
 
 .player-episode-strip-item:hover,
@@ -5263,8 +5793,22 @@ html.is-system-pip .player-subtitles span {
 }
 
 .player-episode-strip-title {
+  min-width: 0;
+  flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+html.is-android .player-shell:not(.player-shell-pip) .player-episode-strip {
+  /* Under Back / title / Restart row — list grows downward over the picture. */
+  top: max(6.75rem, calc(env(safe-area-inset-top, 0px) + 5.5rem));
+  left: max(0.55rem, env(safe-area-inset-left, 0px));
+  right: auto;
+  width: min(22rem, calc(100% - 1.1rem));
+}
+
+html.is-android .player-shell:not(.player-shell-pip) .player-episode-strip-scroll {
+  max-height: min(48vh, 20rem);
 }
 
 .player-playlist {
@@ -5321,10 +5865,10 @@ html.is-system-pip .player-subtitles span {
 
 .player-error {
   position: absolute;
-  bottom: 1.5rem;
+  top: 50%;
   left: 50%;
-  transform: translateX(-50%);
-  z-index: 5;
+  transform: translate(-50%, -50%);
+  z-index: 12;
   background: rgba(120, 20, 30, 0.92);
   color: #fff;
   padding: 0.85rem 1.1rem;
@@ -5333,6 +5877,7 @@ html.is-system-pip .player-subtitles span {
   text-align: center;
   display: grid;
   gap: 0.35rem;
+  pointer-events: none;
 }
 
 .player-error p {
@@ -5381,6 +5926,40 @@ html.is-system-pip .player-subtitles span {
   letter-spacing: 0.08em;
   font-size: 0.72rem;
   color: var(--muted);
+}
+
+.show-page-networks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.15rem 0 0;
+}
+
+.show-page-network {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.2rem 0.55rem 0.2rem 0.35rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  color: #1a1a1a;
+  font-size: 0.78rem;
+  font-weight: 600;
+  line-height: 1.2;
+  max-width: 100%;
+}
+
+.show-page-network img {
+  width: auto;
+  height: 1.15rem;
+  max-width: 3.5rem;
+  object-fit: contain;
+}
+
+.show-page-network span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .show-page-summary {
@@ -5584,10 +6163,14 @@ html.is-system-pip .player-subtitles span {
     grid-template-columns: 1fr;
   }
 
+  .hero-aside {
+    max-width: 14rem;
+    justify-self: start;
+  }
+
   .hero-panel {
     max-width: 14rem;
     max-height: 12rem;
-    justify-self: start;
   }
 
   .hero-frame strong {
@@ -5714,10 +6297,16 @@ html.is-system-pip .player-subtitles span {
     margin-bottom: 1.25rem;
   }
 
+  .hero-aside {
+    max-width: 100%;
+    width: min(100%, 16rem);
+    justify-self: start;
+  }
+
   .hero-panel {
     max-width: 100%;
     max-height: none;
-    width: min(100%, 16rem);
+    width: 100%;
   }
 
   .hero-frame strong,
@@ -5828,10 +6417,23 @@ html.is-android .sidebar-android .sections-menu-btn,
   min-width: 2.6rem;
 }
 
+html.is-android .sidebar-android .brand-row,
+.sidebar-android .brand-row {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 html.is-android .sidebar-android .brand-wrap,
 .sidebar-android .brand-wrap {
   flex: 1 1 auto;
   min-width: 0;
+}
+
+html.is-android .sidebar-android .brand-help-btn,
+.sidebar-android .brand-help-btn {
+  width: 1.85rem;
+  height: 1.85rem;
+  font-size: 0.95rem;
 }
 
 html.is-android .sidebar-android .brand-btn,
@@ -6193,9 +6795,17 @@ html.is-android .sidebar-android .nav-link,
     order: 1;
   }
 
+  html.is-android .sidebar-android .brand-row,
+  .sidebar-android .brand-row {
+    flex-direction: column;
+    align-items: center;
+    gap: 0.3rem;
+  }
+
   html.is-android .sidebar-android .brand-wrap,
   .sidebar-android .brand-wrap {
     flex: 0 0 auto;
+    width: 100%;
   }
 
   html.is-android .sidebar-android .brand-btn,
@@ -6274,14 +6884,25 @@ html.is-android .sidebar-android .nav-link,
     max-height: calc(100dvh - 0.8rem) !important;
   }
 
+  /* PiP / dock sit beside the rail; full player + embed watch go edge-to-edge. */
   html.is-android .player-dock,
   html.is-android .global-player-layer {
     left: 4.75rem !important;
   }
 
+  html.is-android body:has(.player-shell:not(.player-shell-pip):not(.player-shell-tile)) .player-dock,
+  html.is-android body:has(.player-shell:not(.player-shell-pip):not(.player-shell-tile)) .global-player-layer,
+  html.is-android body:has(.web-browser-page.is-embed-player.is-watching) .player-dock,
+  html.is-android body:has(.web-browser-page.is-embed-player.is-watching) .global-player-layer {
+    left: 0 !important;
+  }
+
   /* Immersive full player edge-to-edge; PiP keeps a fixed corner size. */
   html.is-android .player-shell:not(.player-shell-pip):not(.player-shell-tile) {
     left: 0 !important;
+    right: 0 !important;
+    width: 100vw !important;
+    max-width: 100vw !important;
   }
 
   html.is-android .player-shell-pip {
@@ -6307,11 +6928,6 @@ html.is-android .sidebar-android .nav-link,
     left: calc(4.75rem + max(0.5rem, env(safe-area-inset-left, 0px)));
   }
 
-  /* Status bar is short in landscape; the portrait inset was pushing this bar off. */
-  html.is-android .web-browser-page.is-embed-player.is-watching .web-chrome {
-    padding-top: max(0.45rem, env(safe-area-inset-top, 0px));
-    padding-bottom: 0.35rem;
-  }
 }
 
 /* Multi-view covers the app chrome. The Close all / Add stream bar stays until Full. */
@@ -6360,14 +6976,25 @@ html.is-android .home-search-wrap {
   margin-top: 0.55rem;
 }
 
+html.is-android .hero-aside {
+  width: 6.75rem;
+  max-width: 6.75rem;
+  justify-self: end;
+  align-self: start;
+  gap: 0.28rem;
+}
+
 html.is-android .hero-panel {
   width: 6.75rem;
   max-width: 6.75rem;
   max-height: 5.5rem;
   aspect-ratio: 5 / 4;
   border-radius: 10px;
-  justify-self: end;
-  align-self: stretch;
+}
+
+html.is-android .hero-saved-hit {
+  padding-left: 0.5rem;
+  font-size: 0.62rem;
 }
 
 html.is-android .hero-frame {
@@ -6413,14 +7040,24 @@ html.is-android .section-tile p {
 }
 
 html.is-android .media-card.is-sports .media-card-body h3 {
-  -webkit-line-clamp: 5;
-  font-size: 0.82rem;
+  -webkit-line-clamp: 2;
+  font-size: 0.95rem;
   line-height: 1.28;
 }
 
 html.is-android .media-card.is-sports .media-card-match-detail {
-  -webkit-line-clamp: 4;
-  font-size: 0.72rem;
+  -webkit-line-clamp: 2;
+  font-size: 0.74rem;
+}
+
+html.is-android .catalog-grid:has(.media-card.is-sports) {
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  gap: 0.75rem;
+}
+
+html.is-android .sports-vs-logo {
+  width: 2.85rem;
+  height: 2.85rem;
 }
 
 html.is-android .media-card.is-sports .media-card-sport,
@@ -6585,6 +7222,17 @@ html.is-android .panel {
     grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
   }
 
+  /* Keep Your teams as a 2-wide horizontal swipe (don't fall back to wrap grid). */
+  html.is-android .favorite-matches .catalog-grid,
+  html.is-native .favorite-matches .catalog-grid {
+    grid-template-columns: none;
+    grid-auto-flow: column;
+    grid-auto-columns: calc((100% - 0.85rem) / 2);
+    overflow-x: auto;
+    overflow-y: hidden;
+    scroll-snap-type: x mandatory;
+  }
+
   html.is-android .nav-link,
   html.is-native .nav-link {
     font-size: 0.8rem;
@@ -6599,6 +7247,11 @@ html.is-android .panel {
 
   html.is-android .hero {
     grid-template-columns: 1fr auto;
+  }
+
+  html.is-android .hero-aside {
+    width: 6.75rem;
+    max-width: 6.75rem;
   }
 
   html.is-android .hero-panel {
@@ -6678,4 +7331,49 @@ html.is-system-pip .web-frame {
   max-width: none !important;
   max-height: none !important;
   object-fit: contain !important;
+}
+
+/* Keep scrubbing usable in the Home-button PiP window. */
+html.is-system-pip .player-bottom-bar {
+  opacity: 1 !important;
+  pointer-events: none !important;
+  padding: 0.35rem 0.45rem max(0.35rem, env(safe-area-inset-bottom, 0px)) !important;
+  background: linear-gradient(
+    to top,
+    rgba(8, 10, 13, 0.9) 0%,
+    rgba(8, 10, 13, 0.35) 70%,
+    transparent 100%
+  ) !important;
+}
+
+html.is-system-pip .player-bottom-bar .player-controls-bottom,
+html.is-system-pip .player-bottom-bar .player-clock {
+  display: none !important;
+}
+
+html.is-system-pip .player-bottom-bar .player-seek,
+html.is-system-pip .player-bottom-bar .player-seek input,
+html.is-system-pip .player-pip-seek,
+html.is-system-pip .player-pip-seek input {
+  pointer-events: auto !important;
+  opacity: 1 !important;
+  touch-action: none !important;
+}
+
+html.is-system-pip .player-pip-seek {
+  display: flex !important;
+}
+
+/* Android: taller seek hit area so sliding isn't lost to chrome/gestures. */
+html.is-android .player-seek input[type='range'],
+html.is-android .player-pip-seek input[type='range'] {
+  height: 1.85rem;
+  padding: 0.6rem 0;
+}
+
+html.is-android .player-seek input[type='range']::-webkit-slider-thumb,
+html.is-android .player-pip-seek input[type='range']::-webkit-slider-thumb {
+  width: 1.2rem;
+  height: 1.2rem;
+  margin-top: -0.46rem;
 }

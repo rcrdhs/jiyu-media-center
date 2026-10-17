@@ -7,8 +7,8 @@ android {
         applicationId "app.jiyu.mediacenter"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 33
-        versionName "0.3.37"
+        versionCode 66
+        versionName "0.3.70"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         // 16 KB page-size devices (Android 15+): only ship 64-bit natives.
         // libtorrent4j 32-bit builds are still 4 KB-aligned.
@@ -93,6 +93,12 @@ dependencies {
     implementation "com.google.android.gms:play-services-cast-framework:21.5.0"
     // In-app browser overlay only — Capacitor UI stays on System WebView.
     implementation "org.mozilla.geckoview:geckoview:$geckoviewVersion"
+    // Native sports / HLS playback after Gecko unwraps embed pages.
+    implementation "androidx.media3:media3-exoplayer:$media3Version"
+    implementation "androidx.media3:media3-exoplayer-hls:$media3Version"
+    implementation "androidx.media3:media3-exoplayer-dash:$media3Version"
+    implementation "androidx.media3:media3-ui:$media3Version"
+    implementation "androidx.media3:media3-datasource:$media3Version"
     implementation project(':capacitor-android')
     testImplementation "junit:junit:$junitVersion"
     androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"

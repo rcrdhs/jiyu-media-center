@@ -127,22 +127,43 @@ export function isWebBrowserOnlyUrl(url: string): boolean {
     if (host === 'ok.ru' || host.endsWith('.ok.ru')) return true
     // DoodStream-style rotating hosts: /e/{id} or /d/{id}
     if (/^\/[de]\/[a-z0-9]{6,}/i.test(u.pathname || '')) return true
+    // PPV/Streamed iframe mirrors rotate (e.g. taifood-blog.asia/embed/…).
+    if (isRotatingSportsEmbedPath(u.pathname || '')) return true
   } catch {
     /* ignore */
   }
   return false
 }
 
+/** PPV.st / Streamed iframe mirrors: /embed/{slug} on rotating domains. */
+export function isRotatingSportsEmbedPath(pathname: string): boolean {
+  return /^\/embed\/[a-z0-9][\w.-]{2,}/i.test(String(pathname || ''))
+}
+
 /**
  * Live sports + Replay VOD embeds share one autoplay policy:
  * main-process kick owns play; renderer only hides ads (no click storms).
+ * Keep host list aligned with electron `needsSportsStyleAutoplay`.
  */
 export function isSportsOrReplayEmbedUrl(url: string): boolean {
   if (!url) return false
-  if (/embed(?:india|hd)?\.st|streamed\.pk|ppv\.st/i.test(url)) return true
+  if (
+    /embed(?:india|hd)?\.st|streamed\.pk|ppv\.st|ppvservices\.st|embed\.ppv\.st/i.test(
+      url,
+    )
+  ) {
+    return true
+  }
   try {
     const parsed = new URL(url)
     const host = parsed.hostname.replace(/^www\./i, '').toLowerCase()
+    if (isRotatingSportsEmbedPath(parsed.pathname || '')) return true
+    if (host === 'embed.st' || host.endsWith('.embed.st')) return true
+    if (host === 'embedhd.st' || host.endsWith('.embedhd.st')) return true
+    if (host === 'embedindia.st' || host.endsWith('.embedindia.st')) return true
+    if (host === 'streamed.pk' || host.endsWith('.streamed.pk')) return true
+    if (host === 'ppv.st' || host.endsWith('.ppv.st')) return true
+    if (host === 'ppvservices.st' || host.endsWith('.ppvservices.st')) return true
     if (host === 'soccerfull.net' || host.endsWith('.soccerfull.net')) return true
     if (host.includes('livextv')) return true
     if (host === 'footreplays.com' || host.endsWith('.footreplays.com')) return true
@@ -156,6 +177,11 @@ export function isSportsOrReplayEmbedUrl(url: string): boolean {
   return false
 }
 
+/** Android Media3 / ExoPlayer owns this item — not Gecko embed, not Capacitor HLS. */
+export function isNativeMedia3PlaybackItem(item: { tags?: string[] }): boolean {
+  return Boolean(item.tags?.includes('media3'))
+}
+
 /** True when playback must use a WebContentsView (not the native HLS player). */
 export function isWebEmbedPlaybackItem(item: {
   url?: string
@@ -163,12 +189,30 @@ export function isWebEmbedPlaybackItem(item: {
   source?: string
   streamedMatchId?: string
 }): boolean {
+  // Media3 path wins over streamedMatchId / source heuristics.
+  if (isNativeMedia3PlaybackItem(item)) return false
   if (item.tags?.includes('web-embed')) return true
   if (item.tags?.includes('replay') && item.tags?.includes('livextv')) return true
   if (item.tags?.includes('replay') && item.tags?.includes('fullmatchshows')) return true
   if (item.streamedMatchId) return true
   if (/^(streamed|ppv\.st|livextv|fullmatchshows)$/i.test(String(item.source || ''))) return true
   return Boolean(item.url && isWebBrowserOnlyUrl(item.url))
+}
+
+/**
+ * WatchPage must navigate to /web for these rows — not play() on /watch alone.
+ * PPV iframes rotate off embed.st (e.g. taifood-blog.asia); source/tag still means embed.
+ */
+export function shouldOpenInWebBrowser(item: {
+  url?: string
+  tags?: string[]
+  source?: string
+}): boolean {
+  if (!item?.url) return false
+  if (isNativeMedia3PlaybackItem(item)) return false
+  if (isWebBrowserOnlyUrl(item.url)) return true
+  if (item.tags?.includes('web-embed')) return true
+  return /^(streamed|ppv\.st|livextv|fullmatchshows)$/i.test(String(item.source || ''))
 }
 
 /** Cloudflare interstitial. Autoplay clicks and DOM reads restart the Verify spinner. */
@@ -204,6 +248,16 @@ export function isBlankBrowserUrl(url: string | null | undefined): boolean {
 
 /** Embed hosts that draw in-app (fstream, vsembed, streamed / embed.st, …). */
 export function isEmbedPlayerHost(url: string): boolean {
+  // Sports / replay (incl. rotating PPV /embed/ mirrors) must PiP on Back —
+  // openInPip rejects anything that fails this check and blanks to about:blank.
+  if (isSportsOrReplayEmbedUrl(url)) return true
+  try {
+    const parsed = new URL(url)
+    const path = parsed.pathname || ''
+    if (isRotatingSportsEmbedPath(path)) return true
+  } catch {
+    /* ignore */
+  }
   if (isWebBrowserOnlyUrl(url)) {
     try {
       const host = new URL(url).hostname.replace(/^www\./, '').toLowerCase()
@@ -253,9 +307,13 @@ export function isEmbedPlayerHost(url: string): boolean {
         host.includes('livextv') ||
         host.includes('netmirror') ||
         host.includes('mcloud') ||
-        // Local Nationwide / YouTube live embeds opened as player tiles.
+        // Local Nationwide / YouTube live — watch, embed, /live, or @handle/live.
         ((host === 'youtube.com' || host.endsWith('.youtube.com') || host === 'youtu.be') &&
-          (/^\/embed\//i.test(path) || /^\/live\/?/i.test(path) || path === '/watch'))
+          (/^\/embed\//i.test(path) ||
+            /^\/live\/?/i.test(path) ||
+            path === '/watch' ||
+            /^\/@[^/]+\/live\/?/i.test(path) ||
+            /^\/channel\/[^/]+\/live\/?/i.test(path)))
       ) {
         return true
       }
@@ -582,40 +640,48 @@ export const RIVESTREAM_HIDE_SERVER_CHROME_SCRIPT = `(() => {
   }
 })();`
 
-/** Prefer English audio tracks in Rivestream embeds (default for non-anime). */
+/**
+ * Rivestream embed audio: Japanese when present (anime), else English, else neutral.
+ * Western multi-audio packs almost never expose a JP track, so EN still wins there.
+ */
 export const RIVESTREAM_PREFER_ENGLISH_AUDIO_SCRIPT = `(() => {
   try {
-    const NON_EN =
-      /hindi|\\bhin\\b|arabic|spanish|español|french|german|portuguese|russian|turkish|indonesian|vietnamese|tamil|telugu|urdu|korean|chinese|mandarin|japanese|\\bjp\\b|\\bja\\b/i;
-    const pickEnglish = (video) => {
+    const NON_PRIMARY =
+      /hindi|\\bhin\\b|arabic|spanish|español|french|german|portuguese|russian|turkish|indonesian|vietnamese|tamil|telugu|urdu|korean|chinese|mandarin/i;
+    const pickAudio = (video) => {
       if (!(video instanceof HTMLVideoElement)) return;
       const tracks = video.audioTracks;
       if (!tracks || tracks.length < 2) return;
+      let jaIdx = -1;
       let enIdx = -1;
       let fallbackIdx = -1;
       for (let i = 0; i < tracks.length; i++) {
         const label = String(tracks[i].label || tracks[i].language || '').toLowerCase();
-        if (/english|\\beng\\b|\\ben\\b|en-?us|en-?gb/.test(label)) {
-          enIdx = i;
-          break;
+        if (/japanese|\\bjpn?\\b|\\bja\\b|\\bjp\\b|nihongo/.test(label)) {
+          if (jaIdx < 0) jaIdx = i;
+          continue;
         }
-        if (fallbackIdx < 0 && !NON_EN.test(label)) fallbackIdx = i;
+        if (/english|\\beng\\b|\\ben\\b|en-?us|en-?gb/.test(label)) {
+          if (enIdx < 0) enIdx = i;
+          continue;
+        }
+        if (fallbackIdx < 0 && !NON_PRIMARY.test(label)) fallbackIdx = i;
       }
-      const pick = enIdx >= 0 ? enIdx : fallbackIdx;
+      const pick = jaIdx >= 0 ? jaIdx : enIdx >= 0 ? enIdx : fallbackIdx;
       if (pick < 0) return;
       for (let j = 0; j < tracks.length; j++) tracks[j].enabled = j === pick;
     };
-    for (const v of document.querySelectorAll('video')) pickEnglish(v);
+    for (const v of document.querySelectorAll('video')) pickAudio(v);
     if (!window.__jiyuRiveEnglishObs) {
       window.__jiyuRiveEnglishObs = true;
       try {
         const mo = new MutationObserver(() => {
-          for (const v of document.querySelectorAll('video')) pickEnglish(v);
+          for (const v of document.querySelectorAll('video')) pickAudio(v);
         });
         mo.observe(document.documentElement, { childList: true, subtree: true });
       } catch (_) {}
       window.setInterval(() => {
-        for (const v of document.querySelectorAll('video')) pickEnglish(v);
+        for (const v of document.querySelectorAll('video')) pickAudio(v);
       }, 1200);
     }
     return 'ok';
@@ -698,9 +764,15 @@ export const EMBED_AD_HIDE_SCRIPT = `(() => {
         iframe[src*="propeller"], iframe[src*="doubleclick"], iframe[src*="adaround"],
         iframe[id*="google_ads"],
         iframe[src*="nextgencloudfabric"],
+        a[href*="effectivecpmnetwork"], a[href*="hgcloud.to"],
         [data-jiyu-ad-hide="1"] {
           display: none !important; visibility: hidden !important; pointer-events: none !important;
           width: 0 !important; height: 0 !important; max-height: 0 !important; opacity: 0 !important;
+        }
+        /* Floating “download APK” FABs over sports embeds */
+        a[download], a[href*=".apk"], button[class*="download" i],
+        div[class*="download" i][style*="fixed"], div[class*="download" i][style*="absolute"] {
+          pointer-events: none !important;
         }
         video, video * {
           visibility: visible !important; opacity: 1 !important;
@@ -808,6 +880,33 @@ export const EMBED_AD_HIDE_SCRIPT = `(() => {
             n.style.setProperty('display', 'none', 'important');
           }
         });
+        // Floating circular download / APK FABs (sports embeds).
+        for (const el of Array.from(document.querySelectorAll('a, button, div'))) {
+          if (!(el instanceof HTMLElement)) continue;
+          if (el.querySelector('video, canvas')) continue;
+          const href = (el.getAttribute('href') || '') + (el.getAttribute('download') || '');
+          if (/\\.apk(\\?|#|$)|utm_source=PRIMEROLL|opera.*setup|download.*(app|apk|browser)/i.test(href)) {
+            el.setAttribute('data-jiyu-ad-hide', '1');
+            el.style.setProperty('display', 'none', 'important');
+            el.style.setProperty('pointer-events', 'none', 'important');
+            continue;
+          }
+          try {
+            const st = window.getComputedStyle(el);
+            if (!st || (st.position !== 'fixed' && st.position !== 'absolute')) continue;
+            const r = el.getBoundingClientRect();
+            if (r.width < 40 || r.width > 120 || r.height < 40 || r.height > 120) continue;
+            // Round green download FABs sitting over the player corner.
+            const round = parseFloat(st.borderRadius || '0') >= Math.min(r.width, r.height) * 0.4;
+            const bg = String(st.backgroundColor || '');
+            const greenish = /rgba?\\(\\s*\\d+\\s*,\\s*(1[5-9]\\d|2[0-5]\\d)\\s*,\\s*\\d+/i.test(bg) || /#0*([89a-f]|\\d)[f9a-f]0/i.test(bg);
+            if (round && (greenish || /download|apk|install/i.test(el.className || ''))) {
+              el.setAttribute('data-jiyu-ad-hide', '1');
+              el.style.setProperty('display', 'none', 'important');
+              el.style.setProperty('pointer-events', 'none', 'important');
+            }
+          } catch (_) {}
+        }
         // Text-match residual countdown banners (in case markup changes).
         for (const el of Array.from(document.querySelectorAll('div, section, aside'))) {
           if (!(el instanceof HTMLElement)) continue;

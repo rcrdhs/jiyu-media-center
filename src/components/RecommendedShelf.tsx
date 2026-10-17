@@ -1,11 +1,16 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useCatalog } from '../context/CatalogContext'
 import { getPersonalizedRecommendations } from '../lib/recommendations'
+import {
+  recordNotInterested,
+  RECOMMEND_FEEDBACK_EVENT,
+} from '../lib/recommendFeedback'
 import { filterShelfVisibleItems, isSeriesWebCatalogItem } from '../lib/torrents'
 import { isLikelyEnglish, shouldApplyEnglishFilter } from '../lib/language'
 import { isKidsModeEnabled, subscribeKidsMode } from '../lib/kidsMode'
 import { CONTINUE_WATCHING_EVENT } from '../lib/continueWatching'
 import { WATCH_HISTORY_EVENT } from '../lib/watchHistory'
+import { HIDE_KEYWORDS_EVENT } from '../lib/hideKeywords'
 import { MediaCard } from './MediaCard'
 
 /** Home shelf: on-device recommendations from watch history (private, local only). */
@@ -20,10 +25,14 @@ export function RecommendedShelf() {
     const bump = () => setHistoryTick((n) => n + 1)
     window.addEventListener(CONTINUE_WATCHING_EVENT, bump)
     window.addEventListener(WATCH_HISTORY_EVENT, bump)
+    window.addEventListener(HIDE_KEYWORDS_EVENT, bump)
+    window.addEventListener(RECOMMEND_FEEDBACK_EVENT, bump)
     window.addEventListener('focus', bump)
     return () => {
       window.removeEventListener(CONTINUE_WATCHING_EVENT, bump)
       window.removeEventListener(WATCH_HISTORY_EVENT, bump)
+      window.removeEventListener(HIDE_KEYWORDS_EVENT, bump)
+      window.removeEventListener(RECOMMEND_FEEDBACK_EVENT, bump)
       window.removeEventListener('focus', bump)
     }
   }, [])
@@ -42,7 +51,7 @@ export function RecommendedShelf() {
       return true
     })
     return getPersonalizedRecommendations(pool, 16)
-    // historyTick forces recompute when continue-watching / history changes
+    // historyTick forces recompute when continue-watching / history / feedback changes
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items, englishOnly, ready, kidsMode, historyTick])
 
@@ -59,6 +68,23 @@ export function RecommendedShelf() {
           <div key={item.id} className="recommended-card-wrap">
             <MediaCard item={item} />
             {reason ? <p className="recommended-reason">{reason}</p> : null}
+            <button
+              type="button"
+              className="ghost-btn recommended-not-interested"
+              title="Hide this and similar picks"
+              onClick={(e) => {
+                e.preventDefault()
+                e.stopPropagation()
+                recordNotInterested(item.id, {
+                  title: item.title,
+                  category: item.category,
+                  tags: item.tags,
+                })
+                setHistoryTick((n) => n + 1)
+              }}
+            >
+              Not interested
+            </button>
           </div>
         ))}
       </div>

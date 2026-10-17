@@ -4,13 +4,22 @@
  * Desktop/native Player path only — not an embed shell.
  */
 
+import { Capacitor } from '@capacitor/core'
 import { resolveAtlanticPlay } from './atlanticHls'
+import { getPerformanceKnobs } from './deviceProfile'
+import { resolveStreamoPlay } from './streamo'
+import {
+  getLearnedStreamScore,
+  recordStreamProbeResult,
+} from './streamLearning'
+import { getViewingQuality, resolveRequestedQuality } from './viewingQuality'
 
 export const MOVY_STREAM_ORIGIN = 'https://api.wecollege.net'
 export const MOVY_PLAY_REFERER = 'https://www.movy.sx/'
 
 /**
- * Prefer providers that answered for TV. Keep the list short — CDN links need
+ * Cities each carry a different slice of the catalog (reality TV often only on
+ * atlanta / phoenix / portland), so all are queried in parallel. CDN links need
  * Referer: movy.sx, so bare health probes 403 and must not gate resolution.
  */
 const MOVY_TV_PROVIDERS = [
@@ -22,7 +31,17 @@ const MOVY_TV_PROVIDERS = [
   'portland',
   'austin',
   'dallas',
+  'orlando',
+  'tampa',
+  'paris',
 ] as const
+
+const MOVY_SOURCES_TIMEOUT_MS = 8_000
+const MOVY_DURATION_TIMEOUT_MS = 4_000
+/** After the first live English city, wait briefly for a peer (duration vote) then pick. */
+const MOVY_EARLY_PEER_GRACE_MS = 750
+/** Same-episode renditions differ by under a minute; a different file is far off. */
+const MOVY_DURATION_TOLERANCE_SEC = 120
 
 const MOVY_MOVIE_PROVIDERS = MOVY_TV_PROVIDERS
 
@@ -159,7 +178,7 @@ async function fetchText(url: string): Promise<{ ok: boolean; status: number; te
 async function fetchJson<T>(url: string): Promise<T> {
   if (typeof window !== 'undefined' && window.signalDesktop?.fetchJsonGet) {
     const r = await window.signalDesktop.fetchJsonGet(url, MOVY_PLAY_REFERER)
-    if (!r.ok) throw new Error(r.error || `Movy HTTP ${r.status}`)
+    if (!r.ok) throw new Error(r.error || `Source HTTP ${r.status}`)
     return JSON.parse(r.content || 'null') as T
   }
   try {
@@ -171,10 +190,10 @@ async function fetchJson<T>(url: string): Promise<T> {
         Origin: 'https://www.movy.sx',
       },
     })
-    if (!r.ok || r.data == null) throw new Error(r.error || 'Movy JSON failed')
+    if (!r.ok || r.data == null) throw new Error(r.error || 'Source JSON failed')
     return r.data
   } catch (err) {
-    if (err instanceof Error && /Movy|JSON/.test(err.message)) throw err
+    if (err instanceof Error && /Source|Movy|JSON/.test(err.message)) throw err
   }
   const res = await fetch(url, {
     headers: {
@@ -183,7 +202,7 @@ async function fetchJson<T>(url: string): Promise<T> {
       Accept: 'application/json',
     },
   })
-  if (!res.ok) throw new Error(`Movy HTTP ${res.status}`)
+  if (!res.ok) throw new Error(`Source HTTP ${res.status}`)
   return (await res.json()) as T
 }
 
@@ -197,12 +216,13 @@ export async function fetchMovySeed(mediaId: string | number): Promise<string> {
     `${MOVY_STREAM_ORIGIN}/seed?mediaId=${encodeURIComponent(id)}`,
   )
   const seed = String(data.seed || '').trim()
-  if (!seed) throw new Error('Movy seed missing')
+  if (!seed) throw new Error('Source seed missing')
   seedCache.set(cacheKey, { seed, expiresAt: now + (data.ttlMs ?? 30_000) })
   return seed
 }
 
 export type MovyMediaType = 'movie' | 'tv'
+export type MovyBackend = 'movy' | 'atlantic' | 'streamo'
 
 export interface MovyResolveOptions {
   tmdbId: string | number
@@ -213,6 +233,10 @@ export interface MovyResolveOptions {
   episode?: number
   imdbId?: string
   totalSeasons?: number
+  /** Prefer the backend that last played this title on this device. */
+  preferBackend?: MovyBackend
+  /** Prefer a Movy city that worked last time (e.g. miami). */
+  preferProvider?: string
 }
 
 export interface MovyStreamSource {
@@ -240,8 +264,8 @@ export type MovyPlayResult =
       quality?: string
       subtitleUrl?: string
       subtitleKind?: 'file'
-      /** movy city providers vs Atlantic/Cinecat hls.lol fallback after exhaust. */
-      backend?: 'movy' | 'atlantic'
+      /** movy city providers vs Atlantic (hls.lol) / Streamo (ShowBox) fallbacks. */
+      backend?: MovyBackend
     }
   | { ok: false; error: string }
 
@@ -255,13 +279,19 @@ function pickEnglishSubtitle(subs: MovySubtitle[]): string | undefined {
   const scored = [...subs].sort((a, b) => {
     const score = (s: MovySubtitle) => {
       const blob = `${s.lang || ''} ${s.label || ''}`.toLowerCase()
-      if (/^en\b|english|eng/.test(blob)) return 0
-      if (/ja|jp|japanese/.test(blob)) return 2
-      return 1
+      if (/^en\b|english|\beng\b/.test(blob)) return 0
+      if (!blob.trim() || /^(und|unknown)$/.test(blob)) return 1
+      return 3
     }
     return score(a) - score(b)
   })
-  return scored[0]?.url
+  const best = scored[0]
+  if (!best?.url) return undefined
+  const blob = `${best.lang || ''} ${best.label || ''}`.toLowerCase()
+  // Only attach clearly English (or unlabeled) — never JA/FR as the default softsub.
+  if (/^en\b|english|\beng\b/.test(blob)) return best.url
+  if (!blob.trim() || /^(und|unknown)$/.test(blob)) return best.url
+  return undefined
 }
 
 function normalizeSources(raw: MovyDecodedPayload, provider: string): {
@@ -284,15 +314,72 @@ function normalizeSources(raw: MovyDecodedPayload, provider: string): {
       label: row.label,
     })
   }
-  // Prefer higher quality labels first.
-  sources.sort((a, b) => {
-    const q = (s?: string) => {
-      const n = Number(String(s || '').replace(/[^\d]/g, ''))
-      return Number.isFinite(n) ? n : 0
-    }
-    return q(b.quality) - q(a.quality)
-  })
+  // Rank for the current device/network target — not blindly highest.
+  const cap = movyQualityCap()
+  sources.sort((a, b) => compareMovySources(a, b, cap))
   return { sources, subtitles }
+}
+
+/**
+ * Same target as Player Auto / torrent picks: viewing pref ∩ device maxQuality.
+ * Android WebView + Movy Direct: Auto never locks a single 2160p playlist
+ * (10MB+/6s segments) unless the user explicitly chose 4K.
+ */
+function movyQualityCap(): number {
+  const preference = getViewingQuality()
+  let cap = Math.min(resolveRequestedQuality(preference), getPerformanceKnobs().maxQuality)
+  try {
+    if (
+      preference !== 2160 &&
+      cap > 1080 &&
+      Capacitor.isNativePlatform() &&
+      Capacitor.getPlatform() === 'android'
+    ) {
+      cap = 1080
+    }
+  } catch {
+    /* browser / Node probes */
+  }
+  return cap
+}
+
+function sourceHeight(s: MovyStreamSource): number {
+  const fromLabel = Number(String(s.quality || '').replace(/[^\d]/g, ''))
+  if (Number.isFinite(fromLabel) && fromLabel > 0) return fromLabel
+  // Miami Direct embeds height in the playlist name (index-s2160p-…).
+  const fromUrl = /\b(?:s)?(2160|1440|1080|720|480|360)p\b/i.exec(s.url)
+  return fromUrl ? Number(fromUrl[1]) : 0
+}
+
+function isAutoQualityLabel(s: MovyStreamSource): boolean {
+  return /^auto$/i.test(String(s.quality || '').trim())
+}
+
+/**
+ * Prefer Auto (ABR master, like movy.sx) when under the quality cap, then highest
+ * fixed ladder at/under cap. Unlabeled / over-cap last.
+ */
+function compareMovySources(a: MovyStreamSource, b: MovyStreamSource, cap: number): number {
+  const aAuto = isAutoQualityLabel(a)
+  const bAuto = isAutoQualityLabel(b)
+  // Auto masters ABR like the website — prefer over a locked 1080p city label.
+  if (aAuto !== bAuto) return aAuto ? -1 : 1
+  const ha = sourceHeight(a)
+  const hb = sourceHeight(b)
+  const aOk = ha > 0 && ha <= cap
+  const bOk = hb > 0 && hb <= cap
+  if (aOk !== bOk) return aOk ? -1 : 1
+  if (aOk && bOk) return hb - ha
+  if (ha === 0 && hb === 0) return 0
+  if (ha === 0) return 1
+  if (hb === 0) return -1
+  return ha - hb
+}
+
+function pickMovySource(sources: MovyStreamSource[]): MovyStreamSource | null {
+  if (!sources.length) return null
+  const cap = movyQualityCap()
+  return [...sources].sort((a, b) => compareMovySources(a, b, cap))[0] ?? null
 }
 
 async function fetchProviderSources(
@@ -334,20 +421,41 @@ async function fetchProviderSources(
  * Movy CDNs often return HTTP 200/400 bodies like "Please wait file process."
  * instead of a playlist while the object is still baking — treat as dead.
  */
-export async function probeMovyHlsUrl(
+/** Soft probe budget — paleoak masters often need ~6s; Auto cities answer in <500ms. */
+const MOVY_PROBE_TIMEOUT_MS = 7_500
+
+export type MovyProbeResult = { ok: boolean; ms: number; abrMaster?: boolean }
+
+function classifyMovyPlaylistBody(body: string): { ok: boolean; abrMaster: boolean } {
+  const text = String(body || '').trim()
+  if (!text) return { ok: false, abrMaster: false }
+  if (/please wait|file process|not (yet )?ready|processing/i.test(text)) {
+    return { ok: false, abrMaster: false }
+  }
+  if (!/#EXTM3U/i.test(text)) return { ok: false, abrMaster: false }
+  // Paleoak often labels the master "1080p" even though it is a full ladder.
+  return { ok: true, abrMaster: /#EXT-X-STREAM-INF/i.test(text) }
+}
+
+/**
+ * Probe a Movy HLS URL. Returns latency so resolvers can prefer website-fast
+ * Auto CDNs over multi-second paleoak masters that stall anime playback.
+ */
+export async function probeMovyHlsUrlDetailed(
   url: string,
   referer: string = MOVY_PLAY_REFERER,
-): Promise<boolean> {
-  if (!url) return false
+): Promise<MovyProbeResult> {
+  if (!url) return { ok: false, ms: 0 }
   const headers: Record<string, string> = {
     Accept: '*/*',
     Referer: referer,
+    Origin: 'https://www.movy.sx',
     'User-Agent':
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
   }
+  const started = Date.now()
+  const elapsed = () => Date.now() - started
   try {
-    // Android: short CapacitorHttp timeouts — default nativeHttp is 30–45s and
-    // left "Trying Movy…" stuck for minutes while paleoak/zenoak hung.
     if (typeof window !== 'undefined') {
       try {
         const { Capacitor, CapacitorHttp } = await import('@capacitor/core')
@@ -356,14 +464,12 @@ export async function probeMovyHlsUrl(
             url,
             headers,
             responseType: 'text',
-            connectTimeout: 2_500,
-            readTimeout: 2_500,
+            connectTimeout: MOVY_PROBE_TIMEOUT_MS,
+            readTimeout: MOVY_PROBE_TIMEOUT_MS,
           })
-          const body = String(res.data ?? '').trim()
-          if (res.status < 200 || res.status >= 300) return false
-          if (!body) return false
-          if (/please wait|file process|not (yet )?ready|processing/i.test(body)) return false
-          return /#EXTM3U/i.test(body)
+          if (res.status < 200 || res.status >= 300) return { ok: false, ms: elapsed() }
+          const classified = classifyMovyPlaylistBody(String(res.data ?? ''))
+          return { ...classified, ms: elapsed() }
         }
       } catch {
         /* fall through */
@@ -374,45 +480,84 @@ export async function probeMovyHlsUrl(
       const r = await Promise.race([
         window.signalDesktop.fetchJsonGet(url, referer),
         new Promise<{ ok: false; status: number; content: string }>((resolve) =>
-          setTimeout(() => resolve({ ok: false, status: 0, content: '' }), 2_500),
+          setTimeout(() => resolve({ ok: false, status: 0, content: '' }), MOVY_PROBE_TIMEOUT_MS),
         ),
       ])
-      const body = String(r.content || '').trim()
-      if (!r.ok && !(Number(r.status) >= 200)) return false
-      if (!body) return false
-      if (/please wait|file process|not (yet )?ready|processing/i.test(body)) return false
-      if (Number(r.status) >= 400) return false
-      return /#EXTM3U/i.test(body)
+      if (!r.ok && !(Number(r.status) >= 200)) return { ok: false, ms: elapsed() }
+      if (Number(r.status) >= 400) return { ok: false, ms: elapsed() }
+      const classified = classifyMovyPlaylistBody(String(r.content || ''))
+      return { ...classified, ms: elapsed() }
     }
 
     const res = await fetch(url, {
       headers,
-      signal: AbortSignal.timeout(2_500),
+      signal: AbortSignal.timeout(MOVY_PROBE_TIMEOUT_MS),
     })
-    const body = (await res.text().catch(() => '')).trim()
-    if (!res.ok) return false
-    if (!body) return false
-    if (/please wait|file process|not (yet )?ready|processing/i.test(body)) return false
-    return /#EXTM3U/i.test(body)
+    if (!res.ok) return { ok: false, ms: elapsed() }
+    const classified = classifyMovyPlaylistBody(await res.text().catch(() => ''))
+    return { ...classified, ms: elapsed() }
   } catch {
-    return false
+    return { ok: false, ms: elapsed() }
   }
+}
+
+export async function probeMovyHlsUrl(
+  url: string,
+  referer: string = MOVY_PLAY_REFERER,
+): Promise<boolean> {
+  return (await probeMovyHlsUrlDetailed(url, referer)).ok
+}
+
+/**
+ * Movy "paris" (and similarly named cities) often ship French dubs.
+ * Prefer US cities whenever any non-FR city answered.
+ */
+function isLikelyForeignDubMovyProvider(provider: string): boolean {
+  const p = String(provider || '')
+    .trim()
+    .toLowerCase()
+  return p === 'paris' || /french|france|\bfr\b/.test(p)
+}
+
+function rankMovyProviders(
+  base: readonly string[],
+  preferProvider?: string,
+): string[] {
+  const pref = String(preferProvider || '')
+    .trim()
+    .toLowerCase()
+  // Never pin a French-dub city first from "last played" memory.
+  const prefer = pref && !isLikelyForeignDubMovyProvider(pref) ? pref : ''
+  return [...base].sort((a, b) => {
+    const foreignA = isLikelyForeignDubMovyProvider(a) ? 1 : 0
+    const foreignB = isLikelyForeignDubMovyProvider(b) ? 1 : 0
+    if (foreignA !== foreignB) return foreignA - foreignB
+    if (prefer) {
+      if (a === prefer && b !== prefer) return -1
+      if (b === prefer && a !== prefer) return 1
+    }
+    const scoreA = getLearnedStreamScore(a)
+    const scoreB = getLearnedStreamScore(b)
+    if (Math.abs(scoreB - scoreA) >= 0.02) return scoreB - scoreA
+    return base.indexOf(a) - base.indexOf(b)
+  })
 }
 
 export async function resolveMovyPlay(options: MovyResolveOptions): Promise<MovyPlayResult> {
   const tmdbId = String(options.tmdbId || '').trim()
   const title = String(options.title || '').trim()
-  if (!tmdbId) return { ok: false, error: 'No TMDB id for Movy' }
-  if (!title) return { ok: false, error: 'No title for Movy' }
+  if (!tmdbId) return { ok: false, error: 'No TMDB id for this title' }
+  if (!title) return { ok: false, error: 'No title for this source' }
 
   const season = options.mediaType === 'tv' ? Math.max(1, options.season || 1) : undefined
   const episode = options.mediaType === 'tv' ? Math.max(1, options.episode || 1) : undefined
-  // Keep the city walk short — CDN objects are shared; 8×45s hung Android on "Trying Movy…".
-  const providers = (
-    options.mediaType === 'tv' ? MOVY_TV_PROVIDERS : MOVY_MOVIE_PROVIDERS
-  ).slice(0, 2)
+  const providers = rankMovyProviders(
+    options.mediaType === 'tv' ? MOVY_TV_PROVIDERS : MOVY_MOVIE_PROVIDERS,
+    options.preferProvider,
+  )
 
   const tryAtlanticFallback = async (): Promise<MovyPlayResult | null> => {
+    const started = Date.now()
     try {
       const alt = await resolveAtlanticPlay({
         tmdbId,
@@ -421,7 +566,12 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
         episode,
         title,
       })
-      if (!alt.ok) return null
+      if (!alt.ok) {
+        recordStreamProbeResult('atlantic', false, Date.now() - started)
+        return null
+      }
+      recordStreamProbeResult('atlantic', true, Date.now() - started)
+      if (alt.provider) recordStreamProbeResult(alt.provider, true, Date.now() - started)
       return {
         ok: true,
         mode: 'hls',
@@ -434,63 +584,280 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
         backend: 'atlantic',
       }
     } catch {
+      recordStreamProbeResult('atlantic', false, Date.now() - started)
       return null
     }
   }
 
-  // Kick Atlantic immediately so a dead Movy CDN doesn't block the whole resolve.
-  const atlanticPromise = tryAtlanticFallback()
-
-  let seed: string
-  try {
-    seed = await fetchMovySeed(tmdbId)
-  } catch (err) {
-    const atlantic = await atlanticPromise
-    if (atlantic) return atlantic
-    return { ok: false, error: err instanceof Error ? err.message : 'Movy seed failed' }
+  const tryStreamoFallback = async (): Promise<MovyPlayResult | null> => {
+    const started = Date.now()
+    try {
+      const alt = await resolveStreamoPlay({ tmdbId, mediaType: options.mediaType, season, episode })
+      recordStreamProbeResult('streamo', alt.ok, Date.now() - started)
+      if (!alt.ok) return null
+      return {
+        ok: true,
+        mode: 'hls',
+        url: alt.url,
+        referer: alt.referer,
+        provider: alt.provider,
+        tmdbId,
+        season,
+        episode,
+        backend: 'streamo',
+      }
+    } catch {
+      recordStreamProbeResult('streamo', false, Date.now() - started)
+      return null
+    }
   }
 
-  let seedRefreshTried = false
+  const resolveMovyCities = async (): Promise<MovyPlayResult | null> => {
+    type AliveCity = {
+      provider: string
+      decoded: NonNullable<Awaited<ReturnType<typeof fetchProviderSources>>>
+      best: NonNullable<ReturnType<typeof pickMovySource>>
+      started: number
+      probeMs: number
+      /** True when the playlist is a multi-bitrate master (true ABR ladder). */
+      abrMaster: boolean
+    }
 
-  for (const provider of providers) {
-    let decoded = await fetchProviderSources(provider, options, seed)
-    if (!decoded && !seedRefreshTried) {
-      seedRefreshTried = true
-      try {
-        seedCache.delete(`${MOVY_STREAM_ORIGIN}|${tmdbId}`)
-        seed = await fetchMovySeed(tmdbId)
-        decoded = await fetchProviderSources(provider, options, seed)
-      } catch {
-        decoded = null
+    const buildResult = (pick: AliveCity): MovyPlayResult => {
+      const sub = pickEnglishSubtitle(pick.decoded.subtitles)
+      return {
+        ok: true,
+        mode: 'hls',
+        url: pick.best.url,
+        referer: MOVY_PLAY_REFERER,
+        provider: pick.best.provider || pick.provider,
+        tmdbId,
+        season,
+        episode,
+        quality: pick.best.quality,
+        subtitleUrl: sub,
+        subtitleKind: sub ? 'file' : undefined,
+        backend: 'movy',
       }
     }
-    if (!decoded || decoded.sources.length === 0) continue
 
-    const best = decoded.sources[0]!
-    const alive = await probeMovyHlsUrl(best.url, MOVY_PLAY_REFERER)
-    if (!alive) {
-      // One dead CDN object → skip remaining Movy cities and take Atlantic.
-      break
+    const pickFromPool = async (englishAlive: AliveCity[]): Promise<MovyPlayResult | null> => {
+      if (englishAlive.length === 0) return null
+      let pool = englishAlive
+      // Prefer website-fast Auto CDNs (majorplay ~200ms) over paleoak (~6s masters
+      // + 9s segments) that buffer/stall anime on desktop and Android.
+      const fast = pool.filter((c) => c.probeMs > 0 && c.probeMs <= 2_000)
+      if (fast.length > 0) pool = fast
+      pool = [...pool].sort((a, b) => {
+        // Prefer real ABR masters (incl. paleoak "1080p" labels that are ladders).
+        const aAbr = a.abrMaster || isAutoQualityLabel(a.best) ? 0 : 1
+        const bAbr = b.abrMaster || isAutoQualityLabel(b.best) ? 0 : 1
+        if (aAbr !== bAbr) return aAbr - bAbr
+        return a.probeMs - b.probeMs
+      })
+
+      let pick = pool[0]!
+      // Some cities hand back the wrong episode (another file of the season) —
+      // keep the rendition whose runtime most other cities agree on, then fastest.
+      if (options.mediaType === 'tv' && pool.length >= 2) {
+        const durations = await Promise.all(
+          pool.map((c) =>
+            withTimeoutOr(fetchHlsDurationSec(c.best.url), MOVY_DURATION_TIMEOUT_MS, 0),
+          ),
+        )
+        let bestVotes = -1
+        let bestMs = Number.POSITIVE_INFINITY
+        pool.forEach((c, i) => {
+          const d = durations[i]!
+          const votes =
+            d > 0
+              ? durations.filter((o) => o > 0 && Math.abs(o - d) <= MOVY_DURATION_TOLERANCE_SEC)
+                  .length
+              : 0
+          if (votes > bestVotes || (votes === bestVotes && c.probeMs < bestMs)) {
+            bestVotes = votes
+            bestMs = c.probeMs
+            pick = c
+          }
+        })
+      }
+      return buildResult(pick)
     }
-    const sub = pickEnglishSubtitle(decoded.subtitles)
-    return {
-      ok: true,
-      mode: 'hls',
-      url: best.url,
-      referer: MOVY_PLAY_REFERER,
-      provider: best.provider,
-      tmdbId,
-      season,
-      episode,
-      quality: best.quality,
-      subtitleUrl: sub,
-      subtitleKind: sub ? 'file' : undefined,
-      backend: 'movy',
+
+    /**
+     * Race city providers: HTTP 500/empty drop immediately; probe survivors as they
+     * arrive; return as soon as an English city is live instead of waiting for
+     * miami/seattle/boise (etc.) to finish their timeouts.
+     */
+    const raceCities = (s: string): Promise<MovyPlayResult | null> =>
+      new Promise((resolve) => {
+        let finished = false
+        let pending = providers.length
+        const englishAlive: AliveCity[] = []
+        const seenUrls = new Set<string>()
+        let graceTimer: ReturnType<typeof setTimeout> | null = null
+
+        const settleOne = () => {
+          pending -= 1
+          if (pending <= 0) void finalize()
+        }
+
+        const finalize = async () => {
+          if (finished) return
+          finished = true
+          if (graceTimer != null) {
+            clearTimeout(graceTimer)
+            graceTimer = null
+          }
+          // Skip French-dub-only answers so Atlantic/Streamo can try English.
+          resolve(await pickFromPool(englishAlive))
+        }
+
+        const armEarlyPick = () => {
+          if (finished || graceTimer != null) return
+          graceTimer = setTimeout(() => {
+            graceTimer = null
+            void finalize()
+          }, MOVY_EARLY_PEER_GRACE_MS)
+        }
+
+        for (const provider of providers) {
+          void (async () => {
+            const started = Date.now()
+            const decoded = await withTimeoutOr(
+              fetchProviderSources(provider, options, s),
+              MOVY_SOURCES_TIMEOUT_MS,
+              null,
+            )
+            if (finished) {
+              settleOne()
+              return
+            }
+            if (!decoded?.sources.length) {
+              recordStreamProbeResult(provider, false, Date.now() - started)
+              settleOne()
+              return
+            }
+            const best = pickMovySource(decoded.sources)
+            if (!best?.url) {
+              recordStreamProbeResult(provider, false, Date.now() - started)
+              settleOne()
+              return
+            }
+            if (seenUrls.has(best.url)) {
+              settleOne()
+              return
+            }
+            seenUrls.add(best.url)
+
+            const probe = await probeMovyHlsUrlDetailed(best.url, MOVY_PLAY_REFERER)
+            recordStreamProbeResult(provider, probe.ok, Date.now() - started)
+            recordStreamProbeResult(best.url, probe.ok, Date.now() - started)
+            if (finished) {
+              settleOne()
+              return
+            }
+            if (
+              probe.ok &&
+              !isLikelyForeignDubMovyProvider(provider)
+            ) {
+              englishAlive.push({
+                provider,
+                decoded,
+                best,
+                started,
+                probeMs: probe.ms,
+                abrMaster: Boolean(probe.abrMaster),
+              })
+              // Two English cities: pick now (duration vote). One live city: short
+              // grace so a peer can join, then pick without waiting on 500/hung cities.
+              if (englishAlive.length >= 2) {
+                void finalize()
+                return
+              }
+              armEarlyPick()
+            }
+            settleOne()
+          })()
+        }
+      })
+
+    let seed: string
+    try {
+      seed = await fetchMovySeed(tmdbId)
+    } catch {
+      return null
     }
+    const seedKey = `${MOVY_STREAM_ORIGIN}|${tmdbId}`
+    let result = await raceCities(seed)
+    // fetchProviderSources drops the cached seed on 401 — refresh once and retry.
+    if (!result && !seedCache.has(seedKey)) {
+      try {
+        seed = await fetchMovySeed(tmdbId)
+        result = await raceCities(seed)
+      } catch {
+        /* keep first pass */
+      }
+    }
+    return result
   }
 
-  const atlantic = await atlanticPromise
-  if (atlantic) return atlantic
+  // Kick fallbacks immediately — Streamo alone needs ~9s for its provider lookup.
+  const fallbacks = {
+    atlantic: tryAtlanticFallback(),
+    streamo: tryStreamoFallback(),
+  }
+  const fallbackOrder: Array<keyof typeof fallbacks> =
+    options.preferBackend === 'streamo' ? ['streamo', 'atlantic'] : ['atlantic', 'streamo']
 
-  return { ok: false, error: 'No Movy or Atlantic streams for this title' }
+  const preferred = options.preferBackend
+  if (preferred === 'atlantic' || preferred === 'streamo') {
+    const first = await fallbacks[preferred]
+    if (first) return first
+  }
+
+  const movy = await resolveMovyCities()
+  if (movy) return movy
+
+  for (const key of fallbackOrder) {
+    if (key === preferred) continue
+    const alt = await fallbacks[key]
+    if (alt) return alt
+  }
+
+  return { ok: false, error: 'No streams for this title' }
+}
+
+function withTimeoutOr<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(fallback), ms)
+    promise.then(
+      (v) => {
+        clearTimeout(timer)
+        resolve(v)
+      },
+      () => {
+        clearTimeout(timer)
+        resolve(fallback)
+      },
+    )
+  })
+}
+
+/** Total #EXTINF seconds of an HLS stream (first variant of a master). 0 if unknown. */
+async function fetchHlsDurationSec(url: string): Promise<number> {
+  let res = await fetchText(url)
+  if (!res.ok) return 0
+  if (/#EXT-X-STREAM-INF/i.test(res.text)) {
+    const variant = res.text
+      .split('\n')
+      .map((l) => l.trim())
+      .find((l) => l && !l.startsWith('#'))
+    if (!variant) return 0
+    res = await fetchText(new URL(variant, url).href)
+    if (!res.ok) return 0
+  }
+  let total = 0
+  for (const m of res.text.matchAll(/#EXTINF:([\d.]+)/g)) total += Number(m[1]) || 0
+  return total
 }

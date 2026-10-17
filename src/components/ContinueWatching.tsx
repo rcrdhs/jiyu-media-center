@@ -15,6 +15,10 @@ import {
 } from '../lib/continueWatching'
 import { isWeakPosterUrl, resolveCatalogPoster } from '../lib/posterFallback'
 import { isShowBrowseItem } from '../lib/torrents'
+import {
+  HIDE_KEYWORDS_EVENT,
+  itemMatchesHideKeywords,
+} from '../lib/hideKeywords'
 
 function ContinueCard({
   entry,
@@ -114,17 +118,21 @@ export function ContinueWatching({
     refresh()
     window.addEventListener('focus', refresh)
     window.addEventListener(CONTINUE_WATCHING_EVENT, refresh)
+    window.addEventListener(HIDE_KEYWORDS_EVENT, refresh)
     document.addEventListener('visibilitychange', refresh)
     return () => {
       window.removeEventListener('focus', refresh)
       window.removeEventListener(CONTINUE_WATCHING_EVENT, refresh)
+      window.removeEventListener(HIDE_KEYWORDS_EVENT, refresh)
       document.removeEventListener('visibilitychange', refresh)
     }
   }, [location.pathname, location.key, getById])
 
-  const shown = category
-    ? entries.filter((entry) => entry.category === category)
-    : entries.filter((entry) => isVodCategory(entry.category))
+  const shown = (
+    category
+      ? entries.filter((entry) => entry.category === category)
+      : entries.filter((entry) => isVodCategory(entry.category))
+  ).filter((entry) => !itemMatchesHideKeywords(entry))
   if (shown.length === 0) return null
 
   function remove(id: string) {

@@ -8,6 +8,7 @@
  */
 
 import type { StreamItem, StreamPlaylistItem } from '../types'
+import { sportsMatchPoster } from './sportsMatchPoster'
 
 /** Preferred frontend origin (workers mirror). */
 export const LIVEXTV_ORIGIN = 'https://livextv.hybrows.workers.dev'
@@ -242,43 +243,11 @@ function isHttpImageUrl(raw?: string): boolean {
   }
 }
 
-function escapeSvgText(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-}
-
-/** Split-crest-style placeholder when LiveXTV has no real thumbnail. */
-function replayPosterFallback(title: string, league: string): string {
-  const parts = title.split(/\s+vs\.?\s+/i).map((p) => p.trim()).filter(Boolean)
-  const home = escapeSvgText((parts[0] || title).slice(0, 28))
-  const away = escapeSvgText((parts[1] || 'Replay').slice(0, 28))
-  const sub = escapeSvgText((league || 'Replay').slice(0, 24))
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360">
-  <defs>
-    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#1a2332"/>
-      <stop offset="50%" stop-color="#121820"/>
-      <stop offset="100%" stop-color="#0d3b2e"/>
-    </linearGradient>
-  </defs>
-  <rect width="640" height="360" fill="url(#g)"/>
-  <rect x="0" y="0" width="320" height="360" fill="#1e3a5f" opacity="0.55"/>
-  <rect x="320" y="0" width="320" height="360" fill="#1a4d3a" opacity="0.55"/>
-  <text x="160" y="175" text-anchor="middle" fill="#f3f6fb" font-family="Segoe UI,Arial,sans-serif" font-size="28" font-weight="700">${home}</text>
-  <text x="480" y="175" text-anchor="middle" fill="#f3f6fb" font-family="Segoe UI,Arial,sans-serif" font-size="28" font-weight="700">${away}</text>
-  <circle cx="320" cy="180" r="28" fill="#0b1220" stroke="#e8eef8" stroke-width="2"/>
-  <text x="320" y="186" text-anchor="middle" fill="#e8eef8" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="700">VS</text>
-  <text x="320" y="330" text-anchor="middle" fill="#9aa8bc" font-family="Segoe UI,Arial,sans-serif" font-size="16">${sub}</text>
-</svg>`
-  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`
-}
-
 function livextvPoster(raw: string | undefined, title: string, league: string): string {
-  if (isHttpImageUrl(raw)) return String(raw).trim()
-  return replayPosterFallback(title, league)
+  // Prefer shared VS art so LiveXTV matches FullMatchShows / Your teams cards.
+  // Keep a real CDN thumbnail only when the title is not a home-vs-away match.
+  if (isHttpImageUrl(raw) && !/\bvs\.?\b/i.test(title)) return String(raw).trim()
+  return sportsMatchPoster(title, league || 'Replay')
 }
 
 export function livextvReplayToItem(
@@ -533,13 +502,34 @@ async function embedLooksPlayable(url: string): Promise<boolean> {
   return true
 }
 
+function isSoccerfullPlayUrl(url: string): boolean {
+  return /soccerfull\.(?:net|com)\/play\//i.test(url)
+}
+
+/** LiveXTV rows whose every part still points at dead soccerfull hosts. */
+export function isSoccerfullOnlyReplayItem(
+  item: Pick<StreamItem, 'url' | 'playlist'>,
+): boolean {
+  const urls: string[] = []
+  if (item.url) urls.push(item.url)
+  for (const part of item.playlist || []) {
+    if (part?.url) urls.push(part.url)
+  }
+  if (urls.length === 0) return false
+  return urls.every(isSoccerfullPlayUrl)
+}
+
 /**
  * Unwrap a catalog replay into a playable HLS or embed URL.
  * Tries each part until one resolves (soccerfull pages often wrap DoodStream / Videas).
+ * When soccerfull hosts are dead, football fixtures fall back to FullMatchShows / Playmate.
  * LiveXTV watch-page fallbacks rotate across site mirrors (pro / workers / live).
  */
 export async function resolveLivextvReplayPlay(
-  item: Pick<StreamItem, 'url' | 'detailUrl' | 'playlist' | 'id'>,
+  item: Pick<
+    StreamItem,
+    'url' | 'detailUrl' | 'playlist' | 'id' | 'title' | 'tags' | 'releasedAt'
+  >,
   preferredIndex = 0,
 ): Promise<LivextvReplayPlayResult> {
   const candidates: string[] = []
@@ -553,6 +543,8 @@ export async function resolveLivextvReplayPlay(
   }
   if (item.url) candidates.push(item.url)
 
+  let sawSoccerfull = false
+  let soccerfullHostUnreachable = false
   const tried = new Set<string>()
   for (const candidate of candidates) {
     if (!candidate || tried.has(candidate)) continue
@@ -577,9 +569,21 @@ export async function resolveLivextvReplayPlay(
     }
 
     // Soccerfull wrapper — unwrap nested player / HLS (Referer via each LiveXTV mirror).
-    if (/soccerfull\.net\/play\//i.test(candidate)) {
+    if (isSoccerfullPlayUrl(candidate)) {
+      sawSoccerfull = true
+      // Once the host is unreachable, skip remaining soccerfull parts (DNS / park pages).
+      if (soccerfullHostUnreachable) continue
       const page = await fetchSoccerfullWithMirrorReferers(candidate)
+      if (!page.ok && !page.content) {
+        soccerfullHostUnreachable = true
+        continue
+      }
       if (looksLikeNginx404(page.content, page.status) || !page.ok) {
+        continue
+      }
+      // Parked / redirect shells (soccerfull.com) are not players.
+      if (/parklogic|sedoparking|buy this domain|Redirecting/i.test(page.content.slice(0, 800))) {
+        soccerfullHostUnreachable = true
         continue
       }
       const { hls, embeds } = extractSoccerfullTargets(page.content)
@@ -590,10 +594,37 @@ export async function resolveLivextvReplayPlay(
         if (!(await embedLooksPlayable(embed))) continue
         return { ok: true, mode: 'embed', url: embed }
       }
+      // Reachable HTML but no player targets — try next part.
     } else if (/^https?:\/\//i.test(candidate)) {
       if (await embedLooksPlayable(candidate)) {
         return { ok: true, mode: 'embed', url: candidate }
       }
+    }
+  }
+
+  // Soccerfull.net is currently NXDOMAIN — open the same football fixture via FullMatchShows.
+  const wantFootballFallback =
+    sawSoccerfull ||
+    item.tags?.includes('football') ||
+    /football|soccer/i.test(String(item.tags?.join(' ') || ''))
+  if (wantFootballFallback && item.title) {
+    try {
+      const { resolveFullmatchShowsPlayForTitle, toMinimalReplayEmbedUrl } =
+        await import('./fullmatchShows')
+      const fms = await resolveFullmatchShowsPlayForTitle(item.title, item.releasedAt)
+      if (fms.ok) {
+        return { ok: true, mode: 'embed', url: toMinimalReplayEmbedUrl(fms.url) }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  // Avoid LiveXTV watch SPA when every part was soccerfull — it just iframes the same dead host (white player).
+  if (sawSoccerfull && candidates.length > 0 && candidates.every(isSoccerfullPlayUrl)) {
+    return {
+      ok: false,
+      error: 'This replay is unavailable — try another match on the Replay shelf',
     }
   }
 

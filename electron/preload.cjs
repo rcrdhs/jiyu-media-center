@@ -85,6 +85,8 @@ contextBridge.exposeInMainWorld('signalDesktop', {
   fetchJsonPost: (url, body, referer) => ipcRenderer.invoke('page:fetchJsonPost', url, body, referer),
   fetchJsonGet: (url, referer) => ipcRenderer.invoke('page:fetchJsonGet', url, referer),
   resolveWyzieSubtitle: (options) => ipcRenderer.invoke('wyzie:resolveSubtitle', options || {}),
+  resolveOpenSubtitlesSubtitle: (options) =>
+    ipcRenderer.invoke('opensubtitles:resolveSubtitle', options || {}),
   closeCfBrowser: (options) => ipcRenderer.invoke('cf:closeSystemBrowser', options),
   torrentStream: (magnet, options) => ipcRenderer.invoke('torrent:stream', magnet, options),
   torrentStatus: (infoHash) => ipcRenderer.invoke('torrent:status', infoHash),

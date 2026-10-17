@@ -49,7 +49,7 @@ import type { StreamItem } from '../types'
  * Bump whenever a site adapter changes how titles/posters are extracted, so
  * already-synced shelves are rebuilt automatically on the next launch.
  */
-export const TORRENT_SCRAPER_VERSION = 46
+export const TORRENT_SCRAPER_VERSION = 47
 
 export interface TorrentSyncProgress {
   sourceId: string
@@ -513,15 +513,31 @@ export async function syncTorrentSource(
           }
         }
 
-        const incomingNewIds = new Set(items.filter(isMoviesNewItem).map((item) => item.id))
-        // Refresh New Movies only — never delete a Popular title that aged off "New".
-        const staleNewIds = existingNew
-          .filter((item) => !incomingNewIds.has(item.id) && !isMoviesPopularItem(item))
-          .map((item) => item.id)
+        const incomingNew = items.filter(isMoviesNewItem)
+        const incomingNewIds = new Set(incomingNew.map((item) => item.id))
+        // If the New feed failed/empty, keep existing New rows (and their tags).
+        // Upserting Popular-only copies would strip `new-movies` and wipe the shelf.
+        const newFeedOk = incomingNew.length > 0
+        const staleNewIds = newFeedOk
+          ? existingNew
+              .filter((item) => !incomingNewIds.has(item.id) && !isMoviesPopularItem(item))
+              .map((item) => item.id)
+          : []
+
+        const mergedForWrite = newFeedOk
+          ? merged
+          : merged.map((item) => {
+              const prev = existing.find((row) => row.id === item.id)
+              if (!prev) return item
+              const tags = [
+                ...new Set([...(prev.tags ?? []), ...(item.tags ?? [])]),
+              ]
+              return { ...item, tags }
+            })
 
         await deleteTorrentItemsByIds(staleNewIds)
-        await upsertInBatches(merged)
-        savedCount = merged.length
+        await upsertInBatches(mergedForWrite)
+        savedCount = mergedForWrite.length
       } else {
         // One replace at the end (batched) — mid-sync IDB writes were freezing Jiyu.
         // Cancel is ignored once delete starts so we never leave an empty shelf.

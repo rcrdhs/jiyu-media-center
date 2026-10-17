@@ -591,13 +591,6 @@ export async function resolveCinetaroPlay(
     }
   }
 
-  // Last resort: open cinextream anyway (in-app browser can complete any soft gate).
-  return {
-    ok: true,
-    url: embedUrl,
-    tmdbId,
-    season,
-    episode,
-    embed: true,
-  }
+  // Don't pretend success — callers fall back to Movy/Zenox.
+  return { ok: false, error: 'Could not open this source' }
 }

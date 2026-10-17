@@ -1,4 +1,4 @@
-const { app, BrowserWindow, WebContentsView, ipcMain, dialog, shell, session, powerMonitor } =
+const { app, BrowserWindow, WebContentsView, ipcMain, dialog, shell, session, powerMonitor, net } =
   require('electron')
 const path = require('path')
 const fs = require('fs')
@@ -251,22 +251,66 @@ const playbackHeaderOverrides = new Map()
 /** Last Referer from setPlaybackHeaders — also applied to CDN hosts (HLS segments). */
 let activePlaybackReferrer = ''
 
+/**
+ * Movy "Auto" cities (dallas/etc.) serve HLS as *.json?type=m3u8 and disguise
+ * segments as .js/.webp/.html/.svg on rotating hosts — must get Referer + CORS
+ * rewrite or desktop hls.js stalls forever while movy.sx plays fine.
+ */
+function isMovyStylePlaybackUrl(url) {
+  const u = String(url || '')
+  if (!u) return false
+  if (/paleoak|zenoak|majorplay\.net|wecollege\.net/i.test(u)) return true
+  if (/[?&]type=m3u8\b/i.test(u)) return true
+  if (/workers\.dev\/video\.m3u8/i.test(u)) return true
+  // Disguised chunk paths: /v/<hash>/style/chunk-0.js|image-2.webp|page-3.html
+  if (/\/v\/[a-f0-9]{16,}\/style\/(?:chunk|image|page|vec)-/i.test(u)) return true
+  return false
+}
+
+/** Bilibili.tv intl CDN / API media — need site Referer like Movy CDNs. */
+function isBilibiliTvPlaybackUrl(url) {
+  const u = String(url || '')
+  if (!u) return false
+  if (/bilibili\.tv|biliintl\.com|bstarstatic\.com|upos-bstar/i.test(u)) return true
+  if (/akamaized\.net\/iupxcodeboss/i.test(u)) return true
+  return false
+}
+
 function isIptvMediaUrl(url) {
   const u = String(url || '')
   if (!u) return false
   if (/vimeocdn\.com|player\.vimeo\.com/i.test(u)) return true
-  // Movy / Atlantic / Cinecat CDNs (Aphrodite uses /cdn-m3u8?payload= — no .m3u8).
+  // Movy / Atlantic / Cinecat / Streamo CDNs (Aphrodite uses /cdn-m3u8?payload= — no .m3u8).
   if (
-    /totallyacdn\.|cdn\.hls\.lol|stream\.hls\.lol|transcode\.cfd|zenoak|paleoak|wecollege\.net/i.test(
+    /totallyacdn\.|cdn\.hls\.lol|stream\.hls\.lol|transcode\.cfd|zenoak|paleoak|wecollege\.net|shegu\.net/i.test(
       u,
     ) ||
     /\/cdn-m3u8(?:\?|$)/i.test(u)
   ) {
     return true
   }
+  if (isMovyStylePlaybackUrl(u)) return true
+  if (isBilibiliTvPlaybackUrl(u)) return true
   if (/\.(m3u8?|ts|m4s|mpd|aac|mp4|mp3)(\?|#|$)/i.test(u)) return true
   // Common IPTV panel / CDN path shapes without a file extension
   return /\/(?:live|play|hls|stream|playlist|manifest)\b/i.test(u)
+}
+
+function isArmedMovyPlayback() {
+  return /movy\.sx/i.test(String(activePlaybackReferrer || ''))
+}
+
+/** Resource types used by Movy disguised HLS chunks in Chromium. */
+function isLikelyStreamResourceType(resourceType) {
+  const rt = String(resourceType || '')
+  return (
+    rt === 'xhr' ||
+    rt === 'media' ||
+    rt === 'image' ||
+    rt === 'script' ||
+    rt === 'stylesheet' ||
+    rt === 'other'
+  )
 }
 const DEV_URL = 'http://localhost:5173'
 const WEB_SESSION = 'persist:jiyu-web'
@@ -763,6 +807,10 @@ const BROWSER_AD_BLOCK_URLS = [
   '*://*.moatads.com/*',
   '*://*.taboola.com/*',
   '*://*.outbrain.com/*',
+  '*://*.effectivecpmnetwork.com/*',
+  '*://effectivecpmnetwork.com/*',
+  '*://*.hgcloud.to/*',
+  '*://hgcloud.to/*',
   '*://*.adultfriendfinder.com/*',
   '*://*.stripchat.com/*',
   '*://*.chaturbate.com/*',
@@ -798,6 +846,138 @@ const BROWSER_AD_BLOCK_URLS = [
 ]
 
 /** Installer / forced-download bait from embed ads (PRIMEROLL → OperaSetup.exe). */
+/** OptimsServe-style injectors on Streamed embed.st pages (Defender: Suschil). */
+function isStreamedInjectedAdwareUrl(url) {
+  try {
+    const u = new URL(String(url || ''))
+    const host = u.hostname.replace(/^www\./i, '').toLowerCase()
+    const pathName = u.pathname || ''
+    if (
+      /(^|\.)(capitalhospitals\.org|drawerexperienceletting\.com|optimserve\.agency)$/i.test(
+        host,
+      )
+    ) {
+      return true
+    }
+    // /1/<long hex> script loaders
+    if (/^\/1\/[0-9a-f]{20,}\/?$/i.test(pathName)) return true
+    // /aa/bb/cc/<long hex>.js nested loaders
+    if (/^\/[0-9a-f]{2}\/[0-9a-f]{2}\/[0-9a-f]{2}\/[0-9a-f]{20,}\.js$/i.test(pathName)) {
+      return true
+    }
+    // Brandable junk domain + hex loader path
+    if (
+      /^[a-z]{10,}\.(com|org|net|info)$/i.test(host) &&
+      (/^\/1\/[0-9a-f]{16,}/i.test(pathName) ||
+        /^\/[0-9a-f]{2}\/[0-9a-f]{2}\/[0-9a-f]{2}\//i.test(pathName))
+    ) {
+      return true
+    }
+    return false
+  } catch {
+    return false
+  }
+}
+
+function isAllowedSportsPlayerHost(host) {
+  const h = String(host || '')
+    .replace(/^www\./i, '')
+    .toLowerCase()
+  if (!h) return false
+  if (h.includes('strmd')) return true
+  return /(^|\.)(embed\.st|embedhd\.st|embedindia\.st|streamed\.pk|ppv\.st|ppvservices\.st|b-cdn\.net|jsdelivr\.net|unpkg\.com|clappr\.io|jwpcdn\.com|jwplatform\.com|cloudfront\.net|akamaized\.net|akamaihd\.net|fastly\.net|videodelivery\.net|mux\.com|googleapis\.com|gstatic\.com|swarmcloud|hlsjs|cloudflare\.com)$/i.test(
+    h,
+  )
+}
+
+function isSportsEmbedPageUrl(url) {
+  const raw = String(url || '')
+  if (!raw) return false
+  if (isSportsEmbedHost(raw)) return true
+  try {
+    const parsed = new URL(raw)
+    if (isRotatingSportsEmbedPath(parsed.pathname || '')) return true
+    const host = parsed.hostname.replace(/^www\./i, '').toLowerCase()
+    if (host === 'streamed.pk' || host.endsWith('.streamed.pk')) return true
+  } catch {
+    /* ignore */
+  }
+  return false
+}
+
+function isSportsMediaUrl(url) {
+  return /\.(m3u8|mp4|m4s|ts|aac|m4a|vtt|srt|jpg|jpeg|png|gif|webp|svg|woff2?)(\?|$)/i.test(
+    String(url || ''),
+  )
+}
+
+/** On Streamed/PPV player pages, only allow player CDNs for scripts — block Suschil injectors. */
+function shouldBlockSportsThirdParty(details) {
+  const url = String(details.url || '')
+  if (!url || isSportsMediaUrl(url)) return false
+  let pageUrl = ''
+  try {
+    const { webContents } = require('electron')
+    const wc =
+      details.webContentsId != null ? webContents.fromId(details.webContentsId) : null
+    if (wc && !wc.isDestroyed()) pageUrl = wc.getURL() || ''
+  } catch {
+    /* ignore */
+  }
+  if (!pageUrl) pageUrl = String(details.referrer || '')
+  if (!isSportsEmbedPageUrl(pageUrl)) return false
+  // Same-origin /ad.html on embed.st is an adware frame, not the player.
+  try {
+    if (/\/ad\.html(\?|#|$)/i.test(new URL(url).pathname || '')) return true
+  } catch {
+    /* ignore */
+  }
+  try {
+    const host = new URL(url).hostname.replace(/^www\./i, '').toLowerCase()
+    if (isAllowedSportsPlayerHost(host)) return false
+    if (sameBrowserSite(pageUrl, url)) return false
+  } catch {
+    return false
+  }
+  const type = String(details.resourceType || '')
+  // Scripts / iframes / workers from unknown hosts are how Suschil bait arrives.
+  if (
+    type === 'script' ||
+    type === 'subFrame' ||
+    type === 'stylesheet' ||
+    type === 'cspReport' ||
+    type === 'ping'
+  ) {
+    return true
+  }
+  return false
+}
+
+/** Push / “you received a message” adware CDNs spun up by PPV iframe mirrors. */
+function isPushAdwareHost(host, url) {
+  const h = String(host || '')
+    .replace(/^www\./i, '')
+    .toLowerCase()
+  const raw = String(url || '')
+  if (!h) return false
+  if (/(^|\.)(wpnxiswpuyrfn\.icu|vbcojhroxkoaf\.online)$/i.test(h)) return true
+  // High-entropy label + shady TLD + ad script/path — never needed for playback.
+  if (
+    /\.(icu|cfd|cyou|top|buzz|click|loan|gq|ml|cf|ga|tk)$/i.test(h) &&
+    (/\/d3\.php|\/script\/|selAdType|adserver|tabup|psid=/i.test(raw) ||
+      /^[a-z]{10,}\./i.test(h))
+  ) {
+    return true
+  }
+  if (
+    /\.(online|site|xyz|club)$/i.test(h) &&
+    /\/script\/(kl1|main_script|atgv2|intrn|index_abc)|\/d3\.php/i.test(raw)
+  ) {
+    return true
+  }
+  return false
+}
+
 function isBlockedBrowserDownloadUrl(url) {
   const raw = String(url || '')
   if (!raw) return false
@@ -812,7 +992,7 @@ function isAdHijackUrl(url) {
   const raw = String(url || '')
   if (!raw) return false
   if (
-    /PWNgames|utm_source=PWN|OperaSetup|opera_gx|get\/opera|promo\.worldofwarships|worldofwarships\.com\/glow|utm_source=PRIMEROLL|download.*(browser|player)|install.*(browser|player)/i.test(
+    /PWNgames|utm_source=PWN|OperaSetup|opera_gx|get\/opera|promo\.worldofwarships|worldofwarships\.com\/glow|utm_source=PRIMEROLL|download.*(browser|player)|install.*(browser|player)|pt[=:]["']?tabup|"pt"\s*:\s*"tabup"|effectivecpmnetwork|gunacarduus/i.test(
       raw,
     )
   ) {
@@ -821,10 +1001,16 @@ function isAdHijackUrl(url) {
   try {
     const host = new URL(raw).hostname.replace(/^www\./i, '').toLowerCase()
     if (
-      /(^|\.)(drimzzzz\.info|wpnxiswpuyrfn\.icu|therocketlanguages\.com|opera\.com|geo\.opera\.com|download\.opera\.com|get\.opera\.com|worldofwarships\.com|wargaming\.net|wgcdn\.co|adaround\.net|popads\.net|propellerads\.com|exoclick\.com|trafficjunky\.net|juicyads\.com|tsyndicate\.com|adsterra\.com|doubleclick\.net|googlesyndication\.com|googleadservices\.com|adservice\.google\.com|taboola\.com|outbrain\.com|adultfriendfinder\.com|stripchat\.com|chaturbate\.com|pornhub\.com|xvideos\.com|xnxx\.com|xhamster\.com|livejasmin\.com|maleinsider\.org|soulk\.com|soulk\.net)$/i.test(
+      /(^|\.)(drimzzzz\.info|wpnxiswpuyrfn\.icu|vbcojhroxkoaf\.online|capitalhospitals\.org|drawerexperienceletting\.com|optimserve\.agency|therocketlanguages\.com|opera\.com|geo\.opera\.com|download\.opera\.com|get\.opera\.com|worldofwarships\.com|wargaming\.net|wgcdn\.co|adaround\.net|popads\.net|propellerads\.com|exoclick\.com|trafficjunky\.net|juicyads\.com|tsyndicate\.com|adsterra\.com|doubleclick\.net|googlesyndication\.com|googleadservices\.com|adservice\.google\.com|taboola\.com|outbrain\.com|effectivecpmnetwork\.com|hgcloud\.to|adultfriendfinder\.com|stripchat\.com|chaturbate\.com|pornhub\.com|xvideos\.com|xnxx\.com|xhamster\.com|livejasmin\.com|maleinsider\.org|soulk\.com|soulk\.net)$/i.test(
         host,
       )
     ) {
+      return true
+    }
+    // Push-notification adware CDNs used by rotating PPV mirrors (AV flags these).
+    if (isPushAdwareHost(host, raw)) return true
+    if (isStreamedInjectedAdwareUrl(raw)) return true
+    if (/\.(cyou|icu|cfd)$/i.test(host) && /ck9=|tabup|psid=|adsystem|clickid/i.test(raw)) {
       return true
     }
   } catch {
@@ -883,6 +1069,9 @@ function isPlayerEmbedHost(url) {
     const parsed = new URL(url)
     const host = parsed.hostname.replace(/^www\./i, '').toLowerCase()
     const path = parsed.pathname || ''
+    if (typeof isRotatingSportsEmbedPath === 'function' && isRotatingSportsEmbedPath(path)) {
+      return true
+    }
     return (
       host === 'embed.st' ||
       host.endsWith('.embed.st') ||
@@ -1136,9 +1325,16 @@ function installWebSessionDownloadGuard(ses) {
   })
 }
 
+function isRotatingSportsEmbedPath(pathname) {
+  return /^\/embed\/[a-z0-9][\w.-]{2,}/i.test(String(pathname || ''))
+}
+
 function isSportsEmbedHost(url) {
   try {
-    const host = new URL(url).hostname.replace(/^www\./i, '').toLowerCase()
+    const parsed = new URL(url)
+    const host = parsed.hostname.replace(/^www\./i, '').toLowerCase()
+    // PPV/Streamed iframe mirrors rotate off embed.st (e.g. taifood-blog.asia/embed/…).
+    if (isRotatingSportsEmbedPath(parsed.pathname || '')) return true
     return (
       host === 'embed.st' ||
       host.endsWith('.embed.st') ||
@@ -1149,12 +1345,15 @@ function isSportsEmbedHost(url) {
       host === 'streamed.pk' ||
       host.endsWith('.streamed.pk') ||
       host === 'ppv.st' ||
-      host.endsWith('.ppv.st')
+      host.endsWith('.ppv.st') ||
+      host === 'ppvservices.st' ||
+      host.endsWith('.ppvservices.st')
     )
   } catch {
     return false
   }
 }
+
 
 /**
  * Live sports OR Replay VOD embeds — both need the main-process play kick
@@ -1205,7 +1404,8 @@ function browserSessionAllowsReplayAds() {
   } catch {
     /* ignore */
   }
-  return urls.some((u) => isReplayAdSensitiveUrl(u))
+  // Live sports (embed.st) and replay VODs both refuse when googlesyndication is blocked.
+  return urls.some((u) => isReplayAdSensitiveUrl(u) || isSportsEmbedHost(u))
 }
 
 function isGoogleAdsNetworkHost(host) {
@@ -1295,15 +1495,22 @@ const BROWSER_AD_SHIELD_SCRIPT = `(() => {
     const path = String(location.pathname || '');
     // Wait for real navigation — blank frames must not lock in the hard shield.
     if (!host || /^about:/i.test(String(location.protocol || ''))) return 'skip-blank';
-    // LiveXTV / soccerfull / DoodStream VODs detect .adsbox bait + blocked ad scripts.
+    // Live sports + LiveXTV / soccerfull / DoodStream VODs detect .adsbox bait
+    // and blocked googlesyndication — soft shield only (FS block + popup trap).
     const replayAds =
+      /(^|\\.)embed(?:hd)?\\.st$/i.test(host) ||
+      /(^|\\.)embedindia\\.st$/i.test(host) ||
+      /(^|\\.)streamed\\.pk$/i.test(host) ||
+      /(^|\\.)ppv\\.st$/i.test(host) ||
+      /(^|\\.)ppvservices\\.st$/i.test(host) ||
       /(^|\\.)soccerfull\\.net$/i.test(host) ||
       /livextv/i.test(host) ||
       /(^|\\.)footreplays\\.com$/i.test(host) ||
       /(^|\\.)fullmatchshows\\.com$/i.test(host) ||
       /(^|\\.)playmate\\.to$/i.test(host) ||
       /(^|\\.)playmogo\\.com$/i.test(host) ||
-      /^\\/[de]\\/[a-z0-9]{6,}/i.test(path);
+      /^\\/[de]\\/[a-z0-9]{6,}/i.test(path) ||
+      /^\\/embed\\/[a-z0-9][\\w.-]{2,}/i.test(path);
     // Always re-assert — early-return must not skip FS block on later injects.
     try {
       if (!window.__jiyuFsBlocked) {
@@ -4525,7 +4732,7 @@ function multiWebAutoplayScript(forceMute) {
   const muteJs = forceMute ? 'true' : 'false'
   const level =
     Number.isFinite(webBrowserVolume) && webBrowserVolume > 0.001 ? webBrowserVolume : 1
-  return `(() => {
+  return `(async () => {
   try {
     const forceMute = ${muteJs};
     const wantVol = ${Number(level)};
@@ -4579,6 +4786,7 @@ function multiWebAutoplayScript(forceMute) {
     // re-clicking Clappr/JW play UI toggles pause on LIVE sports.
     const playing = videos.find((v) => !v.paused && !v.ended);
     if (playing) return 'already';
+    let started = false;
     for (const video of videos) {
       try {
         applyMute(video);
@@ -4586,19 +4794,46 @@ function multiWebAutoplayScript(forceMute) {
         video.setAttribute('playsinline', '');
         video.setAttribute('autoplay', '');
         if (video.paused) {
-          const p = video.play();
-          if (p && typeof p.catch === 'function') p.catch(() => {});
+          try {
+            await video.play();
+            started = !video.paused;
+          } catch (_) {}
+        } else {
+          started = true;
+        }
+      } catch (_) {}
+    }
+    // Prefer JW API when HTMLMediaElement.play() is blocked / no-ops.
+    if (!started && videos.length) {
+      try {
+        if (typeof jwplayer === 'function') {
+          const players =
+            typeof jwplayer.getPlayers === 'function' ? jwplayer.getPlayers() || [] : [];
+          for (const p of players) {
+            try {
+              if (forceMute) p.setMute?.(true);
+              p.play?.();
+              started = true;
+            } catch (_) {}
+          }
+          if (!players.length) {
+            try {
+              if (forceMute) jwplayer().setMute?.(true);
+              jwplayer().play?.();
+              started = true;
+            } catch (_) {}
+          }
         }
       } catch (_) {}
     }
     // If a <video> exists, never click toggleable stage/play chrome — play() only.
-    if (videos.length) return 'play';
+    if (videos.length) return started ? 'play' : 'play-pending';
     const ui = clickPlay();
     return ui || 'noop';
   } catch (_) {
     return 'error';
   }
-})();`
+})()`
 }
 
 const multiWebAutoplayTimers = new Map()
@@ -4643,8 +4878,10 @@ async function multiWebIsPlaying(id) {
     id,
     `(() => {
       try {
+        // readyState lags on live JW/Clappr — treat non-paused as playing so we
+        // do not fire a center-click that toggles pause on a just-started stream.
         const v = Array.from(document.querySelectorAll('video')).find(
-          (m) => !m.paused && !m.ended && m.readyState > 1
+          (m) => !m.paused && !m.ended
         );
         return v ? 'playing' : 'idle';
       } catch (_) { return 'idle'; }
@@ -4708,12 +4945,27 @@ function scheduleMultiWebAutoplay(id) {
     } catch {
       /* ignore */
     }
-    await executeInMultiWeb(key, multiWebAutoplayScript(forceMute))
+    // Always kick muted first — unmuted play() often rejects, then a center
+    // click pauses the stream that finally started a tick later.
+    const kick = await executeInMultiWeb(key, multiWebAutoplayScript(true))
     const playing = await multiWebIsPlaying(key)
+    const kickedVideo =
+      typeof kick?.value === 'string' && /^(already|play)/i.test(kick.value)
     if (playing) {
       clicksLeft = 0
+      if (!forceMute) {
+        try {
+          view.webContents.setAudioMuted(false)
+        } catch {
+          /* ignore */
+        }
+        void executeInMultiWeb(key, multiWebAutoplayScript(false))
+      }
       return
     }
+    // Script found <video> / JW and asked it to play — keep polling; do NOT
+    // center-click (JW/Clappr treat stage clicks as play/pause).
+    if (kickedVideo) return
     if (clicksLeft > 0) {
       clicksLeft -= 1
       clickMultiWebCenter(key, forceMute)
@@ -4731,6 +4983,8 @@ function scheduleMultiWebAutoplay(id) {
 let webBrowserSportsAutoplayTimers = []
 let webBrowserSportsAutoplayUrl = ''
 let webBrowserSportsAutoplayAt = 0
+/** True only after a kick confirmed <video> playing — gates the long same-URL throttle. */
+let webBrowserSportsAutoplayPlaying = false
 
 async function executeInWebBrowser(script) {
   if (!webBrowserView || webBrowserView.webContents.isDestroyed()) {
@@ -4811,47 +5065,63 @@ function scheduleWebBrowserSportsAutoplay(contents, options = {}) {
   const force = Boolean(options && options.force)
   const now = Date.now()
   // Ad iframes / partial reloads fire stop-loading often — don't reset forever.
-  if (!force && url === webBrowserSportsAutoplayUrl && now - webBrowserSportsAutoplayAt < 20000) {
-    return
+  // Only apply the long same-URL gate after we already confirmed playback.
+  // Slow Clappr/JW mounts used to miss the short live-only kick window, then
+  // sit paused for 20s because re-arms were throttled as if autoplay "ran".
+  if (!force && url === webBrowserSportsAutoplayUrl) {
+    if (webBrowserSportsAutoplayPlaying && now - webBrowserSportsAutoplayAt < 20000) {
+      return
+    }
+    if (!webBrowserSportsAutoplayPlaying && now - webBrowserSportsAutoplayAt < 3500) {
+      return
+    }
   }
   webBrowserSportsAutoplayUrl = url
   webBrowserSportsAutoplayAt = now
+  webBrowserSportsAutoplayPlaying = false
   clearWebBrowserSportsAutoplay()
   let clicksLeft = 1
   let started = false
-  // Replay VODs often mount <video> later than live sports — poll a bit longer.
-  const intervals = isReplayAdSensitiveUrl(url) ? [900, 2200, 4500, 8000] : [900, 2800]
+  // Live + replay: same poll window. Some live embeds mount <video> as late as
+  // replays; the old live-only [900, 2800] left slower streams paused.
+  const intervals = [700, 1600, 3000, 5200, 8500]
   const run = async () => {
     if (!webBrowserView || webBrowserView.webContents.isDestroyed()) return
     if (!webBrowserVisible) return
     if (started) return
+    const keepMuted = Number.isFinite(webBrowserVolume) && webBrowserVolume <= 0.001
     try {
-      // Don't undo chrome Mute while kicking autoplay.
-      if (!(Number.isFinite(webBrowserVolume) && webBrowserVolume <= 0.001)) {
-        webBrowserView.webContents.setAudioMuted(false)
-      } else {
-        webBrowserView.webContents.setAudioMuted(true)
-      }
+      // Kick muted first so Chromium autoplay allows play(); unmute after start.
+      webBrowserView.webContents.setAudioMuted(true)
     } catch {
       /* ignore */
     }
-    const keepMuted = Number.isFinite(webBrowserVolume) && webBrowserVolume <= 0.001
-    await executeInWebBrowser(multiWebAutoplayScript(keepMuted))
+    const kick = await executeInWebBrowser(multiWebAutoplayScript(true))
     if (keepMuted) {
       void applyWebBrowserVolume(0, { emit: false })
     }
     const playing = await webBrowserIsPlaying()
+    const kickedVideo =
+      typeof kick?.value === 'string' && /^(already|play)/i.test(kick.value)
     if (playing) {
       started = true
+      webBrowserSportsAutoplayPlaying = true
       clicksLeft = 0
       clearWebBrowserSportsAutoplay()
-      // Re-assert chrome volume — embeds often reset to 100% when play resumes.
       if (!keepMuted) {
+        try {
+          webBrowserView.webContents.setAudioMuted(false)
+        } catch {
+          /* ignore */
+        }
+        await executeInWebBrowser(multiWebAutoplayScript(false))
         void applyWebBrowserVolume(webBrowserVolume, { emit: false })
       }
       return
     }
-    // One gentle center click only — extra clicks pause a started stream.
+    // Found <video>/JW and asked it to play — keep polling until !paused. Never
+    // center-click here: that toggles JW/Clappr back to a black paused frame.
+    if (kickedVideo) return
     if (clicksLeft > 0) {
       clicksLeft -= 1
       clickWebBrowserCenter(false)
@@ -5131,7 +5401,11 @@ app.whenReady().then(() => {
     // Block ad networks + installer/adware bait in one handler (Electron keeps one listener).
     ses.webRequest.onBeforeRequest((details, callback) => {
       const url = String(details.url || '')
-      if (isBlockedBrowserDownloadUrl(url)) {
+      if (isBlockedBrowserDownloadUrl(url) || isStreamedInjectedAdwareUrl(url)) {
+        callback({ cancel: true })
+        return
+      }
+      if (shouldBlockSportsThirdParty(details)) {
         callback({ cancel: true })
         return
       }
@@ -5143,9 +5417,10 @@ app.whenReady().then(() => {
           return
         }
         const blockedHost =
-          /(^|\.)(doubleclick\.net|googlesyndication\.com|googleadservices\.com|adservice\.google\.com|popads\.net|propellerads\.com|exoclick\.com|trafficjunky\.net|juicyads\.com|tsyndicate\.com|adsterra\.com|adnxs\.com|moatads\.com|taboola\.com|outbrain\.com|adaround\.net|adultfriendfinder\.com|stripchat\.com|chaturbate\.com|pornhub\.com|xvideos\.com|xnxx\.com|xhamster\.com|spankwire\.com|livejasmin\.com|drimzzzz\.info|wpnxiswpuyrfn\.icu|therocketlanguages\.com|opera\.com|geo\.opera\.com|worldofwarships\.com|wargaming\.net)$/i.test(
+          /(^|\.)(doubleclick\.net|googlesyndication\.com|googleadservices\.com|adservice\.google\.com|popads\.net|propellerads\.com|exoclick\.com|trafficjunky\.net|juicyads\.com|tsyndicate\.com|adsterra\.com|adnxs\.com|moatads\.com|taboola\.com|outbrain\.com|adaround\.net|adultfriendfinder\.com|stripchat\.com|chaturbate\.com|pornhub\.com|xvideos\.com|xnxx\.com|xhamster\.com|spankwire\.com|livejasmin\.com|drimzzzz\.info|wpnxiswpuyrfn\.icu|vbcojhroxkoaf\.online|therocketlanguages\.com|opera\.com|geo\.opera\.com|worldofwarships\.com|wargaming\.net)$/i.test(
             host,
           ) ||
+          isPushAdwareHost(host, url) ||
           ((host === 'fstream365.com' || host.endsWith('.fstream365.com')) &&
             /\/banner\//i.test(url))
         if (blockedHost || isAdHijackUrl(url)) {
@@ -5270,9 +5545,20 @@ app.whenReady().then(() => {
       if (override?.userAgent) userAgent = override.userAgent
       if (override?.referrer) referer = override.referrer
       // Manifest/probe host often differs from segment CDN — carry the active
-      // playback Referer onto media requests so RiveStream HLS isn't blocked.
-      if (!referer && activePlaybackReferrer && isIptvMediaUrl(url)) {
-        referer = activePlaybackReferrer
+      // playback Referer onto media requests so RiveStream / Movy HLS isn't blocked.
+      if (!referer && activePlaybackReferrer) {
+        if (
+          isIptvMediaUrl(url) ||
+          isMovyStylePlaybackUrl(url) ||
+          isBilibiliTvPlaybackUrl(url) ||
+          (isArmedMovyPlayback() && isLikelyStreamResourceType(details.resourceType))
+        ) {
+          referer = activePlaybackReferrer
+        }
+      }
+      // Bilibili.tv play / CDN without an armed referrer — force site origin.
+      if (!referer && isBilibiliTvPlaybackUrl(url)) {
+        referer = 'https://www.bilibili.tv/'
       }
     } catch {
       /* ignore bad URLs */
@@ -5307,7 +5593,14 @@ app.whenReady().then(() => {
   // renderer needs * so manifests and .ts segments load (same fix as Vimeo).
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
     const url = details.url || ''
-    if (!isIptvMediaUrl(url)) {
+    const movyStream =
+      isArmedMovyPlayback() && isLikelyStreamResourceType(details.resourceType)
+    if (
+      !isIptvMediaUrl(url) &&
+      !isMovyStylePlaybackUrl(url) &&
+      !isBilibiliTvPlaybackUrl(url) &&
+      !movyStream
+    ) {
       callback({})
       return
     }
@@ -5323,6 +5616,11 @@ app.whenReady().then(() => {
 
   createWindow()
   setupAutoUpdater()
+
+  // Warm WebTorrent so the first Movies click isn't racing client listen + DHT.
+  void getTorrentClient().catch((err) => {
+    console.warn('[torrent] warm-up failed', err?.message || err)
+  })
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
@@ -5597,11 +5895,11 @@ async function awaitTmdbFetchControl() {
 
 /**
  * TMDB TV lists.
- * kind: 'popular' (discover 2010+) | 'on_the_air' | 'trending' (week)
+ * kind: 'popular' (discover, no Animation) | 'on_the_air' | 'trending' (week)
  * options.withExternalIds — default true (EZTV); false for Rive/TMDB-only shelves (faster).
  * Key from .env — never sent to the renderer except as results.
  */
-async function fetchTmdbTvCatalog(kind = 'popular', limit = 3000, options = {}) {
+async function fetchTmdbTvCatalog(kind = 'popular', limit = 10000, options = {}) {
   const apiKey = process.env.TMDB_API_KEY || process.env.TMDB_KEY || ''
   if (!apiKey) {
     return { ok: false, shows: [], error: 'TMDB_API_KEY missing from .env' }
@@ -5621,6 +5919,7 @@ async function fetchTmdbTvCatalog(kind = 'popular', limit = 3000, options = {}) 
                 ? 'by_year'
                 : 'popular'
   const withExternalIds = options?.withExternalIds !== false
+  const withoutKeywords = String(options?.withoutKeywords || '').trim()
   const byYearStart = 2000
   const byYearPerYear = 20
   const byYearEnd = new Date().getFullYear()
@@ -5632,16 +5931,16 @@ async function fetchTmdbTvCatalog(kind = 'popular', limit = 3000, options = {}) 
       : mode === 'trending'
         ? 100
         : mode === 'anime'
-          ? 2000
+          ? 5000
           : mode === 'animation'
-            ? 8000
+            ? 10000
             : mode === 'kids'
               ? 500
               : mode === 'by_year'
                 ? byYearDefault
-                : 3000
-  // Animation (Zenox) may pull up to ~10k discover rows (TMDB page cap).
-  const hardCap = mode === 'animation' ? 10000 : 5000
+                : 10000
+  // Series + Animation may pull up to ~10k discover rows (TMDB page cap).
+  const hardCap = mode === 'animation' || mode === 'popular' ? 10000 : 5000
   const target = Math.max(1, Math.min(hardCap, Number(limit) || defaultLimit))
   const pageSize = 20
   const pagesNeeded = Math.ceil(target / pageSize)
@@ -5666,6 +5965,7 @@ async function fetchTmdbTvCatalog(kind = 'popular', limit = 3000, options = {}) 
         url.searchParams.set('sort_by', 'popularity.desc')
         url.searchParams.set('first_air_date_year', String(year))
         url.searchParams.set('include_null_first_air_dates', 'false')
+        if (withoutKeywords) url.searchParams.set('without_keywords', withoutKeywords)
         const res = await fetch(url)
         if (!res.ok) {
           const body = await res.text().catch(() => '')
@@ -5708,8 +6008,9 @@ async function fetchTmdbTvCatalog(kind = 'popular', limit = 3000, options = {}) 
         url.searchParams.set('language', 'en-US')
         url.searchParams.set('page', String(page))
         if (mode === 'popular') {
+          // Series shelf: up to ~10k non-Animation titles (anime → Anime shelf).
           url.searchParams.set('sort_by', 'popularity.desc')
-          url.searchParams.set('first_air_date.gte', '2010-01-01')
+          url.searchParams.set('without_genres', '16')
           url.searchParams.set('include_null_first_air_dates', 'false')
         }
         if (mode === 'anime') {
@@ -5733,6 +6034,13 @@ async function fetchTmdbTvCatalog(kind = 'popular', limit = 3000, options = {}) 
           url.searchParams.set('sort_by', 'popularity.desc')
           url.searchParams.set('include_null_first_air_dates', 'false')
           url.searchParams.set('without_genres', '10767,10763') // Talk / News
+        }
+        if (
+          withoutKeywords &&
+          mode !== 'on_the_air' &&
+          mode !== 'trending'
+        ) {
+          url.searchParams.set('without_keywords', withoutKeywords)
         }
         const res = await fetch(url)
         if (!res.ok) {
@@ -6007,6 +6315,7 @@ ipcMain.handle('browser:navigate', async (_event, url) => {
     if (needsSportsStyleAutoplay(target)) {
       webBrowserSportsAutoplayUrl = ''
       webBrowserSportsAutoplayAt = 0
+      webBrowserSportsAutoplayPlaying = false
     }
     // Start navigation immediately — do not wait for YouTube to finish loading
     // (loadURL can take many seconds and made PiP feel broken/slow).
@@ -6609,6 +6918,141 @@ ipcMain.handle('page:fetchJsonPost', async (_event, url, body, referer) => {
   }
 })
 
+/** OpenSubtitles softsubs — secondary after Wyzie; key in main .env only. */
+ipcMain.handle('opensubtitles:resolveSubtitle', async (_event, options = {}) => {
+  const key = String(process.env.OPENSUBTITLES_API_KEY || '').trim()
+  if (!key) {
+    return {
+      ok: false,
+      error: 'OPENSUBTITLES_API_KEY missing — add a free key from opensubtitles.com to .env',
+    }
+  }
+  const tmdbId = String(options?.tmdbId || '').trim()
+  if (!tmdbId) return { ok: false, error: 'No TMDB id for OpenSubtitles' }
+
+  const language = String(options?.language || 'en').trim() || 'en'
+  const season = Number(options?.season)
+  const episode = Number(options?.episode)
+  const isEpisode =
+    Number.isFinite(season) && Number.isFinite(episode) && season >= 1 && episode >= 1
+
+  const ua = `JiyuMedia v${APP_VERSION}`
+  const headers = {
+    Accept: 'application/json',
+    'Content-Type': 'application/json',
+    'Api-Key': key,
+    'User-Agent': ua,
+  }
+
+  try {
+    const search = new URL('https://api.opensubtitles.com/api/v1/subtitles')
+    search.searchParams.set('languages', language)
+    search.searchParams.set('order_by', 'download_count')
+    search.searchParams.set('order_direction', 'desc')
+    if (isEpisode) {
+      search.searchParams.set('parent_tmdb_id', tmdbId)
+      search.searchParams.set('season_number', String(Math.floor(season)))
+      search.searchParams.set('episode_number', String(Math.floor(episode)))
+    } else {
+      search.searchParams.set('tmdb_id', tmdbId)
+    }
+
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 20_000)
+    let searchRes
+    try {
+      searchRes = await fetch(search.toString(), {
+        method: 'GET',
+        headers,
+        signal: controller.signal,
+      })
+    } finally {
+      clearTimeout(timer)
+    }
+    const searchText = await searchRes.text()
+    if (!searchRes.ok) {
+      let detail = `HTTP ${searchRes.status}`
+      try {
+        const err = JSON.parse(searchText)
+        detail = err.message || err.error || detail
+      } catch {
+        /* keep */
+      }
+      return { ok: false, error: detail }
+    }
+
+    let rows = []
+    try {
+      const parsed = JSON.parse(searchText)
+      rows = Array.isArray(parsed?.data) ? parsed.data : []
+    } catch {
+      return { ok: false, error: 'Invalid OpenSubtitles search response' }
+    }
+
+    const ranked = rows
+      .map((row) => {
+        const attrs = row?.attributes || {}
+        const file = Array.isArray(attrs.files) ? attrs.files[0] : null
+        const fileId = Number(file?.file_id)
+        if (!Number.isFinite(fileId) || fileId < 1) return null
+        let score = Number(attrs.download_count) || 0
+        if (attrs.hearing_impaired) score -= 500
+        if (String(attrs.language || '').toLowerCase().startsWith('en')) score += 1000
+        return { fileId, score, fileName: String(file?.file_name || '') }
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.score - a.score)
+
+    const best = ranked[0]
+    if (!best) return { ok: false, error: 'No OpenSubtitles for this episode' }
+
+    const dlController = new AbortController()
+    const dlTimer = setTimeout(() => dlController.abort(), 20_000)
+    let dlRes
+    try {
+      dlRes = await fetch('https://api.opensubtitles.com/api/v1/download', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ file_id: best.fileId }),
+        signal: dlController.signal,
+      })
+    } finally {
+      clearTimeout(dlTimer)
+    }
+    const dlText = await dlRes.text()
+    if (!dlRes.ok) {
+      let detail = `Download HTTP ${dlRes.status}`
+      try {
+        const err = JSON.parse(dlText)
+        detail = err.message || err.error || detail
+      } catch {
+        /* keep */
+      }
+      return { ok: false, error: detail }
+    }
+
+    let link = ''
+    try {
+      const parsed = JSON.parse(dlText)
+      link = String(parsed?.link || '').trim()
+    } catch {
+      return { ok: false, error: 'Invalid OpenSubtitles download response' }
+    }
+    if (!/^https?:\/\//i.test(link)) {
+      return { ok: false, error: 'OpenSubtitles returned no download link' }
+    }
+
+    return {
+      ok: true,
+      subtitleUrl: link,
+      subtitleKind: 'file',
+      source: 'opensubtitles',
+    }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
+})
+
 /** Wyzie softsubs — API key stays in main-process .env only (never in Vite/Android bundle). */
 ipcMain.handle('wyzie:resolveSubtitle', async (_event, options = {}) => {
   const key = String(process.env.WYZIE_API_KEY || '').trim()
@@ -6678,6 +7122,20 @@ ipcMain.handle('wyzie:resolveSubtitle', async (_event, options = {}) => {
       if (fmt === 'vtt' || fmt === 'srt') score += 6
       if (fmt === 'ass' || fmt === 'ssa') score += 3
       score += Math.min(10, Math.floor((Number(hit.downloadCount) || 0) / 5000))
+      if (Number.isFinite(season) && Number.isFinite(episode) && season >= 1 && episode >= 1) {
+        const blob = `${hit.fileName || ''} ${hit.release || ''} ${hit.display || ''}`.toLowerCase()
+        const tag = `s${String(season).padStart(2, '0')}e${String(episode).padStart(2, '0')}`
+        const tagLoose = `s${season}e${episode}`
+        if (blob.includes(tag) || blob.includes(tagLoose)) score += 50
+        else if (/s\d{1,2}e\d{1,3}/i.test(blob)) score -= 40
+        if (episode >= 50) {
+          const ep = String(Math.floor(episode))
+          const abs =
+            new RegExp(`(?:^|[^0-9])0*${ep}(?:[^0-9]|$)`).test(blob) ||
+            new RegExp(`\\be0*${ep}\\b`).test(blob)
+          if (abs) score += 35
+        }
+      }
       return score
     }
 
@@ -6720,6 +7178,45 @@ ipcMain.handle('wyzie:resolveSubtitle', async (_event, options = {}) => {
   }
 })
 
+/**
+ * Main-process JSON GET. Prefer Electron net.fetch (Chromium stack) — Node's
+ * global fetch (undici) intermittently returns "fetch failed" for streamed/ppv
+ * while the same URL works in a BrowserView, which left Sports empty/black.
+ */
+async function mainProcessFetchText(url, headers, timeoutMs = 30_000) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const init = {
+      method: 'GET',
+      redirect: 'follow',
+      signal: controller.signal,
+      headers,
+    }
+    let response
+    if (net && typeof net.fetch === 'function') {
+      try {
+        response = await net.fetch(url, init)
+      } catch (netErr) {
+        // Fall through to undici if Chromium net is unavailable mid-shutdown.
+        response = await fetch(url, init)
+        void netErr
+      }
+    } else {
+      response = await fetch(url, init)
+    }
+    const content = await response.text()
+    return {
+      ok: response.ok,
+      status: response.status,
+      content,
+      error: response.ok ? '' : `Server returned ${response.status}`,
+    }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 ipcMain.handle('page:fetchJsonGet', async (_event, url, referer) => {
   try {
     if (typeof url !== 'string' || !/^https?:\/\//i.test(url.trim())) {
@@ -6733,37 +7230,27 @@ ipcMain.handle('page:fetchJsonGet', async (_event, url, referer) => {
     } catch {
       /* keep default */
     }
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 30_000)
-    let response
-    try {
-      response = await fetch(url.trim(), {
-        method: 'GET',
-        redirect: 'follow',
-        signal: controller.signal,
-        headers: withDesktopChromeClientHints({
-          'User-Agent': BROWSER_UA,
-          Accept: 'application/json',
-          Origin: origin,
-          Referer: ref,
-        }),
-      })
-    } finally {
-      clearTimeout(timer)
-    }
-    const content = await response.text()
-    return {
-      ok: response.ok,
-      status: response.status,
-      content,
-      error: response.ok ? '' : `Server returned ${response.status}`,
-    }
+    const headers = withDesktopChromeClientHints({
+      'User-Agent': BROWSER_UA,
+      Accept: 'application/json',
+      Origin: origin,
+      Referer: ref,
+    })
+    return await mainProcessFetchText(url.trim(), headers, 30_000)
   } catch (err) {
+    const cause = err && typeof err === 'object' && 'cause' in err ? err.cause : null
+    const detail = [
+      err instanceof Error ? err.message : String(err),
+      cause && cause.code ? `code=${cause.code}` : '',
+      cause && cause.message ? `cause=${cause.message}` : '',
+    ]
+      .filter(Boolean)
+      .join(' ')
     return {
       ok: false,
       status: 0,
       content: '',
-      error: err instanceof Error ? err.message : String(err),
+      error: detail || (err instanceof Error ? err.message : String(err)),
     }
   }
 })
@@ -7223,11 +7710,12 @@ const METADATA_PEER_GRACE_MS = 15000
 const PEER_PROBE_MS = 12_000
 /** Shorter probe when re-adding a magnet after a dead cached .torrent. */
 const PEER_PROBE_RETRY_MS = 8_000
-const MAGNET_METADATA_MS = 10_000
-const MAGNET_RETRY_READY_MS = 12_000
+/** Cold DHT / first play often needs longer than a warm swarm. */
+const MAGNET_METADATA_MS = 18_000
+const MAGNET_RETRY_READY_MS = 16_000
 const OPENING_BYTES_WAIT_MS = 35_000
 const NO_PEERS_ERROR =
-  'No peers found for this release — try another episode or quality.'
+  'No working sources for this release — try another episode or quality.'
 const DEFAULT_TORRENT_TRACKERS = [
   'udp://tracker.opentrackr.org:1337/announce',
   'udp://open.stealth.si:80/announce',
@@ -7663,44 +8151,63 @@ function parseFfmpegAudioStreams(stderr) {
   return tracks
 }
 
-function scoreAudioTrack(track) {
+function scoreAudioTrack(track, preferJapanese = false) {
   if (!track) return -Infinity
   let score = 0
   const lang = track.language || ''
   const title = (track.title || '').toLowerCase()
 
-  if (/^(eng?|en)$/i.test(lang) || lang.startsWith('en')) score += 80
-  else if (!lang || lang === 'und' || lang === 'unknown') score += 15
-  else if (/^(fre?|fr|fra)$/i.test(lang) || lang.startsWith('fr')) score -= 60
-  else if (/^(spa|es|ger|de|deu|ita|jpn|ja|rus|hin)/i.test(lang)) score -= 40
+  if (preferJapanese) {
+    // Anime: original JP first; English dub second; French/other far last.
+    if (/^(jpn?|ja)$/i.test(lang) || lang.startsWith('ja')) score += 100
+    else if (/^(eng?|en)$/i.test(lang) || lang.startsWith('en')) score += 40
+    else if (!lang || lang === 'und' || lang === 'unknown') score += 8
+    else if (/^(fre?|fr|fra)$/i.test(lang) || lang.startsWith('fr')) score -= 80
+    else score -= 35
+    if (/\b(japanese|jap|\bjpn\b|nihongo)\b/i.test(title)) score += 55
+    if (/\b(english|eng)\b/i.test(title)) score += 25
+  } else {
+    if (/^(eng?|en)$/i.test(lang) || lang.startsWith('en')) score += 80
+    else if (!lang || lang === 'und' || lang === 'unknown') score += 15
+    else if (/^(fre?|fr|fra)$/i.test(lang) || lang.startsWith('fr')) score -= 60
+    else if (/^(spa|es|ger|de|deu|ita|jpn|ja|rus|hin)/i.test(lang)) score -= 40
+    if (/\b(english|eng|original)\b/i.test(title)) score += 40
+  }
 
-  if (/\b(english|eng|original)\b/i.test(title)) score += 40
   if (/\b(french|fran[cç]ais|vff|vfq|truefrench|deutsch|german|latino)\b/i.test(title))
     score -= 50
   if (/\b(commentary|descriptive|ad\b|director)\b/i.test(title)) score -= 70
-  if (track.isDefault) score += 5
+  if (track.isDefault) score += preferJapanese ? 2 : 5
   // Prefer earlier tracks when language is equal (usually main mix).
   score -= track.audioOrdinal * 0.1
 
   return score
 }
 
-function pickBestAudioTrack(tracks) {
+function pickBestAudioTrack(tracks, preferJapanese = false) {
   const ranked = [...(tracks || [])]
-    .map((track) => ({ track, score: scoreAudioTrack(track) }))
+    .map((track) => ({ track, score: scoreAudioTrack(track, preferJapanese) }))
     .sort((a, b) => b.score - a.score)
   return ranked[0]?.track || null
 }
 
+/** Cache audio ordinal so Resume remux doesn't re-probe (was timing out → restart). */
+const audioOrdinalCache = new Map()
+
 /**
- * Prefer English audio on MULTI packs (track 0 is often French).
+ * Prefer English (or Japanese for anime) on MULTI packs — track 0 is often French.
  * Returns the audio stream ordinal for `-map 0:a:N` (not absolute stream index).
  */
-function probePreferredAudioOrdinal(httpSource) {
+function probePreferredAudioOrdinal(httpSource, preferJapanese = false) {
   return new Promise((resolve) => {
     const ffmpegPath = resolveFfmpegPath()
     if (!ffmpegPath || !httpSource) {
       resolve(0)
+      return
+    }
+    const cacheKey = `${preferJapanese ? 'ja' : 'en'}|${httpSource}`
+    if (audioOrdinalCache.has(cacheKey)) {
+      resolve(audioOrdinalCache.get(cacheKey))
       return
     }
     const proc = spawn(
@@ -7734,16 +8241,19 @@ function probePreferredAudioOrdinal(httpSource) {
     proc.once('close', () => {
       clearTimeout(timer)
       const tracks = parseFfmpegAudioStreams(stderr)
-      const best = pickBestAudioTrack(tracks)
+      const best = pickBestAudioTrack(tracks, preferJapanese)
+      const ordinal = best && Number.isFinite(best.audioOrdinal) ? best.audioOrdinal : 0
       if (best && tracks.length > 1) {
         console.log('[torrent audio] preferred track', {
-          ordinal: best.audioOrdinal,
+          ordinal,
           language: best.language || 'und',
           title: best.title || '',
           total: tracks.length,
+          preferJapanese,
         })
       }
-      resolve(best && Number.isFinite(best.audioOrdinal) ? best.audioOrdinal : 0)
+      audioOrdinalCache.set(cacheKey, ordinal)
+      resolve(ordinal)
     })
   })
 }
@@ -8602,15 +9112,21 @@ async function handleAudioTranscode(req, res, source) {
   let startAt = 0
   let exact = false
   let forceHevcTranscode = false
+  let preferJapanese = false
   try {
     const url = new URL(req.url || '/', 'http://127.0.0.1')
     startAt = Math.max(0, Number(url.searchParams.get('t')) || 0)
     exact = url.searchParams.get('exact') === '1'
+    preferJapanese =
+      url.searchParams.get('anime') === '1' ||
+      url.searchParams.get('audio') === 'ja' ||
+      url.searchParams.get('audio') === 'jpn'
     forceHevcTranscode =
       url.searchParams.get('hevc') === '1' || HEVC_VIDEO_RE.test(decodeURIComponent(source || ''))
   } catch {
     startAt = 0
     exact = false
+    preferJapanese = false
     forceHevcTranscode = HEVC_VIDEO_RE.test(String(source || ''))
   }
 
@@ -8665,8 +9181,8 @@ async function handleAudioTranscode(req, res, source) {
     }
   }
 
-  // MULTI packs often put French on a:0 — pick English when tagged.
-  const audioOrdinal = await probePreferredAudioOrdinal(source)
+  // MULTI packs often put French on a:0 — pick English (or Japanese for anime).
+  const audioOrdinal = await probePreferredAudioOrdinal(source, preferJapanese)
 
   res.writeHead(200, {
     'Content-Type': 'video/mp4',
@@ -9391,7 +9907,7 @@ function pickTorrentVideoFile(torrent, hints = {}) {
   return { file: playlistFiles[0], playlistFiles }
 }
 
-async function torrentFilePlaybackUrl(torrent, file) {
+async function torrentFilePlaybackUrl(torrent, file, options = {}) {
   // Ensure index-based /torrent-file URLs are available before building source.
   await getTranscodeServer()
   const sourceUrl = torrentRawFileUrl(torrent, file)
@@ -9399,7 +9915,11 @@ async function torrentFilePlaybackUrl(torrent, file) {
 
   const port = transcodeServerPort
   const hevc = HEVC_VIDEO_RE.test(file.name || '') ? '&hevc=1' : ''
-  return `http://127.0.0.1:${port}/stream.mp4?source=${encodeURIComponent(sourceUrl)}${hevc}`
+  const anime =
+    options.preferJapaneseAudio || options.category === 'anime' || options.anime
+      ? '&anime=1'
+      : ''
+  return `http://127.0.0.1:${port}/stream.mp4?source=${encodeURIComponent(sourceUrl)}${hevc}${anime}`
 }
 
 const MAX_CONCURRENT_TORRENTS = 4
@@ -9427,7 +9947,7 @@ ipcMain.handle('torrent:stream', async (_event, input, options) => {
       /* validated below */
     }
     if (!isMagnet && !isTorrentUrl) {
-      return { ok: false, error: 'Use a magnet link or an HTTP(S) .torrent link' }
+      return { ok: false, error: 'Use a source link from the catalog' }
     }
 
     const client = await getTorrentClient()
@@ -9721,6 +10241,11 @@ ipcMain.handle('torrent:stream', async (_event, input, options) => {
     // Stop any prior episode's subtitle extractor so it cannot starve playback.
     abortSubtitleExtractors(null)
 
+    const preferJapaneseAudio = Boolean(
+      options?.preferJapaneseAudio ||
+        options?.anime ||
+        String(options?.category || '').toLowerCase() === 'anime',
+    )
     const playlist = await Promise.all(
       playlistFiles.map(async (entry) => {
         // Register sub URLs now; kick off extract after remux is handed to the player.
@@ -9728,7 +10253,9 @@ ipcMain.handle('torrent:stream', async (_event, input, options) => {
         return {
           title: entry.name.replace(/\.[^.]+$/, ''),
           fileName: entry.name,
-          url: await torrentFilePlaybackUrl(torrent, entry),
+          url: await torrentFilePlaybackUrl(torrent, entry, {
+            preferJapaneseAudio,
+          }),
           subtitleUrl: subs.subtitleUrl,
           // 'file' = companion .srt/.ass/.vtt; 'embedded' = softsub probe inside mkv/mp4
           subtitleKind: subs.subtitleKind,

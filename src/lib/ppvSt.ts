@@ -67,11 +67,17 @@ export function isPpvStCatalogItem(item: {
 export function isPpvStLiveNow(item: StreamItem, nowSec = unixSecondsNow()): boolean {
   if (!isPpvStCatalogItem(item)) return false
   if (item.tags?.includes('always-live')) return true
+  const start = item.eventStartsAt
+    ? Math.floor(item.eventStartsAt / 1000)
+    : item.releasedAt
+      ? Math.floor(item.releasedAt / 1000)
+      : 0
+  const end = item.eventEndsAt ? Math.floor(item.eventEndsAt / 1000) : 0
+  // Time window wins over stale catalog tags so Upcoming → Live flips without a refetch.
+  if (start > 0 && start <= nowSec && (!end || end >= nowSec)) return true
+  if (end > 0 && end < nowSec) return false
   if (item.tags?.includes('live-now')) return true
-  const start = item.releasedAt ? Math.floor(item.releasedAt / 1000) : 0
-  // endsAt encoded in description is fragile — prefer tag from mapper.
   if (item.tags?.includes('upcoming')) return false
-  if (start > 0 && start <= nowSec) return true
   return false
 }
 
@@ -209,8 +215,6 @@ export function ppvStStreamToItem(stream: PpvStStream, nowSec = unixSecondsNow()
           minute: '2-digit',
         })
       : ''
-  const statusLabel =
-    status === 'live-now' ? 'Live now' : status === 'always-live' ? '24/7' : 'Upcoming'
   const play = playUrl(stream)
   const page = watchPageUrl(stream)
   const viewersRaw = Number(stream.viewers)
@@ -220,7 +224,7 @@ export function ppvStStreamToItem(stream: PpvStStream, nowSec = unixSecondsNow()
     return {
       id: ppvStItemId(id),
       title,
-      description: ['24/7', statusLabel, stream.source_tag].filter(Boolean).join(' · '),
+      description: ['24/7', stream.source_tag].filter(Boolean).join(' · '),
       category: 'series',
       url: play,
       detailUrl: page,
@@ -239,7 +243,7 @@ export function ppvStStreamToItem(stream: PpvStStream, nowSec = unixSecondsNow()
     return {
       id: ppvStItemId(id),
       title,
-      description: ['Kids', '24/7', statusLabel, stream.source_tag].filter(Boolean).join(' · '),
+      description: ['Kids', '24/7', stream.source_tag].filter(Boolean).join(' · '),
       category: 'kids',
       url: play,
       detailUrl: page,
@@ -257,7 +261,7 @@ export function ppvStStreamToItem(stream: PpvStStream, nowSec = unixSecondsNow()
   return {
     id: ppvStItemId(id),
     title,
-    description: [sport, statusLabel, stream.source_tag, when].filter(Boolean).join(' · '),
+    description: [sport, stream.source_tag, when].filter(Boolean).join(' · '),
     category: 'sports',
     url: play,
     detailUrl: page,
@@ -265,6 +269,7 @@ export function ppvStStreamToItem(stream: PpvStStream, nowSec = unixSecondsNow()
     tags: [
       'live',
       'ppv.st',
+      'web-embed',
       shelfSport.toLowerCase().replace(/\s+/g, '-'),
       status,
     ].filter(Boolean),
@@ -304,7 +309,7 @@ export function ppvStSportChipsFromItems(
     .sort((a, b) => a.name.localeCompare(b.name))
 }
 
-/** Fetch live + near-term upcoming PPV.st events for Sports → Live. */
+/** Fetch live + near-term upcoming PPV.st events for Sports → Live / Upcoming. */
 export async function fetchPpvStLiveCatalog(): Promise<
   { ok: true; items: StreamItem[] } | { ok: false; error: string; items: StreamItem[] }
 > {

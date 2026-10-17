@@ -5,14 +5,25 @@ import { usePlayback } from '../context/PlaybackContext'
 /** Ensures multi-view is expanded when visiting /multiview */
 export function MultiviewPage() {
   const navigate = useNavigate()
-  const { slots, mode, expand, awaitingAdd, armMultiviewAdd, cancelMultiviewAdd, item } =
-    usePlayback()
+  const {
+    slots,
+    mode,
+    expand,
+    mountMulti,
+    awaitingAdd,
+    armMultiviewAdd,
+    cancelMultiviewAdd,
+    item,
+  } = usePlayback()
 
   useEffect(() => {
-    if (slots.length > 1 && mode === 'pip') expand()
-  }, [slots.length, mode, expand])
+    if (slots.length === 0) return
+    // Opening Multi-view from the sidebar remounts a parked session.
+    mountMulti()
+    if (mode === 'pip') expand()
+  }, [slots.length, mode, expand, mountMulti])
 
-  if (slots.length < 2) {
+  if (slots.length < 1) {
     return (
       <div className="page">
         <header className="page-header">
@@ -20,7 +31,8 @@ export function MultiviewPage() {
           <h1>Multi-view</h1>
           <p className="lede">
             Multi-view is opt-in. Start a stream, press <strong>Multi-view</strong> on the player,
-            then open another channel to watch both.
+            then open another channel to watch both. Use <strong>Browse</strong> to leave the grid
+            without stopping streams — reopen Multi-view anytime to remount them.
           </p>
         </header>
         <div className="empty-state">

@@ -5,12 +5,14 @@ import { useCatalog } from '../context/CatalogContext'
 import { usePlayback } from '../context/PlaybackContext'
 import { CatalogGrid } from '../components/CatalogGrid'
 import { ContinueWatching } from '../components/ContinueWatching'
+import { FavoriteMatchesShelf } from '../components/FavoriteMatchesShelf'
 import { RecommendedShelf } from '../components/RecommendedShelf'
 import { NewTitlesDialog } from '../components/NewTitlesDialog'
 import { WatchNextStrip } from '../components/WatchNextStrip'
 import { WatchHistory } from '../components/WatchHistory'
 import { LocalChannelLive } from '../components/LocalChannelLive'
 import { filterShelfVisibleItems, isSeriesWebCatalogItem } from '../lib/torrents'
+import { HIDE_KEYWORDS_EVENT } from '../lib/hideKeywords'
 import { isLikelyEnglish, shouldApplyEnglishFilter } from '../lib/language'
 import { VOD_CATEGORIES } from '../lib/continueWatching'
 import { isKidsModeEnabled, subscribeKidsMode } from '../lib/kidsMode'
@@ -21,10 +23,10 @@ import {
 } from '../lib/libraryGrowth'
 import { catalogNewTitleItems } from '../lib/newTitlesList'
 import {
-  favoriteTeamMatches,
-  readFavoriteTeams,
-  subscribeFavoriteTeams,
-} from '../lib/favoriteTeams'
+  getWatchlist,
+  resolveWatchlistItems,
+  subscribeWatchlist,
+} from '../lib/watchlist'
 
 export function HomePage() {
   const { byCategory, items, ready, englishOnly } = useCatalog()
@@ -35,11 +37,26 @@ export function HomePage() {
     getCatalogGrowth(items.length),
   )
   const [newTitlesOpen, setNewTitlesOpen] = useState(false)
-  const [favoriteTeams, setFavoriteTeams] = useState(readFavoriteTeams)
-
-  useEffect(() => subscribeFavoriteTeams(() => setFavoriteTeams(readFavoriteTeams())), [])
+  const [savedOpen, setSavedOpen] = useState(false)
+  const [savedCount, setSavedCount] = useState(() => getWatchlist().length)
+  const [hideKeywordsTick, setHideKeywordsTick] = useState(0)
 
   useEffect(() => subscribeKidsMode(() => setKidsMode(isKidsModeEnabled())), [])
+  useEffect(() => {
+    const bump = () => setHideKeywordsTick((n) => n + 1)
+    window.addEventListener(HIDE_KEYWORDS_EVENT, bump)
+    return () => window.removeEventListener(HIDE_KEYWORDS_EVENT, bump)
+  }, [])
+  useEffect(
+    () =>
+      subscribeWatchlist(() => {
+        setSavedCount(getWatchlist().length)
+      }),
+    [],
+  )
+  useEffect(() => {
+    setSavedCount(getWatchlist().length)
+  }, [kidsMode])
 
   const homeCategories = useMemo(
     () => (kidsMode ? CATEGORIES.filter((cat) => cat.id === 'kids') : CATEGORIES),
@@ -65,10 +82,14 @@ export function HomePage() {
     return () => window.clearTimeout(timer)
   }, [ready, items.length, items])
 
-  const newTodayItems = useMemo(
-    () => catalogNewTitleItems(items, 'today', catalogGrowth.newToday),
-    [items, catalogGrowth.newToday],
-  )
+  const newTodayItems = useMemo(() => {
+    // Only titles first added to a shelf today — never pad with older releases.
+    const n = Math.max(0, catalogGrowth.newToday)
+    if (n <= 0) return []
+    return catalogNewTitleItems(items, 'today', n)
+  }, [items, catalogGrowth.newToday])
+
+  const savedItems = useMemo(() => resolveWatchlistItems(items), [items, savedCount])
 
   const localChannels = useMemo(() => resolveLocalChannels(items), [items])
   const tvjChannel = localChannels.find((c) => c.id === 'local-tvj') ?? LOCAL_CHANNELS[0]
@@ -79,11 +100,6 @@ export function HomePage() {
   const cvmPlayingElsewhere = playingItem?.id === cvmChannel.id && mode !== 'off'
   const nationwidePlayingElsewhere =
     playingItem?.id === nationwideChannel.id && mode !== 'off'
-
-  const favoriteMatches = useMemo(
-    () => (kidsMode ? [] : favoriteTeamMatches(items, favoriteTeams)),
-    [items, favoriteTeams, kidsMode],
-  )
 
   const searchHits = useMemo(() => {
     const q = homeQuery.trim().toLowerCase()
@@ -101,7 +117,7 @@ export function HomePage() {
         )
       })
       .slice(0, 48)
-  }, [items, homeQuery, englishOnly])
+  }, [items, homeQuery, englishOnly, hideKeywordsTick])
 
   return (
     <div className="page">
@@ -128,23 +144,32 @@ export function HomePage() {
             />
           </div>
         </div>
-        <div className="hero-panel">
-          <div className="hero-glow" aria-hidden />
-          <div className="hero-frame">
-            <span>Total titles</span>
-            <strong>{catalogGrowth.today.toLocaleString()}</strong>
-            {catalogGrowth.newToday > 0 ? (
-              <button
-                type="button"
-                className="growth-hit"
-                onClick={() => setNewTitlesOpen(true)}
-              >
-                Added today {catalogGrowth.newToday.toLocaleString()}
-              </button>
-            ) : (
-              <em>Added today 0</em>
-            )}
+        <div className="hero-aside">
+          <div className="hero-panel">
+            <div className="hero-glow" aria-hidden />
+            <div className="hero-frame">
+              <span>Total titles</span>
+              <strong>{catalogGrowth.today.toLocaleString()}</strong>
+              {catalogGrowth.newToday > 0 ? (
+                <button
+                  type="button"
+                  className="growth-hit"
+                  onClick={() => setNewTitlesOpen(true)}
+                >
+                  Added today {catalogGrowth.newToday.toLocaleString()}
+                </button>
+              ) : (
+                <em>Added today 0</em>
+              )}
+            </div>
           </div>
+          <button
+            type="button"
+            className={`growth-hit hero-saved-hit${savedCount > 0 ? '' : ' is-disabled'}`}
+            onClick={() => setSavedOpen(true)}
+          >
+            Saved {savedCount.toLocaleString()}
+          </button>
         </div>
       </header>
 
@@ -156,20 +181,18 @@ export function HomePage() {
         />
       ) : null}
 
-      {!homeQuery.trim() && !kidsMode && favoriteMatches.length > 0 && (
-        <section className="section-block favorite-matches">
-          <div className="section-head">
-            <h2>Your teams</h2>
-            <p>Live and upcoming matches for your teams, plus recent replays (last 3 days).</p>
-          </div>
-          <CatalogGrid
-            items={favoriteMatches}
-            showToolbar={false}
-            showHealthFilters={false}
-            emptyHint="No matches for your teams right now."
-          />
-        </section>
-      )}
+      {savedOpen ? (
+        <NewTitlesDialog
+          title="Saved"
+          items={savedItems}
+          emptyHint="Nothing saved yet — tap ♡ on a movie, series, anime, or kids title."
+          onClose={() => setSavedOpen(false)}
+        />
+      ) : null}
+
+      {!homeQuery.trim() ? (
+        <FavoriteMatchesShelf items={items} hidden={kidsMode} />
+      ) : null}
 
       {!homeQuery.trim() &&
         homeVodCategories.map((category) => (

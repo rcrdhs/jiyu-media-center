@@ -5,7 +5,12 @@
  */
 
 import type { StreamItem, StreamPlaylistItem } from '../types'
-import { LIVEXTV_REPLAY_MAX_AGE_MS } from './livextvReplays'
+import {
+  isLivextvReplayCatalogItem,
+  isSoccerfullOnlyReplayItem,
+  LIVEXTV_REPLAY_MAX_AGE_MS,
+} from './livextvReplays'
+import { sportsMatchPoster } from './sportsMatchPoster'
 
 export const FULLMATCHSHOWS_ORIGIN = 'https://fullmatchshows.com'
 export const FULLMATCHSHOWS_API = `${FULLMATCHSHOWS_ORIGIN}/wp-json/wp/v2`
@@ -22,6 +27,32 @@ const PLAY_HOST_SCORE = (url: string): number => {
     /* ignore */
   }
   return 0
+}
+
+/**
+ * Playmate /watch/… is the full site (nav, comments). /embed/… is JW player only.
+ */
+export function toMinimalReplayEmbedUrl(url: string): string {
+  const raw = String(url || '')
+    .replace(/&amp;/g, '&')
+    .trim()
+  if (!raw) return raw
+  try {
+    const parsed = new URL(raw)
+    const host = parsed.hostname.replace(/^www\./, '').toLowerCase()
+    if (host === 'playmate.to' || host.endsWith('.playmate.to')) {
+      const watch = parsed.pathname.match(/^\/watch\/([^/?#]+)/i)
+      if (watch?.[1]) {
+        parsed.pathname = `/embed/${decodeURIComponent(watch[1])}`
+        parsed.search = ''
+        parsed.hash = ''
+        return parsed.toString()
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return raw
 }
 
 export function fullmatchShowsItemId(postId: string | number): string {
@@ -103,9 +134,12 @@ function extractPlayLinks(html: string): Array<{ name: string; url: string }> {
       .trim()
     if (!/^https?:\/\//i.test(url) || seen.has(url)) continue
     if (PLAY_HOST_SCORE(url) <= 0) continue
+    const playUrl = toMinimalReplayEmbedUrl(url)
+    if (seen.has(playUrl)) continue
     seen.add(url)
+    seen.add(playUrl)
     const name = decodeEntities(m[2] || '').slice(0, 48) || `Part ${out.length + 1}`
-    out.push({ name, url })
+    out.push({ name, url: playUrl })
   }
   // Fallback: any playmate / playmogo href in the post body.
   if (out.length === 0) {
@@ -114,8 +148,11 @@ function extractPlayLinks(html: string): Array<{ name: string; url: string }> {
         .replace(/&amp;/g, '&')
         .trim()
       if (!url || seen.has(url)) continue
+      const playUrl = toMinimalReplayEmbedUrl(url)
+      if (seen.has(playUrl)) continue
       seen.add(url)
-      out.push({ name: `Part ${out.length + 1}`, url })
+      seen.add(playUrl)
+      out.push({ name: `Part ${out.length + 1}`, url: playUrl })
     }
   }
   out.sort((a, b) => PLAY_HOST_SCORE(b.url) - PLAY_HOST_SCORE(a.url))
@@ -126,14 +163,6 @@ function withinReplayWindow(dateMs: number, nowMs: number): boolean {
   if (!Number.isFinite(dateMs) || dateMs <= 0) return false
   const age = nowMs - dateMs
   return age >= -6 * 60 * 60 * 1000 && age <= LIVEXTV_REPLAY_MAX_AGE_MS
-}
-
-function featuredImage(post: {
-  _embedded?: { 'wp:featuredmedia'?: Array<{ source_url?: string }> }
-}): string {
-  const media = post._embedded?.['wp:featuredmedia']
-  const url = media?.[0]?.source_url
-  return typeof url === 'string' && /^https?:\/\//i.test(url) ? url : ''
 }
 
 type WpPost = {
@@ -181,7 +210,8 @@ export function fullmatchShowsPostToItem(
 
   const detailUrl = String(post.link || `${FULLMATCHSHOWS_ORIGIN}/?p=${id}`).trim()
   const play = servers[0]!.url
-  const poster = featuredImage(post)
+  // Same VS card art as LiveXTV / Your teams (featured WP images were inconsistent).
+  const poster = sportsMatchPoster(title, 'Football')
 
   return {
     id: fullmatchShowsItemId(id),
@@ -190,7 +220,7 @@ export function fullmatchShowsPostToItem(
     category: 'sports',
     url: play,
     detailUrl,
-    poster: poster || undefined,
+    poster,
     tags: ['replay', 'fullmatchshows', 'web-embed', 'football'],
     source: 'FullMatchShows',
     sourceKind: 'builtin',
@@ -297,7 +327,7 @@ export async function resolveFullmatchShowsPlay(
   )
   for (const url of ranked) {
     if (PLAY_HOST_SCORE(url) > 0) {
-      return { ok: true, mode: 'embed', url }
+      return { ok: true, mode: 'embed', url: toMinimalReplayEmbedUrl(url) }
     }
   }
 
@@ -306,6 +336,123 @@ export async function resolveFullmatchShowsPlay(
   }
 
   return { ok: false, error: 'No working FullMatchShows player for this match' }
+}
+
+function normalizeMatchTitle(raw: string): string {
+  return String(raw || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/full\s*match(?:es)?(?:\s*replay)?/g, ' ')
+    .replace(/\b(?:replay|vod|highlights?)\b/g, ' ')
+    .replace(/\b\d{1,2}\s*(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s*\d{2,4}\b/g, ' ')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function matchSides(title: string): [string, string] | null {
+  const norm = normalizeMatchTitle(title)
+  const parts = norm.split(/\s+vs\.?\s+/)
+  if (parts.length !== 2) return null
+  const a = parts[0]!.trim()
+  const b = parts[1]!.trim()
+  if (!a || !b) return null
+  return [a, b]
+}
+
+function titlesMatchReplay(query: string, candidate: string): boolean {
+  const q = matchSides(query)
+  const c = matchSides(candidate)
+  if (q && c) {
+    const same =
+      (q[0] === c[0] && q[1] === c[1]) || (q[0] === c[1] && q[1] === c[0])
+    if (same) return true
+    // Allow short club-name containment (Bayern / Bayern Munchen).
+    const loose =
+      ((c[0].includes(q[0]) || q[0].includes(c[0])) &&
+        (c[1].includes(q[1]) || q[1].includes(c[1]))) ||
+      ((c[0].includes(q[1]) || q[1].includes(c[0])) &&
+        (c[1].includes(q[0]) || q[0].includes(c[1])))
+    if (loose) return true
+  }
+  const nq = normalizeMatchTitle(query)
+  const nc = normalizeMatchTitle(candidate)
+  return Boolean(nq && nc && (nc.includes(nq) || nq.includes(nc)))
+}
+
+/**
+ * LiveXTV football parts currently point at dead soccerfull.net hosts.
+ * Resolve the same fixture on FullMatchShows (Playmate) by title + date window.
+ */
+export async function resolveFullmatchShowsPlayForTitle(
+  title: string,
+  dateMs?: number,
+): Promise<FullmatchShowsPlayResult> {
+  const clean = String(title || '').trim()
+  if (!clean) return { ok: false, error: 'Missing match title' }
+
+  const sides = matchSides(clean)
+  const search = sides ? `${sides[0]} ${sides[1]}` : clean
+  const qs = new URLSearchParams({
+    search,
+    per_page: '8',
+    orderby: 'relevance',
+    _fields: 'id,date,link,title,content',
+  })
+  const result = await fetchWpJson<WpPost[]>(`/posts?${qs.toString()}`)
+  if (!result.ok) return { ok: false, error: result.error }
+
+  const rows = Array.isArray(result.data) ? result.data : []
+  const nowMs = Date.now()
+  let best: StreamItem | null = null
+  let bestScore = -Infinity
+
+  for (const row of rows) {
+    const item = fullmatchShowsPostToItem(row, nowMs)
+    if (!item) continue
+    if (!titlesMatchReplay(clean, item.title)) continue
+    let score = 10
+    if (dateMs && item.releasedAt) {
+      const delta = Math.abs(item.releasedAt - dateMs)
+      if (delta <= 2 * 24 * 60 * 60 * 1000) score += 50 - delta / (60 * 60 * 1000)
+      else score -= delta / (24 * 60 * 60 * 1000)
+    }
+    if (score > bestScore) {
+      bestScore = score
+      best = item
+    }
+  }
+
+  if (!best) {
+    return { ok: false, error: 'No FullMatchShows mirror for this match' }
+  }
+  return resolveFullmatchShowsPlay(best)
+}
+
+/**
+ * Replay shelf: FullMatchShows football (Playmate) + LiveXTV when parts are not
+ * soccerfull-only. Hide dead soccerfull-only LiveXTV cards (with or without FMS).
+ */
+export function mergeSportsReplayShelfItems(
+  livextv: StreamItem[],
+  fms: StreamItem[],
+): StreamItem[] {
+  const seen = new Set<string>()
+  const out: StreamItem[] = []
+  const push = (item: StreamItem) => {
+    if (seen.has(item.id)) return
+    seen.add(item.id)
+    out.push(item)
+  }
+  for (const item of fms) push(item)
+  for (const item of livextv) {
+    if (!isLivextvReplayCatalogItem(item)) continue
+    if (isSoccerfullOnlyReplayItem(item)) continue
+    push(item)
+  }
+  out.sort((a, b) => (b.releasedAt || 0) - (a.releasedAt || 0))
+  return out
 }
 
 export function sportsReplaySportId(item: StreamItem): string | null {

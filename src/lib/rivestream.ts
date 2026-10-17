@@ -61,6 +61,17 @@ function scoreEnglishAudioHint(blob: string): number {
   return score
 }
 
+/** Anime: Japanese original first, English dub second, other dubs last. */
+function scoreAnimeAudioHint(blob: string): number {
+  const text = String(blob || '').toLowerCase()
+  let score = 0
+  if (/japanese|\bjpn?\b|\bja\b|\bjp\b|nihongo/.test(text)) score += 30
+  else if (/english|\beng\b|\ben-?us\b|\ben\b/.test(text)) score += 18
+  if (NON_ENGLISH_AUDIO_HINT.test(text)) score -= 25
+  if (/hindicast/.test(text)) score -= 30
+  return score
+}
+
 export interface RivestreamHlsSource {
   url: string
   provider: string
@@ -258,11 +269,22 @@ function extractHlsSource(
   }
   if (candidates.length === 0) return null
   if (options?.preferJapaneseAudio) {
-    const jp = candidates.find((c) => /japanese|\bjp\b|\bja\b/i.test(c.quality || ''))
-    if (jp) return jp
+    const ranked = [...candidates].sort((a, b) => {
+      const aBlob = `${a.provider} ${a.quality} ${a.url}`
+      const bBlob = `${b.provider} ${b.quality} ${b.url}`
+      return scoreAnimeAudioHint(bBlob) - scoreAnimeAudioHint(aBlob)
+    })
+    const best = ranked[0]
+    if (best && scoreAnimeAudioHint(`${best.provider} ${best.quality} ${best.url}`) >= 10) {
+      return best
+    }
+    // No JP/EN label — keep ranking (avoids random Hindi/French as candidates[0]).
+    if (best && scoreAnimeAudioHint(`${best.provider} ${best.quality} ${best.url}`) >= 0) {
+      return best
+    }
   }
   // Prefer English audio; never fall through to Hindi/other dubs when English exists.
-  if (!options?.preferJapaneseAudio) {
+  {
     const ranked = [...candidates].sort((a, b) => {
       const aBlob = `${a.provider} ${a.quality} ${a.url}`
       const bBlob = `${b.provider} ${b.quality} ${b.url}`
@@ -560,16 +582,24 @@ export async function resolveRivestreamHls(
   const byEnglishAudio = (a: HlsCandidate, b: HlsCandidate) =>
     scoreEnglishAudioHint(`${b.provider} ${b.quality} ${b.url}`) -
     scoreEnglishAudioHint(`${a.provider} ${a.quality} ${a.url}`)
+  const byAnimeAudio = (a: HlsCandidate, b: HlsCandidate) =>
+    scoreAnimeAudioHint(`${b.provider} ${b.quality} ${b.url}`) -
+    scoreAnimeAudioHint(`${a.provider} ${a.quality} ${a.url}`)
 
   // Prefer captioned streams when requested — do not let English-audio sorting
   // bury Citadel (JP audio + EN .vtt) under Apex (no captions).
+  // Anime: within each group, JP audio first, then English.
   let ordered: HlsCandidate[]
   if (preferCaptions) {
-    const cap = wantJapaneseAudio ? captioned : [...captioned].sort(byEnglishAudio)
-    const rest = wantJapaneseAudio ? plain : [...plain].sort(byEnglishAudio)
+    const cap = wantJapaneseAudio
+      ? [...captioned].sort(byAnimeAudio)
+      : [...captioned].sort(byEnglishAudio)
+    const rest = wantJapaneseAudio
+      ? [...plain].sort(byAnimeAudio)
+      : [...plain].sort(byEnglishAudio)
     ordered = [...cap, ...rest]
   } else if (wantJapaneseAudio) {
-    ordered = [...plain, ...captioned]
+    ordered = [...plain, ...captioned].sort(byAnimeAudio)
   } else {
     ordered = [...plain, ...captioned].sort(byEnglishAudio)
   }
@@ -638,14 +668,202 @@ export async function resolveRivestreamHls(
   return { ok: false, error: lastError }
 }
 
-/** Best-effort TMDB TV id for YMovies rows (title search; cached on item after first hit). */
-export async function lookupRivestreamTmdbId(title: string): Promise<string | null> {
+export type TmdbTvLookupMeta = {
+  tmdbId: string
+  /** ISO 639-1 from TMDB search (e.g. ko, ja, en). */
+  originalLanguage?: string
+}
+
+async function fetchTmdbSearchJson(url: string): Promise<unknown | null> {
+  if (window.signalDesktop?.fetchJsonGet) {
+    const result = await window.signalDesktop.fetchJsonGet(url, RIVESTREAM_PLAY_REFERER)
+    if (!result.ok) return null
+    try {
+      return JSON.parse(result.content || 'null')
+    } catch {
+      return null
+    }
+  }
+  try {
+    const res = await fetch(url)
+    if (!res.ok) return null
+    return await res.json()
+  } catch {
+    return null
+  }
+}
+
+const ASIAN_ANIME_LANGS = new Set(['ja', 'ko', 'zh', 'th'])
+
+export type LookupTmdbTvOptions = {
+  /**
+   * Prefer Animation + Asian originals over Netflix-style live-action remakes
+   * (e.g. One Piece, Yu Yu Hakusho) when resolving Anime shelf plays.
+   */
+  preferAnime?: boolean
+}
+
+/** Best-effort TMDB TV id + original language (cached on item after first hit). */
+export async function lookupTmdbTvMeta(
+  title: string,
+  options?: LookupTmdbTvOptions,
+): Promise<TmdbTvLookupMeta | null> {
   const query = cleanShowDisplayTitle(title) || title.trim()
   if (!query) return null
   const url =
     `${TMDB_API}/search/tv?api_key=${encodeURIComponent(TMDB_KEY)}` +
     `&language=en-US&query=${encodeURIComponent(query)}&page=1`
 
+  const data = await fetchTmdbSearchJson(url)
+  const results = (
+    data as {
+      results?: Array<{
+        id?: number
+        name?: string
+        original_language?: string
+        genre_ids?: number[]
+        first_air_date?: string
+      }>
+    }
+  )?.results
+  if (!Array.isArray(results) || results.length === 0) return null
+
+  const q = query.toLowerCase()
+  const ranked = [...results].sort((a, b) => {
+    const aTitle = String(a.name || '').toLowerCase()
+    const bTitle = String(b.name || '').toLowerCase()
+    const aExact = aTitle === q ? 1 : 0
+    const bExact = bTitle === q ? 1 : 0
+    if (aExact !== bExact) return bExact - aExact
+
+    if (options?.preferAnime) {
+      const aGenres = Array.isArray(a.genre_ids) ? a.genre_ids : []
+      const bGenres = Array.isArray(b.genre_ids) ? b.genre_ids : []
+      const aAnim = aGenres.includes(16) ? 1 : 0
+      const bAnim = bGenres.includes(16) ? 1 : 0
+      if (aAnim !== bAnim) return bAnim - aAnim
+      const aLang = String(a.original_language || '').toLowerCase()
+      const bLang = String(b.original_language || '').toLowerCase()
+      const aAsian = ASIAN_ANIME_LANGS.has(aLang) ? 1 : 0
+      const bAsian = ASIAN_ANIME_LANGS.has(bLang) ? 1 : 0
+      if (aAsian !== bAsian) return bAsian - aAsian
+      // Original long-running series usually aired before live-action remakes.
+      const aDate = String(a.first_air_date || '')
+      const bDate = String(b.first_air_date || '')
+      if (aDate && bDate && aDate !== bDate) return aDate.localeCompare(bDate)
+    }
+    return 0
+  })
+
+  const top = ranked[0]
+  if (!top?.id) return null
+  const originalLanguage = String(top.original_language || '')
+    .trim()
+    .toLowerCase()
+  return {
+    tmdbId: String(top.id),
+    ...(originalLanguage ? { originalLanguage } : {}),
+  }
+}
+
+export type TmdbMovieLookupMeta = {
+  tmdbId: string
+  originalLanguage?: string
+  year?: string
+}
+
+/** Best-effort TMDB movie id (YTS / Movies shelf → Movy Direct). */
+export async function lookupTmdbMovieMeta(title: string): Promise<TmdbMovieLookupMeta | null> {
+  const query = cleanShowDisplayTitle(title) || title.trim()
+  if (!query) return null
+  const yearHint = /\b((?:19|20)\d{2})\b/.exec(title)?.[1]
+  const url =
+    `${TMDB_API}/search/movie?api_key=${encodeURIComponent(TMDB_KEY)}` +
+    `&language=en-US&query=${encodeURIComponent(query)}&page=1` +
+    (yearHint ? `&year=${encodeURIComponent(yearHint)}` : '')
+
+  const data = await fetchTmdbSearchJson(url)
+  const results = (
+    data as {
+      results?: Array<{
+        id?: number
+        title?: string
+        original_language?: string
+        release_date?: string
+      }>
+    }
+  )?.results
+  if (!Array.isArray(results) || results.length === 0) return null
+  const q = query.toLowerCase()
+  const ranked = [...results].sort((a, b) => {
+    const aTitle = String(a.title || '').toLowerCase()
+    const bTitle = String(b.title || '').toLowerCase()
+    const aExact = aTitle === q ? 1 : 0
+    const bExact = bTitle === q ? 1 : 0
+    if (aExact !== bExact) return bExact - aExact
+    if (yearHint) {
+      const aYear = String(a.release_date || '').slice(0, 4) === yearHint ? 1 : 0
+      const bYear = String(b.release_date || '').slice(0, 4) === yearHint ? 1 : 0
+      if (aYear !== bYear) return bYear - aYear
+    }
+    return 0
+  })
+  const top = ranked[0]
+  if (!top?.id) return null
+  const originalLanguage = String(top.original_language || '')
+    .trim()
+    .toLowerCase()
+  const year = String(top.release_date || '').slice(0, 4)
+  return {
+    tmdbId: String(top.id),
+    ...(originalLanguage ? { originalLanguage } : {}),
+    ...(year ? { year } : {}),
+  }
+}
+
+/** Best-effort TMDB TV id for YMovies rows (title search; cached on item after first hit). */
+export async function lookupRivestreamTmdbId(
+  title: string,
+  options?: LookupTmdbTvOptions,
+): Promise<string | null> {
+  const meta = await lookupTmdbTvMeta(title, options)
+  return meta?.tmdbId || null
+}
+
+/**
+ * For Anime shelf plays: keep a catalog TMDB id only when it is Animation;
+ * otherwise re-search preferring anime (avoids Netflix live-action remakes).
+ */
+/** Avoid re-fetching genres when ShowPage then tryPlayMovyNative both resolve. */
+const animeTmdbGenreCache = new Map<string, { animation: boolean; at: number }>()
+const ANIME_TMDB_GENRE_CACHE_MS = 30 * 60_000
+
+export async function resolveAnimeTmdbTvId(
+  title: string,
+  currentId?: string | null,
+): Promise<string | null> {
+  const existing = String(currentId || '').trim()
+  if (existing) {
+    const cached = animeTmdbGenreCache.get(existing)
+    if (cached && Date.now() - cached.at < ANIME_TMDB_GENRE_CACHE_MS) {
+      if (cached.animation) return existing
+    } else {
+      const genres = await fetchTmdbTvGenreIds(existing)
+      // Unknown genres (network blip) — trust catalog id from Zenox/TMDB sync.
+      if (!genres) return existing
+      const animation = genres.includes(16)
+      animeTmdbGenreCache.set(existing, { animation, at: Date.now() })
+      if (animation) return existing
+    }
+  }
+  return lookupRivestreamTmdbId(title, { preferAnime: true })
+}
+
+/** Genre ids for a TMDB TV show (Animation = 16). */
+export async function fetchTmdbTvGenreIds(tmdbId: string): Promise<number[] | null> {
+  const id = String(tmdbId || '').trim()
+  if (!id) return null
+  const url = `${TMDB_API}/tv/${encodeURIComponent(id)}?api_key=${encodeURIComponent(TMDB_KEY)}&language=en-US`
   let data: unknown
   if (window.signalDesktop?.fetchJsonGet) {
     const result = await window.signalDesktop.fetchJsonGet(url, RIVESTREAM_PLAY_REFERER)
@@ -664,12 +882,38 @@ export async function lookupRivestreamTmdbId(title: string): Promise<string | nu
       return null
     }
   }
+  const genres = (data as { genres?: Array<{ id?: number }> })?.genres
+  if (!Array.isArray(genres)) return null
+  return genres.map((g) => Number(g.id)).filter((n) => Number.isFinite(n))
+}
 
-  const results = (data as { results?: Array<{ id?: number; name?: string }> })?.results
-  if (!Array.isArray(results) || results.length === 0) return null
-  const top = results[0]
-  if (!top?.id) return null
-  return String(top.id)
+/** Fetch original_language for a known TMDB TV id when catalog didn't store it. */
+export async function fetchTmdbTvOriginalLanguage(tmdbId: string): Promise<string | null> {
+  const id = String(tmdbId || '').trim()
+  if (!id) return null
+  const url = `${TMDB_API}/tv/${encodeURIComponent(id)}?api_key=${encodeURIComponent(TMDB_KEY)}&language=en-US`
+  let data: unknown
+  if (window.signalDesktop?.fetchJsonGet) {
+    const result = await window.signalDesktop.fetchJsonGet(url, RIVESTREAM_PLAY_REFERER)
+    if (!result.ok) return null
+    try {
+      data = JSON.parse(result.content || 'null')
+    } catch {
+      return null
+    }
+  } else {
+    try {
+      const res = await fetch(url)
+      if (!res.ok) return null
+      data = await res.json()
+    } catch {
+      return null
+    }
+  }
+  const lang = String((data as { original_language?: string })?.original_language || '')
+    .trim()
+    .toLowerCase()
+  return lang || null
 }
 
 /**

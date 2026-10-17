@@ -35,7 +35,7 @@ export function isWyzieAvailable(): boolean {
   return Boolean(getWyzieProxyUrl())
 }
 
-function scoreHit(hit: WyzieSubtitleHit): number {
+function scoreHit(hit: WyzieSubtitleHit, season?: number, episode?: number): number {
   let score = 0
   const lang = `${hit.language || ''} ${hit.display || ''}`.toLowerCase()
   if (/^en\b|english/.test(lang)) score += 20
@@ -44,6 +44,21 @@ function scoreHit(hit: WyzieSubtitleHit): number {
   if (fmt === 'vtt' || fmt === 'srt') score += 6
   if (fmt === 'ass' || fmt === 'ssa') score += 3
   score += Math.min(10, Math.floor((Number(hit.downloadCount) || 0) / 5000))
+  if (season != null && episode != null && season >= 1 && episode >= 1) {
+    const blob = `${hit.fileName || ''} ${hit.release || ''} ${hit.display || ''}`.toLowerCase()
+    const tag = `s${String(season).padStart(2, '0')}e${String(episode).padStart(2, '0')}`
+    const tagLoose = `s${season}e${episode}`
+    if (blob.includes(tag) || blob.includes(tagLoose)) score += 50
+    else if (/s\d{1,2}e\d{1,3}/i.test(blob)) score -= 40
+    // Absolute ep# packs (One Piece "1122", "E292") — match when SxxExx is absent.
+    if (episode >= 50) {
+      const ep = String(episode)
+      const abs =
+        new RegExp(`(?:^|[^0-9])0*${ep}(?:[^0-9]|$)`).test(blob) ||
+        new RegExp(`\\be0*${ep}\\b`).test(blob)
+      if (abs) score += 35
+    }
+  }
   return score
 }
 
@@ -59,12 +74,17 @@ function withVttOutput(downloadUrl: string): string {
   }
 }
 
-async function fetchProxySearch(searchUrl: string): Promise<{ ok: boolean; status: number; text: string; error?: string }> {
-  const headers: Record<string, string> = {
+/** Soft Worker gate — browsers may strip User-Agent; X-Jiyu-Client still gets through. */
+function proxyClientHeaders(tag: string): Record<string, string> {
+  return {
     Accept: 'application/json',
-    // Soft gate on the Worker — must contain "Jiyu" (or Electron for desktop fallback).
-    'User-Agent': `JiyuMedia/${typeof __JIYU_VERSION__ !== 'undefined' ? __JIYU_VERSION__ : 'dev'} (Wyzie)`,
+    'User-Agent': `JiyuMedia/${typeof __JIYU_VERSION__ !== 'undefined' ? __JIYU_VERSION__ : 'dev'} (${tag})`,
+    'X-Jiyu-Client': `JiyuMedia/${typeof __JIYU_VERSION__ !== 'undefined' ? __JIYU_VERSION__ : 'dev'}`,
   }
+}
+
+async function fetchProxySearch(searchUrl: string): Promise<{ ok: boolean; status: number; text: string; error?: string }> {
+  const headers = proxyClientHeaders('Wyzie')
 
   if (typeof window !== 'undefined' && window.signalDesktop?.fetchJsonGet) {
     const r = await window.signalDesktop.fetchJsonGet(searchUrl, getWyzieProxyUrl() + '/')
@@ -145,7 +165,10 @@ async function resolveViaProxy(options: {
 
   const ranked = hits
     .filter((h) => h && /^https?:\/\//i.test(String(h.url || '')))
-    .sort((a, b) => scoreHit(b) - scoreHit(a))
+    .sort(
+      (a, b) =>
+        scoreHit(b, options.season, options.episode) - scoreHit(a, options.season, options.episode),
+    )
   const best = ranked[0]
   if (!best?.url) return { ok: false, error: 'No Wyzie subtitles for this episode' }
 

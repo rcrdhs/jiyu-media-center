@@ -22,8 +22,10 @@ export function isNativeHttpPlatform(): boolean {
   }
 }
 
+// Include "JiyuMedia" so Android CapacitorHttp requests pass the Wyzie Worker UA gate
+// (Worker rejects plain Chrome/OkHttp UAs; desktop Electron IPC never hits the Worker).
 const DESKTOP_UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 JiyuMedia'
 
 /** Hosts that CapacitorHttp/OkHttp routinely trip Cloudflare — prefer WebView. */
 function prefersAndroidWebView(url: string): boolean {

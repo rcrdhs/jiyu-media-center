@@ -55,6 +55,8 @@ export interface StreamItem {
   netmirrorTmdbId?: string
   /** Cached TMDB TV id for RiveStream play (YMovies title lookup) */
   rivestreamTmdbId?: string
+  /** Cached bilibili.tv OGV season id (play fallback after Movy) */
+  bilibiliSeasonId?: string
   /** YMovies internal show id (e.g. s1ax4) for AJAX episode/play APIs */
   ymoviesId?: string
   /** Cinetaro TMDB TV id (list + cinextream embed play) */
@@ -71,8 +73,13 @@ export interface StreamItem {
   eventViewers?: number
   /** League / sport label for sports cards (NFL, MLB, Bundesliga, …) */
   eventSport?: string
+  /** Optional crest / badge URLs for VS sports cards (Streamed, etc.). */
+  homeBadgeUrl?: string
+  awayBadgeUrl?: string
   /** From tvg-language / similar IPTV attrs when present */
   language?: string
+  /** ISO 639-1 from TMDB / M2Box country (e.g. ko, ja) — drives softsub ensure */
+  originalLanguage?: string
   /** From tvg-id — used to match XMLTV EPG channels */
   tvgId?: string
   /** M3U http-user-agent / #EXTVLCOPT — applied in Electron for HLS */
@@ -214,7 +221,7 @@ declare global {
       tmdbTvCatalog?: (
         kind: 'popular' | 'on_the_air' | 'trending' | 'by_year' | 'anime' | 'kids' | 'animation',
         limit?: number,
-        options?: { withExternalIds?: boolean },
+        options?: { withExternalIds?: boolean; withoutKeywords?: string },
       ) => Promise<{
         ok: boolean
         shows: Array<{
@@ -394,11 +401,33 @@ declare global {
           }
         | { ok: false; error: string }
       >
+      /** Softsubs via OpenSubtitles — key stays in Electron main .env only. */
+      resolveOpenSubtitlesSubtitle?: (options: {
+        tmdbId: string | number
+        season?: number
+        episode?: number
+        language?: string
+      }) => Promise<
+        | {
+            ok: true
+            subtitleUrl: string
+            subtitleKind: 'file'
+            source: 'opensubtitles'
+          }
+        | { ok: false; error: string }
+      >
       /** Close the Cloudflare Chrome helper (after Show List sync). */
       closeCfBrowser?: (options?: { soon?: boolean; reason?: string }) => Promise<{ ok: boolean }>
       torrentStream?: (
         magnet: string,
-        options?: { keepOthers?: boolean },
+        options?: {
+          keepOthers?: boolean
+          fileIndex?: number
+          fileName?: string
+          preferJapaneseAudio?: boolean
+          category?: string
+          anime?: boolean
+        },
       ) => Promise<TorrentStreamResult>
       torrentStatus?: (infoHash?: string) => Promise<{ ok: boolean; torrents: TorrentInfo[]; error?: string }>
       torrentStop?: (infoHash?: string) => Promise<{ ok: boolean; error?: string }>

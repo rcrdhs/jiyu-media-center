@@ -4,6 +4,7 @@
  * Tier 2 fallback: Web Browser when play resolution fails.
  */
 
+import { languageFromM2BoxCountry } from './language'
 import type { TorrentPageLink } from './torrents'
 
 export const M2BOX_SERIES_FEED_PREFIX = 'jiyu://m2box-series'
@@ -603,6 +604,9 @@ export function m2boxSubjectsToLinks(
         category,
         releasedAt: parseM2BoxReleaseDate(subject.releaseDate),
         m2boxSubjectId: subject.subjectId,
+        ...(subject.countryName
+          ? { originalLanguage: languageFromM2BoxCountry(subject.countryName) || undefined }
+          : {}),
       }
     })
 }

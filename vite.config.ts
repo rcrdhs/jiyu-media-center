@@ -9,6 +9,7 @@ const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'))
   version?: string
 }
 const appVersion = pkg.version || '0.0.0'
+const syncUrl = String(process.env.VITE_JIYU_SYNC_URL || '').trim()
 
 export default defineConfig({
   plugins: [react()],
@@ -19,6 +20,8 @@ export default defineConfig({
   envPrefix: ['VITE_', 'TMDB_', 'WYZIE_PROXY_'],
   define: {
     __JIYU_VERSION__: JSON.stringify(appVersion),
+    // Same Continue-watching sync host for Android, desktop, future TV/Apple.
+    __JIYU_SYNC_URL__: JSON.stringify(syncUrl),
   },
   resolve: {
     alias: {

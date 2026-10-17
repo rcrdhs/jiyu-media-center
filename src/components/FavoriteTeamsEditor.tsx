@@ -31,12 +31,15 @@ export function FavoriteTeamsEditor() {
 
   return (
     <section className="favorite-teams" aria-label="Favorite teams">
-      <div className="section-head">
-        <h2>Favorite teams</h2>
-        <p>
-          Football, basketball, cricket, and American football. Matching matches and recent
-          replays show on Home, and Jiyu notifies you when one is about to start.
-        </p>
+      <div className="section-head favorite-teams-head">
+        <div className="favorite-teams-head-copy">
+          <h2>Favorite teams</h2>
+          <p>
+            Football, basketball, cricket, and American football. Matching matches and recent
+            replays show under Your teams on Home, and Jiyu notifies you when one is about to
+            start.
+          </p>
+        </div>
       </div>
       <form
         className="favorite-teams-form"

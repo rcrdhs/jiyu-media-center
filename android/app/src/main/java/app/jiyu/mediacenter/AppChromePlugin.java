@@ -2,10 +2,12 @@ package app.jiyu.mediacenter;
 
 import android.app.Activity;
 import android.app.PictureInPictureParams;
+import android.graphics.Color;
 import android.os.Build;
 import android.util.Rational;
 import android.view.View;
 import android.view.Window;
+import android.view.WindowInsetsController;
 import android.view.WindowManager;
 
 import androidx.core.view.WindowCompat;
@@ -27,8 +29,25 @@ public class AppChromePlugin extends Plugin {
 
   private volatile boolean jsHandlesBack = false;
   private volatile boolean homePipEnabled = false;
+  private volatile boolean immersiveOn = false;
   private volatile int pipWidth = 16;
   private volatile int pipHeight = 9;
+
+  boolean isImmersive() {
+    return immersiveOn;
+  }
+
+  /** Re-apply immersive after rotation so the WebView picks up the new display size. */
+  void reapplyImmersiveIfNeeded() {
+    if (!immersiveOn) return;
+    Activity activity = getActivity();
+    if (activity == null) return;
+    activity.runOnUiThread(() -> {
+      try {
+        applyImmersive(activity, true);
+      } catch (Throwable ignored) {}
+    });
+  }
 
   @PluginMethod
   public void setImmersive(PluginCall call) {
@@ -41,6 +60,7 @@ public class AppChromePlugin extends Plugin {
     }
     activity.runOnUiThread(() -> {
       try {
+        immersiveOn = on;
         applyImmersive(activity, on);
         call.resolve();
       } catch (Throwable t) {
@@ -184,9 +204,13 @@ public class AppChromePlugin extends Plugin {
     Window window = activity.getWindow();
     View decor = window.getDecorView();
     WindowCompat.setDecorFitsSystemWindows(window, !on);
+    final int bar = Color.parseColor("#080A0D");
     WindowInsetsControllerCompat controller =
       WindowCompat.getInsetsController(window, decor);
     if (controller != null) {
+      // Always light icons — dark glyphs vanish on Jiyu's black chrome.
+      controller.setAppearanceLightStatusBars(false);
+      controller.setAppearanceLightNavigationBars(false);
       if (on) {
         controller.hide(WindowInsetsCompat.Type.systemBars());
         controller.setSystemBarsBehavior(
@@ -206,6 +230,36 @@ public class AppChromePlugin extends Plugin {
           | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY;
       }
       decor.setSystemUiVisibility(on ? flags : View.SYSTEM_UI_FLAG_VISIBLE);
+    }
+    if (!on) {
+      // Leaving player: restore solid dark bars + pale icons (targetSdk 35+).
+      window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
+      window.clearFlags(WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS);
+      window.setStatusBarColor(bar);
+      window.setNavigationBarColor(bar);
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        window.setStatusBarContrastEnforced(false);
+        window.setNavigationBarContrastEnforced(false);
+      }
+      int vis = decor.getSystemUiVisibility();
+      vis &= ~View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        vis &= ~View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+      }
+      decor.setSystemUiVisibility(vis);
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        WindowInsetsController ic = window.getInsetsController();
+        if (ic != null) {
+          ic.setSystemBarsAppearance(
+            0,
+            WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+              | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
+          );
+        }
+      }
+      if (activity instanceof MainActivity) {
+        ((MainActivity) activity).applyDarkSystemBars();
+      }
     }
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
       WindowManager.LayoutParams lp = window.getAttributes();

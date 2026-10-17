@@ -1,0 +1,24 @@
+---
+description: Hold version bumps and publishes until the user explicitly asks
+alwaysApply: true
+---
+
+# Hold publishes until asked
+
+Do **not** auto-ship after each shared-app change.
+
+## Do not until the user says so
+
+- Version bumps (`package.json`, Android `versionName`/`versionCode`, `APP_RELEASES`)
+- `npm run build` / `cap sync` / signed APK / Windows pack for release
+- GitHub Release publish / updater yml upload
+- `adb install` / relaunch of the phone or desktop **release** app
+
+## Still OK while iterating
+
+- Source edits and local verification (e.g. `npm run dev:desktop`)
+- Commits only when the user asks to commit
+
+## When they ask to publish
+
+Then follow the normal all-platforms ship path (bump, Android + Windows, same GitHub Release, leave the installed release app alone after publish).

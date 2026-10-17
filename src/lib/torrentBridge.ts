@@ -11,6 +11,10 @@ export type TorrentStreamOptions = {
   keepOthers?: boolean
   fileIndex?: number
   fileName?: string
+  /** Anime MULTI packs: remux Japanese audio instead of French a:0. */
+  preferJapaneseAudio?: boolean
+  category?: string
+  anime?: boolean
 }
 
 type NativeTorrentStreamer = {
@@ -19,6 +23,7 @@ type NativeTorrentStreamer = {
     keepOthers?: boolean
     fileIndex?: number
     fileName?: string
+    preferJapaneseAudio?: boolean
   }) => Promise<TorrentStreamResult>
   stop: (options?: { infoHash?: string }) => Promise<{ ok: boolean; error?: string }>
   status: (options?: { infoHash?: string }) => Promise<{
@@ -51,12 +56,22 @@ export function isTorrentPlaybackAvailable(): boolean {
   return isDesktopTorrentAvailable() || isAndroidTorrentAvailable()
 }
 
+function wantsJapaneseAudio(options?: TorrentStreamOptions): boolean {
+  return Boolean(
+    options?.preferJapaneseAudio ||
+      options?.anime ||
+      String(options?.category || '').toLowerCase() === 'anime',
+  )
+}
+
 export async function torrentStream(
   uri: string,
   options?: TorrentStreamOptions,
 ): Promise<TorrentStreamResult> {
+  const preferJapaneseAudio = wantsJapaneseAudio(options)
+  const bridged = { ...options, preferJapaneseAudio }
   if (isDesktopTorrentAvailable() && window.signalDesktop?.torrentStream) {
-    return window.signalDesktop.torrentStream(uri, options)
+    return window.signalDesktop.torrentStream(uri, bridged)
   }
   if (isAndroidTorrentAvailable()) {
     try {
@@ -65,17 +80,18 @@ export async function torrentStream(
         keepOthers: options?.keepOthers,
         fileIndex: options?.fileIndex,
         fileName: options?.fileName,
+        preferJapaneseAudio,
       })
     } catch (err) {
       return {
         ok: false,
-        error: err instanceof Error ? err.message : 'Android torrent engine failed',
+        error: err instanceof Error ? err.message : 'Android source engine failed',
       }
     }
   }
   return {
     ok: false,
-    error: 'Torrent playback needs the Jiyu desktop app or the Android torrent engine.',
+    error: 'Playback needs the Jiyu desktop app or the Android source engine.',
   }
 }
 
@@ -89,11 +105,11 @@ export async function torrentStop(infoHash?: string): Promise<{ ok: boolean; err
     } catch (err) {
       return {
         ok: false,
-        error: err instanceof Error ? err.message : 'Could not stop torrent',
+        error: err instanceof Error ? err.message : 'Could not stop source',
       }
     }
   }
-  return { ok: false, error: 'Torrent stop unavailable' }
+  return { ok: false, error: 'Source stop unavailable' }
 }
 
 export async function torrentStatus(infoHash?: string): Promise<{
@@ -111,11 +127,11 @@ export async function torrentStatus(infoHash?: string): Promise<{
       return {
         ok: false,
         torrents: [],
-        error: err instanceof Error ? err.message : 'Could not read torrent status',
+        error: err instanceof Error ? err.message : 'Could not read source status',
       }
     }
   }
-  return { ok: false, torrents: [], error: 'Torrent status unavailable' }
+  return { ok: false, torrents: [], error: 'Source status unavailable' }
 }
 
 export async function torrentEnsureDownloading(
@@ -132,9 +148,9 @@ export async function torrentEnsureDownloading(
     } catch (err) {
       return {
         ok: false,
-        error: err instanceof Error ? err.message : 'Could not resume torrent download',
+        error: err instanceof Error ? err.message : 'Could not resume source download',
       }
     }
   }
-  return { ok: false, error: 'Torrent ensure-downloading unavailable' }
+  return { ok: false, error: 'Source download unavailable' }
 }

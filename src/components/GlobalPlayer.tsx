@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { usePlayback } from '../context/PlaybackContext'
 import { useWebBrowser } from '../context/WebBrowserContext'
@@ -10,7 +10,11 @@ import {
   androidBrowserMultiHideAll,
   isAndroidInAppBrowser,
 } from '../lib/androidBrowser'
-import { isWebEmbedPlaybackItem } from '../lib/webBrowser'
+import {
+  isNativeMedia3PlaybackItem,
+  isWebEmbedPlaybackItem,
+} from '../lib/webBrowser'
+import { media3Hide, isAndroidMedia3Host } from '../lib/androidMedia3'
 import { MultiView } from './MultiView'
 import { Player } from './Player'
 
@@ -37,7 +41,10 @@ export function GlobalPlayer() {
     returnTo,
     resumeItem,
     awaitingAdd,
+    multiMounted,
     cancelMultiviewAdd,
+    dismountMulti,
+    mountMulti,
     minimizeToPip,
     expand,
     stop,
@@ -48,19 +55,28 @@ export function GlobalPlayer() {
   const { openInPip, parkForMultiview, closeBrowser } = useWebBrowser()
   const navigate = useNavigate()
   const location = useLocation()
-  const wasMultiRef = useRef(false)
 
   // Hard-reset native web tiles whenever playback stops.
   useEffect(() => {
     if (mode !== 'off') return
     clearWebSurfaces({ blank: true })
+    if (isAndroidMedia3Host()) void media3Hide({ stop: true })
     void handFullscreenToCurrentStream(null)
   }, [mode])
 
   // Stream selected — Full ownership follows the current title (not a leftover PiP).
   useEffect(() => {
     if (!item || mode === 'off') return
+    // Multi grid (mounted or docked) owns embed tiles — don't hand Full to /web.
+    if (mode === 'multi') return
+    if (isNativeMedia3PlaybackItem(item)) {
+      void handFullscreenToCurrentStream('native')
+      clearWebSurfaces({ blank: true })
+      closeBrowser()
+      return
+    }
     if (isWebEmbedPlaybackItem(item)) {
+      if (isAndroidMedia3Host()) void media3Hide({ stop: true })
       void handFullscreenToCurrentStream('web')
       return
     }
@@ -70,58 +86,31 @@ export function GlobalPlayer() {
     clearWebSurfaces({ blank: true })
     // Always close even if mode was already "off" — view can desync and stay visible.
     closeBrowser()
+    if (isAndroidMedia3Host()) void media3Hide({ stop: true })
   }, [item?.id, mode, closeBrowser, item])
 
   // Entering multi-view: park the single-player browser so tiles own the embeds.
   useEffect(() => {
-    if (mode !== 'multi' || slots.length < 2) return
+    if (mode !== 'multi' || !multiMounted || slots.length < 1) return
     if (!slots.some((slot) => isWebEmbedPlaybackItem(slot))) return
     parkForMultiview()
-  }, [mode, slots, parkForMultiview])
+  }, [mode, multiMounted, slots, parkForMultiview])
 
-  // Leaving multi-view with one web embed → restore /web.
-  useEffect(() => {
-    if (mode === 'multi') {
-      wasMultiRef.current = true
-      return
-    }
-    if (!wasMultiRef.current) return
-    wasMultiRef.current = false
-    if (slots.length !== 1 || !item || !isWebEmbedPlaybackItem(item)) return
-    clearWebSurfaces({ blank: true })
-    navigate(`/web?url=${encodeURIComponent(item.url)}`, {
-      replace: true,
-      state: {
-        from: returnTo || '/section/sports',
-        playerMode: 'embed',
-        pipOnBack: true,
-        continueWatch: {
-          id: item.id,
-          title: item.title,
-          poster: item.poster,
-          category: item.category,
-          playlistIndex: 0,
-          playUrl: item.url,
-          transport: item.transport,
-          sourceKind: item.sourceKind,
-          source: item.source,
-        },
-      },
-    })
-  }, [mode, slots.length, item, navigate, returnTo])
-
-  // Armed "Add stream": leave the grid so Sports / shelves are usable.
-  // Keep slots in memory; MultiView remounts when picking finishes (/multiview).
-  const pickingExtra =
-    mode === 'multi' &&
-    slots.length > 1 &&
-    awaitingAdd &&
+  // Dismounted grid / add-another: detach native tiles so shelves stay usable.
+  const multiDocked =
+    mode === 'multi' && slots.length >= 1 && (!multiMounted || awaitingAdd) &&
     !location.pathname.startsWith('/multiview')
 
   useEffect(() => {
-    if (!pickingExtra) return
+    if (mode !== 'multi' || multiMounted) return
     void window.signalDesktop?.browserMultiHideAll?.({ blank: false })
-  }, [pickingExtra])
+    if (isAndroidInAppBrowser()) void androidBrowserMultiHideAll({ blank: false })
+  }, [mode, multiMounted])
+
+  useEffect(() => {
+    if (!multiDocked || !awaitingAdd) return
+    void window.signalDesktop?.browserMultiHideAll?.({ blank: false })
+  }, [multiDocked, awaitingAdd])
 
   if (mode === 'off' || slots.length === 0) return null
 
@@ -148,38 +137,50 @@ export function GlobalPlayer() {
     navigate(dest, { replace: true })
   }
 
-  if (pickingExtra) {
+  function goToMultiGrid() {
+    cancelMultiviewAdd()
+    mountMulti()
+    navigate('/multiview', { replace: true })
+  }
+
+  // Dismounted: streams kept; browse the app until remount.
+  if (mode === 'multi' && slots.length >= 1 && !multiMounted) {
     return (
       <div className="multiview-pick-bar" role="status">
         <strong>Multi-view</strong>
         <span>
-          {slots.length}/4 · pick another live stream to add
+          {slots.length}/4 parked
+          {awaitingAdd ? ' · pick another live stream to add' : ' · streams kept'}
         </span>
-        <button
-          type="button"
-          className="ghost-btn control-btn"
-          onClick={() => {
-            cancelMultiviewAdd()
-            navigate('/multiview', { replace: true })
-          }}
-        >
-          Cancel
-        </button>
-        <button
-          type="button"
-          className="ghost-btn control-btn"
-          onClick={() => {
-            cancelMultiviewAdd()
-            navigate('/multiview', { replace: true })
-          }}
-        >
+        <button type="button" className="ghost-btn control-btn" onClick={goToMultiGrid}>
           Back to grid
+        </button>
+        {awaitingAdd ? (
+          <button
+            type="button"
+            className="ghost-btn control-btn"
+            onClick={() => cancelMultiviewAdd()}
+          >
+            Cancel add
+          </button>
+        ) : null}
+        <button
+          type="button"
+          className="ghost-btn control-btn"
+          onClick={() => {
+            clearWebSurfaces({ blank: true })
+            stop()
+            navigate('/', { replace: true })
+          }}
+        >
+          Close all
         </button>
       </div>
     )
   }
 
-  if (slots.length > 1 && mode === 'multi') {
+  // Keep MultiView for a single leftover tile too — remounting as /web kills playback.
+  if (mode === 'multi' && slots.length >= 1 && multiMounted) {
     return (
       <MultiView
         slots={slots}
@@ -196,6 +197,14 @@ export function GlobalPlayer() {
           if (isAndroidInAppBrowser()) void androidBrowserHide({ blank: true, pause: true })
           stop()
           navigate('/', { replace: true })
+        }}
+        onDismount={() => {
+          void exitFullscreenIfNeeded().then(() => {
+            dismountMulti()
+            void window.signalDesktop?.browserMultiHideAll?.({ blank: false })
+            if (isAndroidInAppBrowser()) void androidBrowserMultiHideAll({ blank: false })
+            navigate(returnTo || '/section/sports', { replace: true })
+          })
         }}
         onMinimize={() => {
           forceSaveProgress()
@@ -217,8 +226,8 @@ export function GlobalPlayer() {
 
   if (!item) return null
 
-  // Single web embed is owned by /web (or web PiP) — don't mount the HLS player on it.
-  if (isWebEmbedPlaybackItem(item)) {
+  // Media3 and web embeds own their own surfaces — don't mount Capacitor HLS on them.
+  if (isNativeMedia3PlaybackItem(item) || isWebEmbedPlaybackItem(item)) {
     return null
   }
 

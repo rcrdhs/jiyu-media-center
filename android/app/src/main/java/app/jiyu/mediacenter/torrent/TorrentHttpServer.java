@@ -50,6 +50,9 @@ final class TorrentHttpServer extends NanoHTTPD {
     if ("/stream.mp4".equals(uri)) {
       return serveRemux(session);
     }
+    if ("/subs.vtt".equals(uri)) {
+      return serveSubtitles(session);
+    }
     if (!uri.startsWith("/stream/")) {
       return newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "not found");
     }
@@ -92,6 +95,49 @@ final class TorrentHttpServer extends NanoHTTPD {
     }
   }
 
+  private Response serveSubtitles(IHTTPSession session) {
+    String hash = firstParam(session, "source");
+    if (hash == null || !hash.matches("[a-fA-F0-9]{20,64}")) {
+      return newFixedLengthResponse(Response.Status.BAD_REQUEST, MIME_PLAINTEXT, "missing torrent");
+    }
+    hash = hash.toLowerCase();
+    TorrentEngine.ActiveTorrent torrent = engine.findByHash(hash);
+    if (torrent == null) {
+      return newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "torrent not active");
+    }
+    torrent.kickSubtitleExtract(baseUrl());
+    File vtt = torrent.readySubtitleVtt();
+    if (vtt != null) {
+      try {
+        InputStream body = new java.io.FileInputStream(vtt);
+        Response res = newFixedLengthResponse(
+          Response.Status.OK,
+          "text/vtt; charset=utf-8",
+          body,
+          vtt.length()
+        );
+        res.addHeader("Cache-Control", "no-store");
+        res.addHeader("X-Jiyu-Subs-Done", "1");
+        return withCors(res);
+      } catch (IOException e) {
+        Log.w(TAG, "serveSubtitles read failed", e);
+        return newFixedLengthResponse(Response.Status.INTERNAL_ERROR, MIME_PLAINTEXT, "read failed");
+      }
+    }
+    if (torrent.subtitleMissing.get()) {
+      return withCors(newFixedLengthResponse(
+        Response.Status.NOT_FOUND,
+        MIME_PLAINTEXT,
+        "no subtitle track"
+      ));
+    }
+    return withCors(newFixedLengthResponse(
+      Response.Status.NOT_FOUND,
+      MIME_PLAINTEXT,
+      "not ready"
+    ));
+  }
+
   private Response serveRemux(IHTTPSession session) {
     String hash = firstParam(session, "source");
     if (hash == null || !hash.matches("[a-fA-F0-9]{20,64}")) {
@@ -111,10 +157,20 @@ final class TorrentHttpServer extends NanoHTTPD {
       } catch (NumberFormatException ignored) {}
     }
 
+    boolean preferJapanese =
+      "1".equals(firstParam(session, "anime"))
+        || "ja".equalsIgnoreCase(firstParam(session, "audio"))
+        || "jpn".equalsIgnoreCase(firstParam(session, "audio"));
+
     cancelRemux();
     TorrentRemuxer.Job job;
     try {
-      job = TorrentRemuxer.start(appContext, baseUrl() + "/stream/" + hash, startAt);
+      job = TorrentRemuxer.start(
+        appContext,
+        baseUrl() + "/stream/" + hash,
+        startAt,
+        preferJapanese
+      );
     } catch (Throwable e) {
       Log.e(TAG, "remux failed to start", e);
       return withCors(newFixedLengthResponse(

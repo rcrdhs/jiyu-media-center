@@ -6,6 +6,8 @@ import { getMainStage, setMainScroll, setSectionFocusItem } from '../lib/viewSta
 import { isShowBrowseItem, isSeriesWebCatalogItem } from '../lib/torrents'
 import { isWebBrowserOnlyUrl, isYouTubeUrl } from '../lib/webBrowser'
 import { isWeakPosterUrl, resolveCatalogPoster } from '../lib/posterFallback'
+import { parseSportsMatchSides, sportsCardPoster } from '../lib/sportsMatchPoster'
+import { resolveMatchTeamLogos } from '../lib/teamLogos'
 import {
   canQueueWatchNext,
   clearWatchNext,
@@ -13,6 +15,12 @@ import {
   setWatchNext,
   subscribeWatchNext,
 } from '../lib/watchNext'
+import {
+  canSaveToWatchlist,
+  isOnWatchlist,
+  subscribeWatchlist,
+  toggleWatchlist,
+} from '../lib/watchlist'
 import { CardPreview } from './CardPreview'
 import type { StreamHealthState, StreamItem } from '../types'
 
@@ -36,23 +44,40 @@ export function MediaCard({ item }: MediaCardProps) {
   const isTorrent = item.transport === 'torrent' || item.sourceKind === 'torrent'
   // Web-browser titles (M2Box, NetMirror, YouTube, …) aren't probeable HLS — hide health chrome.
   const skipHealth =
-    isTorrent || isSeriesWebCatalogItem(item) || isWebBrowserOnlyUrl(item.url)
+    isTorrent ||
+    isSeriesWebCatalogItem(item) ||
+    isWebBrowserOnlyUrl(item.url) ||
+    item.category === 'sports'
   const status = skipHealth ? 'online' : getStatus(item.id)
   const entry = skipHealth ? undefined : getEntry(item.id)
 
   const [previewing, setPreviewing] = useState(false)
   const [previewDone, setPreviewDone] = useState(false)
   const [fallbackPoster, setFallbackPoster] = useState('')
+  const [teamLogos, setTeamLogos] = useState<{ home: string | null; away: string | null }>({
+    home: item.homeBadgeUrl || null,
+    away: item.awayBadgeUrl || null,
+  })
   const [queued, setQueued] = useState(() => isWatchNext(item.id))
+  const [saved, setSaved] = useState(() => isOnWatchlist(item.id))
   const [nowMs, setNowMs] = useState(() => Date.now())
   const hoverTimer = useRef<number | null>(null)
+  const matchSides =
+    item.category === 'sports' ? parseSportsMatchSides(item.title) : null
   const catalogPoster = (() => {
+    // Sports match cards share one VS art style across Home, Sports, and Your teams.
+    if (item.category === 'sports') {
+      // HTML VS art (with logos) replaces the img when sides parse.
+      if (matchSides) return ''
+      return sportsCardPoster(item)
+    }
     const raw = item.poster || ''
     if (raw.startsWith('data:image/')) return raw
     return isWeakPosterUrl(raw) ? '' : raw
   })()
   const poster = catalogPoster || fallbackPoster || item.poster || ''
   const queueable = canQueueWatchNext(item)
+  const saveable = canSaveToWatchlist(item)
   const eventBadge = eventBadgeForItem(item, nowMs)
   const posterFrame =
     item.category === 'anime' ||
@@ -61,6 +86,10 @@ export function MediaCard({ item }: MediaCardProps) {
     item.category === 'kids'
 
   useEffect(() => subscribeWatchNext((entry) => setQueued(entry?.id === item.id)), [item.id])
+  useEffect(
+    () => subscribeWatchlist(() => setSaved(isOnWatchlist(item.id))),
+    [item.id],
+  )
 
   useEffect(() => {
     const start = Number(item.eventStartsAt) || 0
@@ -73,6 +102,7 @@ export function MediaCard({ item }: MediaCardProps) {
   useEffect(() => {
     let cancelled = false
     setFallbackPoster('')
+    if (item.category === 'sports') return
     if (catalogPoster) return
     if (item.category !== 'anime' && item.category !== 'movies' && item.category !== 'series') {
       return
@@ -84,6 +114,36 @@ export function MediaCard({ item }: MediaCardProps) {
       cancelled = true
     }
   }, [item.id, item.title, item.poster, item.category, catalogPoster])
+
+  // Fetch both team crests/flags for match-style sports cards (replays + live).
+  useEffect(() => {
+    let cancelled = false
+    const sides = item.category === 'sports' ? parseSportsMatchSides(item.title) : null
+    setTeamLogos({
+      home: item.homeBadgeUrl || null,
+      away: item.awayBadgeUrl || null,
+    })
+    if (!sides) return
+    void resolveMatchTeamLogos({
+      home: sides.home,
+      away: sides.away,
+      homeBadgeUrl: item.homeBadgeUrl,
+      awayBadgeUrl: item.awayBadgeUrl,
+    }).then((logos) => {
+      if (!cancelled) {
+        setTeamLogos({ home: logos.homeLogo, away: logos.awayLogo })
+      }
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [
+    item.id,
+    item.title,
+    item.homeBadgeUrl,
+    item.awayBadgeUrl,
+    item.category,
+  ])
 
   const canPreview =
     !skipHealth &&
@@ -146,8 +206,29 @@ export function MediaCard({ item }: MediaCardProps) {
           if (sectionMatch?.[1]) setSectionFocusItem(sectionMatch[1], item.id)
         }}
       >
-        <div className={`media-card-art${posterFrame ? ' is-poster' : ''}`} aria-hidden={!poster}>
-          {poster ? (
+        <div
+          className={`media-card-art${posterFrame ? ' is-poster' : ''}${matchSides ? ' has-sports-vs' : ''}`}
+          aria-hidden={!(poster || matchSides)}
+        >
+          {matchSides ? (
+            <div className="sports-vs-art" aria-hidden>
+              <div className="sports-vs-side is-home">
+                {teamLogos.home ? (
+                  <img className="sports-vs-logo" src={teamLogos.home} alt="" loading="lazy" />
+                ) : (
+                  <span className="sports-vs-logo is-empty" />
+                )}
+              </div>
+              <span className="sports-vs-pill">VS</span>
+              <div className="sports-vs-side is-away">
+                {teamLogos.away ? (
+                  <img className="sports-vs-logo" src={teamLogos.away} alt="" loading="lazy" />
+                ) : (
+                  <span className="sports-vs-logo is-empty" />
+                )}
+              </div>
+            </div>
+          ) : poster ? (
             <img src={poster} alt="" loading="lazy" />
           ) : (
             <span className="media-card-fallback">{item.title.slice(0, 1)}</span>
@@ -188,15 +269,19 @@ export function MediaCard({ item }: MediaCardProps) {
           {item.category === 'sports' && (() => {
             const detail = (item.description || '').trim()
             if (!detail || /^https?:\/\//i.test(detail)) return null
-            // Drop pieces already shown as title / sport chip to avoid clutter.
+            // Drop pieces already shown as title / league / Replay|Live chip.
             const sport = (item.eventSport || '').trim()
+            const badge = (eventBadge?.label || '').trim().toLowerCase()
             const parts = detail
               .split(/\s*·\s*/)
               .map((p) => p.trim())
               .filter(Boolean)
               .filter((p) => {
-                if (sport && p.toLowerCase() === sport.toLowerCase()) return false
-                if (p.toLowerCase() === item.title.trim().toLowerCase()) return false
+                const low = p.toLowerCase()
+                if (sport && low === sport.toLowerCase()) return false
+                if (low === item.title.trim().toLowerCase()) return false
+                if (badge && low === badge) return false
+                if (/^(replay|live|ended|upcoming)$/i.test(p)) return false
                 return true
               })
             if (parts.length === 0) return null
@@ -256,8 +341,24 @@ export function MediaCard({ item }: MediaCardProps) {
           })()}
         </div>
       </Link>
-      {(queueable || !skipHealth) && (
+      {(saveable || queueable || !skipHealth) && (
         <div className="media-card-actions">
+          {saveable && (
+            <button
+              type="button"
+              className={`card-heart-btn${saved ? ' is-saved' : ''}`}
+              onClick={(e) => {
+                e.preventDefault()
+                e.stopPropagation()
+                setSaved(toggleWatchlist(item))
+              }}
+              title={saved ? 'Remove from Saved' : 'Save for later'}
+              aria-label={saved ? 'Remove from Saved' : 'Save for later'}
+              aria-pressed={saved}
+            >
+              {saved ? '♥' : '♡'}
+            </button>
+          )}
           {queueable && (
             <button
               type="button"

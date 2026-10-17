@@ -6,6 +6,7 @@
  */
 
 import type { TorrentPageLink } from './torrents'
+import { tmdbTvDetailUrl } from './tmdbTv'
 
 export const ZENOX_SOURCE_ID = 'builtin-zenox-animation'
 export const ZENOX_ORIGIN = 'https://zenox.lol'
@@ -14,8 +15,8 @@ export const ZENOX_ANIMATION_FEED_PREFIX = 'jiyu://zenox-animation'
 export const ZENOX_ANIMATION_GENRE_ID = 16
 export const ZENOX_KIDS_GENRE_ID = 10762
 export const ZENOX_FAMILY_GENRE_ID = 10751
-/** Cap keeps sync reasonable (Zenox lists ~15k; TMDB discover tops out ~10k). */
-export const ZENOX_ANIMATION_LIMIT = 8000
+/** Cap at TMDB discover’s practical page limit (~10k). Zenox lists ~15k; we take the top by popularity. */
+export const ZENOX_ANIMATION_LIMIT = 10000
 
 /** Asian animation languages → Anime Full Shows. */
 const ANIME_LANGS = new Set(['ja', 'ko', 'zh', 'th'])
@@ -98,11 +99,29 @@ export function classifyZenoxAnimationShow(show: {
   const hasKids = genres.includes(ZENOX_KIDS_GENRE_ID)
   const hasFamily = genres.includes(ZENOX_FAMILY_GENRE_ID)
 
+  // Adult / mature Western cartoons → Series (even when TMDB tags Family).
+  if (adultTitle) return 'series'
   // Doraemon / Pokémon etc. are often tagged Kids on TMDB — still Anime Full Shows.
   if (ANIME_LANGS.has(lang)) return 'anime'
-  if (hasKids && !adultTitle) return 'kids'
-  if (hasFamily && !adultTitle) return 'kids'
+  if (hasKids) return 'kids'
+  if (hasFamily) return 'kids'
   return 'series'
+}
+
+/** Zenox-synced row routed onto Anime / Kids / Series shelves (source stays Library-only). */
+export function isZenoxRoutedShelfItem(item: {
+  category?: string
+  tags?: string[]
+  torrentSourceId?: string
+  url?: string
+  detailUrl?: string
+}): boolean {
+  if (!isZenoxCatalogItem(item)) return false
+  const tags = (item.tags ?? []).map((t) => t.toLowerCase())
+  if (item.category === 'anime' && tags.includes('full-shows')) return true
+  if (item.category === 'kids' && tags.includes('kids-shows')) return true
+  if (item.category === 'series' && tags.includes('popular-series')) return true
+  return false
 }
 
 /** Sync Zenox Animation list via TMDB discover (genre 16). Desktop uses Electron IPC; Android uses client TMDB. */
@@ -129,12 +148,17 @@ export async function fetchZenoxAnimationCatalogLinks(
 
   let result: CatalogResult
   const desktopCatalog = window.signalDesktop?.tmdbTvCatalog
+  const { tmdbWithoutKeywordsParam } = await import('./hideKeywords')
+  const withoutKeywords = tmdbWithoutKeywordsParam('anime')
   if (desktopCatalog) {
     const stop = window.signalDesktop?.onTmdbProgress?.((p) => {
       onProgress?.(p.done, p.total || ZENOX_ANIMATION_LIMIT)
     })
     try {
-      result = await desktopCatalog('animation', ZENOX_ANIMATION_LIMIT, { withExternalIds: false })
+      result = await desktopCatalog('animation', ZENOX_ANIMATION_LIMIT, {
+        withExternalIds: false,
+        withoutKeywords: withoutKeywords || undefined,
+      })
     } finally {
       stop?.()
     }
@@ -201,10 +225,13 @@ export async function fetchZenoxAnimationCatalogLinks(
     const shelfLabel =
       bucket === 'anime' ? 'Anime' : bucket === 'kids' ? 'Kids' : 'Series'
 
+    const originalLanguage = String(show.originalLanguage || '')
+      .trim()
+      .toLowerCase()
     links.push({
       title,
-      url: zenoxMediaUrl(id, 'tv'),
-      summary: [shelfLabel, year, 'Zenox', 'Animation'].filter(Boolean).join(' · '),
+      url: tmdbTvDetailUrl(id),
+      summary: [shelfLabel, year, 'TMDB', 'Animation'].filter(Boolean).join(' · '),
       poster: show.poster || undefined,
       category: bucket,
       shelfTag:
@@ -215,6 +242,7 @@ export async function fetchZenoxAnimationCatalogLinks(
             : 'popular-series',
       releasedAt: Number.isFinite(rankReleasedAt) ? rankReleasedAt : undefined,
       rivestreamTmdbId: id,
+      ...(originalLanguage ? { originalLanguage } : {}),
     })
   }
 

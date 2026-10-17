@@ -345,11 +345,10 @@
     for (var i = 0; i < nodes.length; i++) {
       var video = nodes[i];
       if (!video || video.ended) continue;
-      // Buffering on a slow connection leaves paused=true and the play glyph up.
-      // Once the stream has started, that is not a reason to tap again.
+      // Only treat truly playing/seeking media as active. currentTime>0 while
+      // paused used to skip resume taps after ads / buffer stalls ("stuck").
       if (!video.paused) return true;
       if (video.seeking) return true;
-      if (video.currentTime > 0.2) return true;
     }
     return false;
   }

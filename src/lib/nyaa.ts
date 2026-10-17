@@ -612,7 +612,7 @@ export async function searchNyaaAnimeForShelf(query: string): Promise<
         seedersFromItemDescription(b.description) - seedersFromItemDescription(a.description),
     )
   if (episodes.length === 0) {
-    return { ok: false, error: 'No torrent results for this search.' }
+    return { ok: false, error: 'No source results for this search.' }
   }
 
   const shows = collapseEpisodeRowsToShows(episodes)

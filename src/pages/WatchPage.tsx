@@ -33,6 +33,20 @@ import {
 } from '../lib/torrents'
 import { cinetaroCinextreamMovieEmbedUrl } from '../lib/cinetaro'
 import { resolveM2BoxPlay } from '../lib/m2box'
+import { ensureEpisodeSoftSubtitles, resolveSoftSubtitles } from '../lib/softSubs'
+import {
+  lookupTmdbMovieMeta,
+  rivestreamTmdbIdFromItem,
+  shouldPreferRivestreamJapaneseAudio,
+} from '../lib/rivestream'
+import { resolveMovyPlay, MOVY_PLAY_REFERER } from '../lib/movy'
+import {
+  getLastGoodPlay,
+  playReliabilityKey,
+  preferredResolveBackend,
+  rememberLastGoodPlay,
+} from '../lib/playReliability'
+import { upsertTorrentItems } from '../lib/torrentCatalogStore'
 import { TORRENTIO_TV_TRIAL } from '../lib/torrentio'
 import { getViewingQuality, resolveRequestedQuality } from '../lib/viewingQuality'
 import { isStreamedCatalogItem, resolveStreamedPlay } from '../lib/streamed'
@@ -44,18 +58,29 @@ import {
   isFullmatchShowsCatalogItem,
   resolveFullmatchShowsPlay,
 } from '../lib/fullmatchShows'
-import { isWebBrowserOnlyUrl, isYouTubeUrl } from '../lib/webBrowser'
-import { isVimeoLiveEventUrl, resolveVimeoLiveHls } from '../lib/vimeoLive'
+import {
+  isWebEmbedPlaybackItem,
+  isYouTubeUrl,
+  shouldOpenInWebBrowser,
+  toAutoplayUrl,
+} from '../lib/webBrowser'
 import { resolveYouTubeLivePlay } from '../lib/youtubeLive'
+import { isVimeoLiveEventUrl, resolveVimeoLiveHls } from '../lib/vimeoLive'
 import {
   isTorrentPlaybackAvailable,
   torrentStream,
 } from '../lib/torrentBridge'
+import { maskUserFacingMessage } from '../lib/sourceMask'
 import {
   androidBrowserHide,
   androidBrowserMultiHideAll,
   isAndroidInAppBrowser,
 } from '../lib/androidBrowser'
+import {
+  androidResolveEmbedMedia,
+  canAndroidResolveEmbedMedia,
+} from '../lib/androidStreamResolve'
+import { isAndroidMedia3Host, media3Hide } from '../lib/androidMedia3'
 import type { StreamItem, StreamPlaylistItem, TorrentStreamResult } from '../types'
 
 function clearWebSurfacesForWatch() {
@@ -64,7 +89,9 @@ function clearWebSurfacesForWatch() {
   void window.signalDesktop?.browserHide?.({ blank: true })
   if (isAndroidInAppBrowser()) {
     void androidBrowserMultiHideAll({ blank: true })
-    void androidBrowserHide({ blank: true, pause: true })
+    // Hide only — no blank and no pause. Pausing then reopening Sports Replay
+    // left Gecko's empty white compositor on screen until the embed painted.
+    void androidBrowserHide({ blank: false, pause: false })
   }
   window.dispatchEvent(new Event('jiyu:clear-web-surfaces'))
 }
@@ -85,6 +112,32 @@ function isTorrentPlaybackItem(item: StreamItem): boolean {
   if (item.transport === 'torrent' || item.sourceKind === 'torrent') return true
   if (item.torrentUri && isTorrentInput(item.torrentUri)) return true
   return false
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error(label)), ms)
+    promise.then(
+      (value) => {
+        window.clearTimeout(timer)
+        resolve(value)
+      },
+      (err) => {
+        window.clearTimeout(timer)
+        reject(err)
+      },
+    )
+  })
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms))
+}
+
+function isTransientSourceError(message: string): boolean {
+  return /timed? ?out|took too long|unavailable|no working sources|no peers|no reachable|empty source|not ready|read failed|could not start|engine failed/i.test(
+    message,
+  )
 }
 
 /** Build player playlist rows; activeIndex gets the live stream URL when known. */
@@ -183,7 +236,9 @@ export function WatchPage() {
     if (continued) return streamItemFromContinueEntry(continued)
     return undefined
   }, [raw, items, continued])
-  const [error, setError] = useState<string | null>(null)
+  const [error, setErrorRaw] = useState<string | null>(null)
+  const setError = (value: string | null) =>
+    setErrorRaw(value == null ? null : maskUserFacingMessage(value))
   const returnTo =
     typeof location.state === 'object' &&
     location.state &&
@@ -222,7 +277,7 @@ export function WatchPage() {
           (tmdbId ? cinetaroCinextreamMovieEmbedUrl(tmdbId) : '') ||
           item!.url
         if (!playUrl) {
-          setError('No Cinetaro stream for this movie.')
+          setError('No stream for this movie.')
           return
         }
         clearWebSurfacesForWatch()
@@ -267,11 +322,13 @@ export function WatchPage() {
             (item!.tags?.includes('local') || item!.id?.startsWith('local-')))
         ) {
           // Fall through to resolve below.
-        } else if (isWebBrowserOnlyUrl(item!.url)) {
+        } else if (shouldOpenInWebBrowser(item!)) {
           clearWebSurfacesForWatch()
           const playUrl = item!.url
           const activeUrl =
-            playing?.url && isWebBrowserOnlyUrl(playing.url) ? playing.url : playUrl
+            playing?.url && shouldOpenInWebBrowser(playing)
+              ? playing.url
+              : playUrl
           navigate(`/web?url=${encodeURIComponent(activeUrl)}`, {
             replace: true,
             state: {
@@ -361,6 +418,34 @@ export function WatchPage() {
           0,
           episodes.findIndex((ep) => ep.key === resumeKey),
         )
+        let subtitleUrl: string | undefined
+        let subtitleKind: 'file' | undefined
+        let tmdbId = rivestreamTmdbIdFromItem(item!)
+        let originalLanguage = item!.originalLanguage
+        try {
+          const soft = await ensureEpisodeSoftSubtitles({
+            title: showName,
+            item: item!,
+            season: resolved.season,
+            episode: resolved.episode,
+            force: true,
+          })
+          tmdbId = soft.tmdbId || tmdbId
+          originalLanguage = soft.originalLanguage || originalLanguage
+          subtitleUrl = soft.subtitleUrl
+          subtitleKind = soft.subtitleKind
+        } catch {
+          /* Player may still try softsubs once playback starts */
+        }
+        const catalogPatch = {
+          ...(tmdbId && tmdbId !== item!.rivestreamTmdbId ? { rivestreamTmdbId: tmdbId } : {}),
+          ...(originalLanguage && originalLanguage !== item!.originalLanguage
+            ? { originalLanguage }
+            : {}),
+        }
+        if (Object.keys(catalogPatch).length > 0) {
+          void upsertTorrentItems([{ ...item!, ...catalogPatch }])
+        }
         const playlist: StreamPlaylistItem[] =
           episodes.length > 0
             ? episodes.map((ep, i) =>
@@ -369,6 +454,8 @@ export function WatchPage() {
                       title: ep.title,
                       url: resolved.url,
                       episodeKey: ep.key,
+                      subtitleUrl,
+                      subtitleKind,
                     }
                   : {
                       title: ep.title,
@@ -376,16 +463,34 @@ export function WatchPage() {
                       episodeKey: ep.key,
                     },
               )
-            : [{ title: epLabel, url: resolved.url, episodeKey: resumeKey }]
+            : [
+                {
+                  title: epLabel,
+                  url: resolved.url,
+                  episodeKey: resumeKey,
+                  subtitleUrl,
+                  subtitleKind,
+                },
+              ]
         play(
           {
             ...item!,
+            ...catalogPatch,
             title: `${showName} · ${epLabel}`,
             url: resolved.url,
             httpReferrer: resolved.referer,
             playlist,
+            subtitleUrl,
+            subtitleKind,
             transport: 'direct',
-            tags: [...new Set([...(item!.tags ?? []), 'm2box', resolved.format])],
+            tags: [
+              ...new Set([
+                ...(item!.tags ?? []),
+                'm2box',
+                resolved.format,
+                ...(subtitleUrl ? ['softsub'] : []),
+              ]),
+            ],
             runtimeSeconds: resolved.durationSeconds ?? item!.runtimeSeconds,
             m2boxSubjectId: resolved.subjectId || item!.m2boxSubjectId,
           },
@@ -405,6 +510,7 @@ export function WatchPage() {
       }
 
       // Streamed.pk live sports → resolve embed.st URL, play in Web Browser (PiP on Back).
+      // Android: try Gecko unwrap → Media3 first; fall back to embed WebView.
       if (isStreamedCatalogItem(item!)) {
         const resolved = await resolveStreamedPlay(item!)
         if (cancelled) return
@@ -412,24 +518,73 @@ export function WatchPage() {
           setError(resolved.error || 'Could not load Streamed match')
           return
         }
+        const guard = multiviewGuardRef.current
+        const keepOthers =
+          guard.awaitingAdd || guard.slotsLen > 1 || guard.mode === 'multi'
+        if (!keepOthers) clearWebSurfacesForWatch()
+
+        if (
+          !keepOthers &&
+          isAndroidMedia3Host() &&
+          canAndroidResolveEmbedMedia()
+        ) {
+          setError('Unwrapping stream…')
+          // Gecko sniffs the media URL while we stay on the loading screen.
+          const unwrapped = await androidResolveEmbedMedia(resolved.url, 12_000)
+          if (cancelled) return
+          if (unwrapped.ok && unwrapped.mediaUrl) {
+            setError(null)
+            const webItem = {
+              ...item!,
+              url: unwrapped.mediaUrl,
+              tags: [
+                ...new Set(
+                  [...(item!.tags ?? []), 'live', 'media3'].filter(
+                    (t) => t !== 'web-embed',
+                  ),
+                ),
+              ],
+            }
+            play(webItem, {
+              forceFull: true,
+              replace: true,
+              returnTo: returnTo || '/section/sports',
+            })
+            navigate('/native-stream', {
+              replace: true,
+              state: {
+                from: returnTo || '/section/sports',
+                title: item!.title,
+                mediaUrl: unwrapped.mediaUrl,
+                referrer: unwrapped.referrer || resolved.url,
+                poster: item!.poster,
+                category: item!.category,
+                continueId: item!.id,
+              },
+            })
+            return
+          }
+          // Sniff failed — clear any Media3 overlay before Gecko /web fallback.
+          void media3Hide({ stop: true })
+        }
+
         const webItem = {
           ...item!,
           url: resolved.url,
           tags: [...new Set([...(item!.tags ?? []), 'web-embed', 'live'])],
         }
-        const guard = multiviewGuardRef.current
-        const keepOthers =
-          guard.awaitingAdd || guard.slotsLen > 1 || guard.mode === 'multi'
-        if (!keepOthers) clearWebSurfacesForWatch()
-        play(webItem, {
-          forceFull: true,
-          replace: !keepOthers,
-          returnTo: returnTo || '/section/sports',
-        })
         if (keepOthers) {
+          play(webItem, {
+            forceFull: true,
+            replace: false,
+            returnTo: returnTo || '/section/sports',
+          })
           navigate('/multiview', { replace: true })
           return
         }
+        // Navigate to /web BEFORE play(). play() marks the title "ready" and
+        // WatchPage blanks itself while GlobalPlayer returns null for web-embed
+        // — if navigate is skipped/raced, that is a permanent black screen.
         navigate(`/web?url=${encodeURIComponent(resolved.url)}`, {
           replace: true,
           state: {
@@ -449,6 +604,11 @@ export function WatchPage() {
               source: item!.source,
             },
           },
+        })
+        play(webItem, {
+          forceFull: true,
+          replace: true,
+          returnTo: returnTo || '/section/sports',
         })
         return
       }
@@ -470,12 +630,12 @@ export function WatchPage() {
           url: resolved.url,
           tags: [...new Set([...(item!.tags ?? []), 'web-embed', 'replay'])],
         }
-        play(webItem, {
-          forceFull: true,
-          replace: !keepOthers,
-          returnTo: returnTo || '/section/sports',
-        })
         if (keepOthers) {
+          play(webItem, {
+            forceFull: true,
+            replace: false,
+            returnTo: returnTo || '/section/sports',
+          })
           navigate('/multiview', { replace: true })
           return
         }
@@ -498,6 +658,11 @@ export function WatchPage() {
               source: item!.source,
             },
           },
+        })
+        play(webItem, {
+          forceFull: true,
+          replace: true,
+          returnTo: returnTo || '/section/sports',
         })
         return
       }
@@ -544,12 +709,12 @@ export function WatchPage() {
           url: resolved.url,
           tags: [...new Set([...(item!.tags ?? []), 'web-embed', 'replay'])],
         }
-        play(webItem, {
-          forceFull: true,
-          replace: !keepOthers,
-          returnTo: returnTo || '/section/sports',
-        })
         if (keepOthers) {
+          play(webItem, {
+            forceFull: true,
+            replace: false,
+            returnTo: returnTo || '/section/sports',
+          })
           navigate('/multiview', { replace: true })
           return
         }
@@ -573,10 +738,18 @@ export function WatchPage() {
             },
           },
         })
+        play(webItem, {
+          forceFull: true,
+          replace: true,
+          returnTo: returnTo || '/section/sports',
+        })
         return
       }
 
-      // Local YouTube channels (Nationwide): resolve live video → embed player + PiP.
+      // Local YouTube channels (Nationwide / CVM / TVJ): resolve @handle/live →
+      // watch?v= so the browser skips YouTube's heavy channel SPA (~20s).
+      // Prefer watch URL over /embed/ (embeds blanked the WebContentsView shell).
+      // pipOnBack + playerMode embed arm leave→PiP (isEmbedPlayerHost(/watch)).
       if (
         isYouTubeUrl(item!.url) &&
         (item!.tags?.includes('local') || item!.id?.startsWith('local-'))
@@ -584,13 +757,10 @@ export function WatchPage() {
         const resolved = await resolveYouTubeLivePlay(item!.url)
         if (cancelled) return
         if (!resolved.ok) {
-          setError(resolved.error || 'Channel is not live right now')
+          setError(resolved.error || 'This channel is not live right now')
           return
         }
-        const playUrl =
-          // Prefer the watch page in WebContentsView — /embed needs an HTTP
-          // Referer (Error 153) and is meant for iframes, not top-level guests.
-          resolved.watchUrl || resolved.embedUrl
+        const playUrl = resolved.watchUrl || toAutoplayUrl(item!.url)
         const webItem = {
           ...item!,
           url: playUrl,
@@ -600,12 +770,12 @@ export function WatchPage() {
         const keepOthers =
           guard.awaitingAdd || guard.slotsLen > 1 || guard.mode === 'multi'
         if (!keepOthers) clearWebSurfacesForWatch()
-        play(webItem, {
-          forceFull: true,
-          replace: !keepOthers,
-          returnTo: returnTo || '/',
-        })
         if (keepOthers) {
+          play(webItem, {
+            forceFull: true,
+            replace: false,
+            returnTo: returnTo || '/',
+          })
           navigate('/multiview', { replace: true })
           return
         }
@@ -613,7 +783,7 @@ export function WatchPage() {
           replace: true,
           state: {
             from: returnTo || '/',
-            playerMode: 'embed' as const,
+            playerMode: 'embed',
             pipOnBack: true,
             continueWatch: {
               id: item!.id,
@@ -629,18 +799,86 @@ export function WatchPage() {
             },
           },
         })
+        play(webItem, {
+          forceFull: true,
+          replace: true,
+          returnTo: returnTo || '/',
+        })
         return
       }
 
-      if (isWebBrowserOnlyUrl(item!.url)) {
-        const webItem = {
-          ...item!,
-          tags: [...new Set([...(item!.tags ?? []), 'web-embed'])],
-        }
+      // PPV / Streamed / tagged embeds — even when iframe host rotates off embed.st.
+      if (shouldOpenInWebBrowser(item!)) {
         const guard = multiviewGuardRef.current
         const keepOthers =
           guard.awaitingAdd || guard.slotsLen > 1 || guard.mode === 'multi'
         if (!keepOthers) clearWebSurfacesForWatch()
+
+        const sportsLike =
+          item!.category === 'sports' ||
+          item!.tags?.includes('247-series') ||
+          item!.tags?.includes('kids-live') ||
+          item!.tags?.includes('ppv.st') ||
+          item!.tags?.includes('live')
+        // Replays must stay on the Gecko embed path — Media3 unwrap left white /web.
+        const isReplay =
+          item!.tags?.includes('replay') ||
+          item!.tags?.includes('livextv') ||
+          item!.tags?.includes('fullmatchshows')
+
+        if (
+          sportsLike &&
+          !isReplay &&
+          !keepOthers &&
+          isAndroidMedia3Host() &&
+          canAndroidResolveEmbedMedia()
+        ) {
+          setError('Unwrapping stream…')
+          const unwrapped = await androidResolveEmbedMedia(item!.url, 12_000)
+          if (cancelled) return
+          if (unwrapped.ok && unwrapped.mediaUrl) {
+            setError(null)
+            const nativeItem = {
+              ...item!,
+              url: unwrapped.mediaUrl,
+              tags: [
+                ...new Set(
+                  [...(item!.tags ?? []), 'media3'].filter((t) => t !== 'web-embed'),
+                ),
+              ],
+            }
+            play(nativeItem, {
+              forceFull: true,
+              replace: true,
+              returnTo: returnTo || undefined,
+            })
+            navigate('/native-stream', {
+              replace: true,
+              state: {
+                from:
+                  returnTo ||
+                  (item!.category === 'kids'
+                    ? '/section/kids'
+                    : item!.category === 'series'
+                      ? '/section/series'
+                      : '/section/sports'),
+                title: item!.title,
+                mediaUrl: unwrapped.mediaUrl,
+                referrer: unwrapped.referrer || item!.url,
+                poster: item!.poster,
+                category: item!.category,
+                continueId: item!.id,
+              },
+            })
+            return
+          }
+          void media3Hide({ stop: true })
+        }
+
+        const webItem = {
+          ...item!,
+          tags: [...new Set([...(item!.tags ?? []), 'web-embed'])],
+        }
         const webState =
           item!.category === 'sports' ||
           item!.tags?.includes('247-series') ||
@@ -669,18 +907,23 @@ export function WatchPage() {
                 },
               }
             : undefined
-        play(webItem, {
-          forceFull: true,
-          replace: !keepOthers,
-          returnTo: returnTo || undefined,
-        })
         if (keepOthers) {
+          play(webItem, {
+            forceFull: true,
+            replace: false,
+            returnTo: returnTo || undefined,
+          })
           navigate('/multiview', { replace: true })
           return
         }
         navigate(`/web?url=${encodeURIComponent(item!.url)}`, {
           replace: true,
           state: webState,
+        })
+        play(webItem, {
+          forceFull: true,
+          replace: true,
+          returnTo: returnTo || undefined,
         })
         return
       }
@@ -705,11 +948,116 @@ export function WatchPage() {
         return
       }
 
+      // Movies: prefer Movy/Atlantic HLS (same as series) before magnets — first
+      // click often raced a cold torrent engine and looked like "no source".
+      if (item!.category === 'movies' && !wantsShowEpisodePlaylist(item!)) {
+        const movieTitle = cleanShowDisplayTitle(item!.title) || item!.title
+        const yearMatch = /\b((?:19|20)\d{2})\b/.exec(
+          String(item!.title || item!.description || ''),
+        )
+        let tmdbId = rivestreamTmdbIdFromItem(item!)
+        if (!tmdbId) {
+          try {
+            const meta = await lookupTmdbMovieMeta(item!.title || movieTitle)
+            if (cancelled) return
+            tmdbId = meta?.tmdbId || ''
+          } catch {
+            tmdbId = ''
+          }
+        }
+        if (tmdbId) {
+          const reliabilityKey = playReliabilityKey({
+            itemId: item!.id,
+            tmdbId,
+            mediaType: 'movie',
+          })
+          const lastGood = getLastGoodPlay(reliabilityKey)
+          try {
+            const movy = await withTimeout(
+              resolveMovyPlay({
+                tmdbId,
+                title: movieTitle,
+                mediaType: 'movie',
+                year: yearMatch?.[1],
+                preferBackend: preferredResolveBackend(lastGood),
+                preferProvider: lastGood?.provider,
+              }),
+              22_000,
+              'Source lookup timed out.',
+            )
+            if (cancelled) return
+            if (movy.ok) {
+              if (!item!.rivestreamTmdbId) {
+                void upsertTorrentItems([{ ...item!, rivestreamTmdbId: tmdbId }])
+              }
+              rememberLastGoodPlay(reliabilityKey, movy.backend ?? 'movy', {
+                provider: movy.provider,
+                host: (() => {
+                  try {
+                    return new URL(movy.url).hostname
+                  } catch {
+                    return undefined
+                  }
+                })(),
+              })
+              let subtitleUrl = movy.subtitleUrl
+              let subtitleKind = movy.subtitleKind
+              if (!subtitleUrl) {
+                try {
+                  const soft = await resolveSoftSubtitles({ tmdbId })
+                  if (cancelled) return
+                  if (soft.ok) {
+                    subtitleUrl = soft.subtitleUrl
+                    subtitleKind = soft.subtitleKind
+                  }
+                } catch {
+                  /* play without captions */
+                }
+              }
+              if (window.signalDesktop?.setPlaybackHeaders) {
+                void window.signalDesktop.setPlaybackHeaders({
+                  url: movy.url,
+                  referrer: movy.referer || MOVY_PLAY_REFERER,
+                })
+              }
+              play(
+                {
+                  ...item!,
+                  rivestreamTmdbId: tmdbId,
+                  title: movieTitle,
+                  url: movy.url,
+                  httpReferrer: movy.referer || MOVY_PLAY_REFERER,
+                  subtitleUrl,
+                  subtitleKind,
+                  transport: 'direct',
+                  tags: [
+                    ...new Set([
+                      ...(item!.tags ?? []),
+                      movy.backend === 'atlantic' ? 'atlantic' : 'movy',
+                      'hls',
+                      ...(movy.provider ? [movy.provider] : []),
+                      ...(subtitleUrl ? ['softsub'] : []),
+                    ]),
+                  ],
+                },
+                {
+                  forceFull: true,
+                  returnTo: returnTo ?? `/show/${item!.id}`,
+                },
+              )
+              return
+            }
+          } catch {
+            /* fall through to torrent / other paths */
+          }
+        }
+      }
+
       // Torrent catalog entries store a detail page / magnet — resolve at play time.
       // Series / anime / show cards: always rebuild the full episode playlist on continue.
       if (isTorrentPlaybackItem(item!)) {
         if (!isTorrentPlaybackAvailable()) {
-          setError('Torrent playback needs the Jiyu desktop app or Android torrent engine.')
+          setError('Playback needs the Jiyu desktop app or Android source engine.')
           return
         }
         try {
@@ -763,10 +1111,17 @@ export function WatchPage() {
             episodePlaylist = episodePlaylistFromChoices(episodes, startEpisodeIndex)
           } else if (!uri || !isTorrentInput(uri)) {
             const detail = item!.detailUrl || item!.url
-            const outcome = await scrapePage(detail, item!.source || 'torrent')
+            let outcome = await scrapePage(detail, item!.source || 'torrent')
             if (cancelled) return
+            // One quiet retry — YTS / detail APIs occasionally 5xx on the first hit.
             if (outcome.results.length === 0) {
-              setError(outcome.error || 'No magnet or torrent link found on that page.')
+              await sleep(500)
+              if (cancelled) return
+              outcome = await scrapePage(detail, item!.source || 'torrent')
+              if (cancelled) return
+            }
+            if (outcome.results.length === 0) {
+              setError(outcome.error || 'No source link found on that page.')
               return
             }
             const requestedQuality = resolveRequestedQuality(preference, downlink)
@@ -784,7 +1139,7 @@ export function WatchPage() {
             } else {
               const pick = pickBestStream(outcome.results, downlink, requestedQuality)
               if (!pick) {
-                setError('Could not choose a torrent for this title.')
+                setError('Could not choose a source for this title.')
                 return
               }
               uri = pick.result.uri
@@ -797,7 +1152,7 @@ export function WatchPage() {
             (item!.category === 'series' || item!.category === 'kids') &&
             Boolean(episodeAlternates)
           const useDebrid = useTorrentio && hasRealDebridToken()
-          if (useDebrid) setError('Checking debrid streams…')
+          if (useDebrid) setError('Checking ready sources…')
           else if (useTorrentio) setError('Checking more sources…')
           const candidates = episodeAlternates
             ? await torrentUrisForEpisodeWithTorrentio(episodeAlternates, item!.title, {
@@ -811,48 +1166,57 @@ export function WatchPage() {
             guard.awaitingAdd || guard.slotsLen > 1 || guard.mode === 'multi'
           let result: TorrentStreamResult | null = null
           let usedUri = uri
-          let lastError = 'Could not start torrent stream'
+          let lastError = 'Could not start source'
           let deadCount = 0
-          for (let i = 0; i < candidates.length; i++) {
-            const candidate = candidates[i]
-            usedUri = candidate
-            if (isDebridHttpPlayUrl(candidate)) {
+          // Pass 1 + one automatic retry for cold-engine / DHT flakiness (re-click used to "fix" this).
+          for (let pass = 0; pass < 2 && !result?.ok; pass++) {
+            if (pass > 0) {
+              if (!isTransientSourceError(lastError)) break
+              setError('Retrying source…')
+              await sleep(700)
+              if (cancelled) return
+              deadCount = 0
+            }
+            for (let i = 0; i < candidates.length; i++) {
+              const candidate = candidates[i]
+              usedUri = candidate
+              if (isDebridHttpPlayUrl(candidate)) {
+                if (candidates.length > 1) {
+                  setError(`Opening ready source (${i + 1}/${candidates.length})…`)
+                } else {
+                  setError('Opening ready source…')
+                }
+                result = { ok: true, url: candidate }
+                break
+              }
               if (candidates.length > 1) {
-                setError(`Starting debrid stream (${i + 1}/${candidates.length})…`)
-              } else {
-                setError('Starting debrid stream…')
+                setError('Fetching sources…')
               }
-              result = { ok: true, url: candidate }
-              break
-            }
-            if (candidates.length > 1) {
-              setError('Fetching sources…')
-            }
-            const attempt = await torrentStream(candidate, {
-              keepOthers,
-            })
-            if (cancelled) return
-            if (attempt.ok && attempt.url) {
-              result = attempt
-              break
-            }
-            lastError = attempt.error || lastError
-            if (/no peers|no reachable seeds|swarm may be dead|unavailable/i.test(lastError)) {
-              deadCount += 1
-              if (i < candidates.length - 1) {
-                setError(
-                  'Fetching sources…',
-                )
+              const attempt = await torrentStream(candidate, {
+                keepOthers,
+                preferJapaneseAudio: shouldPreferRivestreamJapaneseAudio(item!),
+              })
+              if (cancelled) return
+              if (attempt.ok && attempt.url) {
+                result = attempt
+                break
               }
-              continue
+              lastError = attempt.error || lastError
+              if (/no peers|no reachable seeds|swarm may be dead|unavailable/i.test(lastError)) {
+                deadCount += 1
+                if (i < candidates.length - 1) {
+                  setError('Fetching sources…')
+                }
+                continue
+              }
             }
           }
           if (!result?.ok || !result.url) {
             setError(
               deadCount > 0 && deadCount === candidates.length
                 ? candidates.length > 1
-                  ? 'No peers found for any release of this title. Try another episode or quality.'
-                  : 'No peers found for this title. Try another episode or quality.'
+                  ? 'No working sources for any release of this title. Try another episode or quality.'
+                  : 'No working sources for this title. Try another episode or quality.'
                 : lastError,
             )
             return
@@ -912,7 +1276,7 @@ export function WatchPage() {
           return
         } catch (err) {
           if (!cancelled) {
-            setError(err instanceof Error ? err.message : 'Torrent playback failed')
+            setError(err instanceof Error ? err.message : 'Playback failed')
           }
           return
         }
@@ -938,6 +1302,24 @@ export function WatchPage() {
             return
           }
         }
+      }
+
+      // Last resort: never leave a web-embed source on /watch (blank GlobalPlayer).
+      if (shouldOpenInWebBrowser(item!)) {
+        const webItem = {
+          ...item!,
+          tags: [...new Set([...(item!.tags ?? []), 'web-embed'])],
+        }
+        navigate(`/web?url=${encodeURIComponent(item!.url)}`, {
+          replace: true,
+          state: {
+            from: returnTo || `/section/${item!.category}`,
+            playerMode: 'embed' as const,
+            pipOnBack: true,
+          },
+        })
+        play(webItem, { forceFull: true, replace: true, returnTo: returnTo || undefined })
+        return
       }
 
       play(item!, { forceFull: true, returnTo })
@@ -979,9 +1361,19 @@ export function WatchPage() {
 
   const display = item ?? raw!
 
-  // GlobalPlayer owns the video (full or PiP). Keep this route blank while that title plays
-  // so we never flash the loading overlay over navigation.
-  const streamReady = Boolean(playing?.id === display.id && mode !== 'off')
+  // GlobalPlayer owns native video. Web embeds must reach /web — blanking this
+  // route while still on /watch (after play(), before navigate) is a black screen.
+  const onWebRoute = location.pathname.startsWith('/web')
+  const webEmbedPending = Boolean(
+    playing &&
+      playing.id === display.id &&
+      mode !== 'off' &&
+      isWebEmbedPlaybackItem(playing) &&
+      !onWebRoute,
+  )
+  const streamReady = Boolean(
+    playing?.id === display.id && mode !== 'off' && !webEmbedPending,
+  )
 
   return (
     <div
@@ -999,7 +1391,7 @@ export function WatchPage() {
       ) : streamReady ? null : (
         <PlaybackLoadingScreen
           title={cleanShowDisplayTitle(display.title) || display.title}
-          status="Fetching sources…"
+          status={webEmbedPending ? 'Opening player…' : 'Fetching sources…'}
           variant="page"
         />
       )}

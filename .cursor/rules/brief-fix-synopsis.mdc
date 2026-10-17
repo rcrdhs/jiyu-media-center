@@ -1,0 +1,12 @@
+---
+description: After each update, give a brief synopsis of fixes only
+alwaysApply: true
+---
+
+# Brief fix synopsis
+
+After each update (code fix, build, or publish), end with a **brief synopsis** of what changed.
+
+- Bullet the fixes in plain language
+- Do **not** go into deep explanation, root-cause essays, or long diagnosis
+- Skip restating the task; just the outcome synopsis

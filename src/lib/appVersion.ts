@@ -12,6 +12,171 @@ export const APP_VERSION_LABEL = `v${APP_VERSION}`
 /** Short milestone log — newest first — so progress is visible in-app. */
 export const APP_RELEASES: ReadonlyArray<{ version: string; summary: string }> = [
   {
+    version: '0.3.70',
+    summary:
+      'Anime and series advance to the next episode when one ends; player controls hide after 5s and stay hidden through brief buffering',
+  },
+  {
+    version: '0.3.69',
+    summary:
+      'Movy HLS: true ABR downshifts to 720p when the CDN slows, waits for 2–3 segments before play, and stops stall heals from aborting in-flight fragments',
+  },
+  {
+    version: '0.3.68',
+    summary:
+      'Seamless Movy/HLS playback: soft stalls keep the video alive (no black screen / seek-to-0 remount), ABR prebuffers ~30s and starts conservative',
+  },
+  {
+    version: '0.3.67',
+    summary:
+      'Movy anime: fail-fast past dead city nodes (500s), keep playhead across stall remint, skip duplicate TMDB lookup so One Piece opens instead of hanging on Looking up show',
+  },
+  {
+    version: '0.3.66',
+    summary:
+      'One Piece (and similar long anime): fix doubled episode lists so Movy gets absolute ep numbers (e.g. S09E292) and late episodes play',
+  },
+  {
+    version: '0.3.65',
+    summary:
+      'Anime: prefer real anime over live-action remakes; full long-series episode lists; larger Animation sync (10k) + Zenox autosync; Android backup softsubs via Wyzie proxy',
+  },
+  {
+    version: '0.3.64',
+    summary:
+      'New Movies shelf back (English-only no longer hides YTS New); Added today only counts titles first seen today; YTS sync won’t wipe New if that feed fails',
+  },
+  {
+    version: '0.3.63',
+    summary:
+      'Anime: Japanese audio on MULTI packs (not French); Android softsubs from torrents; Resume no longer restarts; Skip Intro cleared of the seek bar; portrait rotate layout fixed',
+  },
+  {
+    version: '0.3.62',
+    summary:
+      'Sports Replay: FullMatchShows football on the shelf (Playmate embed-only); hide dead soccerfull cards; Android Cast/Mirror always on the player; light status-bar icons',
+  },
+  {
+    version: '0.3.61',
+    summary:
+      'Sports Replay: when soccerfull is down, open the same football match via FullMatchShows / Playmate',
+  },
+  {
+    version: '0.3.60',
+    summary:
+      'Smarter Recommended for you (tags, not interested, quick-abandon); on-device taste ranking with diversity',
+  },
+  {
+    version: '0.3.59',
+    summary:
+      'Player controls auto-hide ~10s after play/fullscreen; movies open via stream first with retry so first-click play is reliable',
+  },
+  {
+    version: '0.3.58',
+    summary:
+      'Desktop Full works again; YMovies/Cinetaro back on Series shelves; skip French Movy (paris) for English shows',
+  },
+  {
+    version: '0.3.57',
+    summary:
+      'Korean/M2Box series auto-fetch English softsubs (language-aware); sports cards no longer show Not checked',
+  },
+  {
+    version: '0.3.56',
+    summary:
+      'Sports Live/Upcoming/Replay shelves; multi-view Browse keeps streams parked; Streamed adware blocked; PPV embeds open reliably',
+  },
+  {
+    version: '0.3.55',
+    summary:
+      'Series show pages show the TV network name and logo from TMDB (e.g. YouTube, AMC)',
+  },
+  {
+    version: '0.3.54',
+    summary:
+      'Movy respects device/network quality (stops auto-locking 4K that stalls on phones); fewer pause/restart loops; stall error shown in the center of the player',
+  },
+  {
+    version: '0.3.53',
+    summary:
+      'More shows play: Movy now checks every server (fixes Masked Singer, Survivor and other reality TV), skips wrong-episode files, and adds a new backup source',
+  },
+  {
+    version: '0.3.52',
+    summary:
+      'Remembers the source that worked per episode; desktop no longer restarts episodes mid-play; Android subs fixed; Nationwide audio button; Added today list matches its count',
+  },
+  {
+    version: '0.3.51',
+    summary:
+      'Zenox sync → Anime Full Shows / Kids / Series (Movy play); Added today holds until midnight; Saved under titles box; no silent episode skip on stream miss',
+  },
+  {
+    version: '0.3.50',
+    summary:
+      'Saved list: heart on cards/show pages; browse Saved from Home next to Added today',
+  },
+  {
+    version: '0.3.49',
+    summary:
+      'Sidebar ? opens the full feature guide; Zenox off shelves/play (TMDB Anime/Kids); OpenSubtitles softsub fallback; bigger Series catalog with less anime bleed',
+  },
+  {
+    version: '0.3.48',
+    summary:
+      'Series shelves use TMDB (Cinetaro backup-only) with Movy/Zenox play fallbacks; in-app feature guide; landscape watch fix; source-masked errors; episode-matched subs',
+  },
+  {
+    version: '0.3.47',
+    summary:
+      'Per-section hide keywords; safer Restart + scrubbing for HLS; Channels tab removed from Sports; hide-words on each VOD section',
+  },
+  {
+    version: '0.3.46',
+    summary:
+      'Seekbars slide reliably on all platforms; PiP clears stuck loading when audio plays; Library keyword hide list; local-channel mute',
+  },
+  {
+    version: '0.3.45',
+    summary:
+      'Kids Live and Series 24/7 tabs removed; Your teams Home-only; anime episodes stay in New Releases; sports VS cards show both team logos',
+  },
+  {
+    version: '0.3.44',
+    summary:
+      'Your teams: two cards at a time with horizontal swipe; FullMatchShows removed from Replay; optional cross-device Continue watching sync',
+  },
+  {
+    version: '0.3.43',
+    summary:
+      'Anime: recover mid-episode HLS Buffering stalls; Android web embed keeps one compact top bar; Your teams + episode list expand vertically',
+  },
+  {
+    version: '0.3.42',
+    summary:
+      'Android Sports Replay: send Playmate/soccerfull document Referer; black cover until Gecko paints (no white blank)',
+  },
+  {
+    version: '0.3.41',
+    summary:
+      'Anime: auto-apply +0.5s subtitle delay (softsubs ahead of audio); remembers your last Subs +/− tweak',
+  },
+  {
+    version: '0.3.40',
+    summary:
+      'Fix mid-episode Resume/Back seek stalls on HLS; fix white blank Gecko after Sports Replay open',
+  },
+  {
+    version: '0.3.39',
+    summary:
+      'Android: after Media3 unwrap fails, restore full-size Gecko so /web embed fallback is not a black screen',
+  },
+  {
+    version: '0.3.38',
+    summary:
+      'Android sports: Media3-first playback after Gecko unwraps embeds; Gecko embed fallback when sniff fails',
+  },
+  {
     version: '0.3.37',
     summary:
       'Sports Replay: add FullMatchShows.com football VODs (Playmate/Playmogo) alongside LiveXTV',

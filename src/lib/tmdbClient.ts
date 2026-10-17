@@ -5,6 +5,10 @@
  */
 
 import { nativeFetchJson } from './nativeHttp'
+import {
+  hideSectionForTmdbTvKind,
+  tmdbWithoutKeywordsParam,
+} from './hideKeywords'
 import type { TmdbTvFeedKind } from './tmdbTv'
 import { getTorrentSyncControlState, TorrentSyncCancelledError } from './torrentSyncControl'
 
@@ -39,7 +43,7 @@ function throwIfCatalogSyncCancelled(): void {
   }
 }
 
-function tmdbApiKey(): string {
+export function tmdbApiKey(): string {
   const env = import.meta.env as Record<string, string | undefined>
   return String(env.TMDB_API_KEY || env.TMDB_KEY || env.VITE_TMDB_API_KEY || '').trim()
 }
@@ -104,10 +108,13 @@ function buildDiscoverUrl(kind: TmdbTvFeedKind, page: number, year?: number): st
     url.searchParams.set('sort_by', 'popularity.desc')
     url.searchParams.set('without_genres', '10767,10763')
   } else {
-    // popular
+    // Series shelf: broad discover, no Animation/anime (those have their own shelves).
     url.searchParams.set('sort_by', 'popularity.desc')
-    url.searchParams.set('first_air_date.gte', '2010-01-01')
+    url.searchParams.set('without_genres', '16')
+    url.searchParams.set('include_null_first_air_dates', 'false')
   }
+  const withoutKeywords = tmdbWithoutKeywordsParam(hideSectionForTmdbTvKind(kind))
+  if (withoutKeywords) url.searchParams.set('without_keywords', withoutKeywords)
   return url.toString()
 }
 
@@ -132,10 +139,13 @@ export async function fetchTmdbTvCatalogClient(
     }
   }
 
-  // Same ceilings as Electron main — Android used to truncate Popular (~400),
-  // which left Series ~2–3k titles short of desktop.
+  // Same ceilings as Electron main — Series/animation can use TMDB's ~10k page cap.
   const hardCap =
-    kind === 'animation' ? 10000 : kind === 'by_year' ? 800 : 5000
+    kind === 'animation' || kind === 'popular'
+      ? 10000
+      : kind === 'by_year'
+        ? 800
+        : 5000
   const target = Math.max(1, Math.min(hardCap, Number(limit) || 500))
   const pageSize = 20
   const shows: TmdbRow[] = []
@@ -177,11 +187,21 @@ export async function fetchTmdbTvCatalogClient(
       onProgress?.(0, target)
       for (let page = 1; page <= pagesNeeded; page += 1) {
         throwIfCatalogSyncCancelled()
-        const { ok, data, error } = await nativeFetchJson<{
+        let { ok, data, error } = await nativeFetchJson<{
           results?: TmdbRow[]
           total_pages?: number
         }>(buildDiscoverUrl(kind, page))
+        // Soft retry — Android often 429s mid long Animation crawls.
         if (!ok || !data) {
+          await new Promise((r) => setTimeout(r, 400))
+          ;({ ok, data, error } = await nativeFetchJson<{
+            results?: TmdbRow[]
+            total_pages?: number
+          }>(buildDiscoverUrl(kind, page)))
+        }
+        if (!ok || !data) {
+          // Keep partial catalog so Android doesn't lag desktop by thousands of titles.
+          if (shows.length >= 100) break
           return { ok: false, shows: [], error: error || `TMDB ${kind} failed` }
         }
         const results = Array.isArray(data.results) ? data.results : []
@@ -194,16 +214,24 @@ export async function fetchTmdbTvCatalogClient(
         onProgress?.(Math.min(shows.length, target), target)
         const totalPages = Number(data.total_pages) || pagesNeeded
         if (page >= totalPages) break
+        // Brief pacing so mobile Wi‑Fi doesn't trip TMDB rate limits as hard.
+        if (page % 25 === 0) await new Promise((r) => setTimeout(r, 200))
       }
     }
   } catch (err) {
     if (err instanceof TorrentSyncCancelledError) {
-      return { ok: false, shows: [], error: 'Catalog sync cancelled', cancelled: true }
-    }
-    return {
-      ok: false,
-      shows: [],
-      error: err instanceof Error ? err.message : 'TMDB catalog failed',
+      // Prefer partial results over wiping a long Animation sync mid-way.
+      if (shows.length >= 100) {
+        /* fall through to map partial */
+      } else {
+        return { ok: false, shows: [], error: 'Catalog sync cancelled', cancelled: true }
+      }
+    } else if (shows.length < 100) {
+      return {
+        ok: false,
+        shows: [],
+        error: err instanceof Error ? err.message : 'TMDB catalog failed',
+      }
     }
   }
 

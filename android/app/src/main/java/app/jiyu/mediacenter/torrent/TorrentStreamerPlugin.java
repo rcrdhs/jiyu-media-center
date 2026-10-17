@@ -39,20 +39,26 @@ public class TorrentStreamerPlugin extends Plugin {
     boolean keepOthers = Boolean.TRUE.equals(call.getBoolean("keepOthers", false));
     Integer fileIndex = call.getInt("fileIndex");
     String fileName = call.getString("fileName");
+    boolean preferJapaneseAudio = Boolean.TRUE.equals(call.getBoolean("preferJapaneseAudio", false));
 
     executor.execute(() -> {
       try {
         TorrentEngine.StreamResult result = TorrentEngine.get(getContext())
-          .stream(uri, keepOthers, fileIndex, fileName);
+          .stream(uri, keepOthers, fileIndex, fileName, preferJapaneseAudio);
         JSObject out = new JSObject();
         out.put("ok", result.ok);
         if (!result.ok) {
-          out.put("error", result.error != null ? result.error : "Torrent failed");
+          out.put("error", result.error != null ? result.error : "Source failed");
           call.resolve(out);
           return;
         }
         TorrentEngine.ActiveTorrent t = result.torrent;
         out.put("url", result.playUrl());
+        String subtitleUrl = result.subtitleUrl();
+        if (subtitleUrl != null) {
+          out.put("subtitleUrl", subtitleUrl);
+          out.put("subtitleKind", result.subtitleKind());
+        }
         out.put("infoHash", t.infoHash);
         out.put("name", t.name);
         out.put("fileName", t.videoFile != null ? t.videoFile.getName() : null);
@@ -65,7 +71,7 @@ public class TorrentStreamerPlugin extends Plugin {
       } catch (Throwable e) {
         JSObject out = new JSObject();
         out.put("ok", false);
-        out.put("error", e.getMessage() != null ? e.getMessage() : "Torrent engine error");
+        out.put("error", e.getMessage() != null ? e.getMessage() : "Source engine error");
         call.resolve(out);
       }
     });
@@ -115,7 +121,7 @@ public class TorrentStreamerPlugin extends Plugin {
       boolean ok = TorrentEngine.get(getContext()).ensureDownloading(infoHash, playhead, runtime);
       JSObject out = new JSObject();
       out.put("ok", ok);
-      if (!ok) out.put("error", "Torrent not active");
+      if (!ok) out.put("error", "Source not active");
       call.resolve(out);
     });
   }

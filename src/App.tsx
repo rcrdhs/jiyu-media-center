@@ -21,9 +21,11 @@ import { ShowPage } from './pages/ShowPage'
 import { LibraryPage } from './pages/LibraryPage'
 import { BrowsePage } from './pages/BrowsePage'
 import { WebBrowserPage } from './pages/WebBrowserPage'
+import { NativeStreamPage } from './pages/NativeStreamPage'
 import { MultiviewPage } from './pages/MultiviewPage'
 import { FORCE_SAVE_CONTINUE_EVENT } from './lib/continueWatching'
 import { ensurePerformanceProfile } from './lib/deviceProfile'
+import { startProgressSync } from './lib/progressSync'
 import { FavoriteMatchAlerts } from './components/FavoriteMatchAlerts'
 import { WelcomeTour } from './components/WelcomeTour'
 
@@ -56,6 +58,12 @@ function DevicePerformanceBridge() {
   return null
 }
 
+/** Cross-device Continue watching sync (no-op until a sync server is set). */
+function ProgressSyncBridge() {
+  useEffect(() => startProgressSync(), [])
+  return null
+}
+
 export default function App() {
   return (
     <CatalogProvider>
@@ -80,6 +88,7 @@ export default function App() {
                         <Route path="/library" element={<LibraryPage />} />
                         <Route path="/browse" element={<BrowsePage />} />
                         <Route path="/web" element={<WebBrowserPage />} />
+                        <Route path="/native-stream" element={<NativeStreamPage />} />
                         <Route path="/guide" element={<Navigate to="/" replace />} />
                         <Route path="/torrents" element={<Navigate to="/library?section=websites" replace />} />
                         <Route path="/multiview" element={<MultiviewPage />} />
@@ -92,6 +101,7 @@ export default function App() {
                   <WebBrowserPip />
                   <DesktopContinueSaveBridge />
                   <DevicePerformanceBridge />
+                  <ProgressSyncBridge />
                   <FavoriteMatchAlerts />
                   <WelcomeTour />
                 </div>

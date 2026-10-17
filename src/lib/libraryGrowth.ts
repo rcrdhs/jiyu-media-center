@@ -1,24 +1,34 @@
 import type { CategoryId } from '../types'
 
-const STORAGE_KEY = 'jiyu.library.growth.v1'
+/** Bumped to v2 — v1 mixed release-date heuristics into "Added today". */
+const STORAGE_KEY = 'jiyu.library.growth.v2'
+const KNOWN_KEY = 'jiyu.library.known.v2'
 const TRACKED = new Set<CategoryId>(['movies', 'series', 'anime', 'kids'])
+/** Cap persisted new-id lists — full open/close snapshots blow Android localStorage. */
+const MAX_NEW_IDS = 400
+const MAX_KNOWN_IDS = 40_000
 
 type DayCounts = Record<string, number> // YYYY-MM-DD → title count
 type IdDayMap = Record<string, string[]> // YYYY-MM-DD → catalog item ids
 
-/** Current end-of-day (latest) counts, plus first count seen that calendar day. */
+/**
+ * Shelf growth store.
+ * "Added today" = titles whose id was first seen on this local calendar day
+ * (first appearance on a shelf), not content release date / popularity rank.
+ */
 type GrowthStore = {
   days: Partial<Record<CategoryId, DayCounts>>
   open: Partial<Record<CategoryId, DayCounts>>
-  /** Whole-catalog totals for the Home hero panel. */
   catalogDays?: DayCounts
   catalogOpen?: DayCounts
-  sectionOpenIds?: Partial<Record<CategoryId, IdDayMap>>
-  sectionCloseIds?: Partial<Record<CategoryId, IdDayMap>>
+  /** Ids first observed on each calendar day (authoritative for Added today). */
   sectionNewIds?: Partial<Record<CategoryId, IdDayMap>>
-  catalogOpenIds?: IdDayMap
-  catalogCloseIds?: IdDayMap
   catalogNewIds?: IdDayMap
+  /**
+   * After a cold install / v2 migrate we seed every current id as already-known
+   * so the whole library isn't dumped into Added today.
+   */
+  knownSeeded?: boolean
 }
 
 export type NewTitlesKind = 'today' | 'sinceYesterday'
@@ -30,7 +40,7 @@ export type SectionGrowth = {
   today: number
   /** today − yesterday, when yesterday was recorded */
   delta: number | null
-  /** today − first count recorded today (new titles since morning baseline) */
+  /** Titles first added to a shelf on this local calendar day */
   newToday: number
 }
 
@@ -53,69 +63,9 @@ function emptyStore(): GrowthStore {
     open: {},
     catalogDays: {},
     catalogOpen: {},
-    sectionOpenIds: {},
-    sectionCloseIds: {},
     sectionNewIds: {},
-    catalogOpenIds: {},
-    catalogCloseIds: {},
     catalogNewIds: {},
-  }
-}
-
-function readStore(): GrowthStore {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    if (!raw) return emptyStore()
-    const parsed = JSON.parse(raw) as GrowthStore | Partial<Record<CategoryId, DayCounts>>
-    if (!parsed || typeof parsed !== 'object') return emptyStore()
-    // Migrate v1 flat map { movies: { "2026-…" : n } } → { days, open }
-    if (!('days' in parsed) && !('open' in parsed)) {
-      const days = parsed as Partial<Record<CategoryId, DayCounts>>
-      return { days, open: {} }
-    }
-    const store = parsed as GrowthStore
-    return {
-      days: store.days && typeof store.days === 'object' ? store.days : {},
-      open: store.open && typeof store.open === 'object' ? store.open : {},
-      catalogDays:
-        store.catalogDays && typeof store.catalogDays === 'object' ? store.catalogDays : {},
-      catalogOpen:
-        store.catalogOpen && typeof store.catalogOpen === 'object' ? store.catalogOpen : {},
-      sectionOpenIds:
-        store.sectionOpenIds && typeof store.sectionOpenIds === 'object'
-          ? store.sectionOpenIds
-          : {},
-      sectionCloseIds:
-        store.sectionCloseIds && typeof store.sectionCloseIds === 'object'
-          ? store.sectionCloseIds
-          : {},
-      sectionNewIds:
-        store.sectionNewIds && typeof store.sectionNewIds === 'object'
-          ? store.sectionNewIds
-          : {},
-      catalogOpenIds:
-        store.catalogOpenIds && typeof store.catalogOpenIds === 'object'
-          ? store.catalogOpenIds
-          : {},
-      catalogCloseIds:
-        store.catalogCloseIds && typeof store.catalogCloseIds === 'object'
-          ? store.catalogCloseIds
-          : {},
-      catalogNewIds:
-        store.catalogNewIds && typeof store.catalogNewIds === 'object'
-          ? store.catalogNewIds
-          : {},
-    }
-  } catch {
-    return emptyStore()
-  }
-}
-
-function writeStore(store: GrowthStore) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(store))
-  } catch {
-    /* ignore quota */
+    knownSeeded: false,
   }
 }
 
@@ -128,123 +78,13 @@ function pruneIdDays(days: IdDayMap, keep = 14): IdDayMap {
   return next
 }
 
-/** Local midnight for release-date fallback when id snapshots are missing. */
-export function startOfLocalDayMs(from = new Date()): number {
-  const d = new Date(from)
-  d.setHours(0, 0, 0, 0)
-  return d.getTime()
-}
-
-function seedIdsFromCountBaseline(
-  ids: string[],
-  meta: GrowthIdMeta[],
-  countBaseline: number,
-): { openIds: string[]; newIds: string[] } {
-  if (ids.length <= countBaseline || countBaseline < 0) {
-    return { openIds: [...ids], newIds: [] }
+function capIdDays(days: IdDayMap | undefined, max = MAX_NEW_IDS): IdDayMap {
+  const next: IdDayMap = {}
+  for (const [day, ids] of Object.entries(days ?? {})) {
+    if (!Array.isArray(ids) || ids.length === 0) continue
+    next[day] = ids.length > max ? ids.slice(0, max) : ids
   }
-  const newCount = Math.min(ids.length - countBaseline, meta.length)
-  if (newCount <= 0) {
-    return { openIds: [...ids], newIds: [] }
-  }
-  const byId = new Map(meta.map((m) => [m.id, m.releasedAt ?? 0]))
-  const sorted = [...ids].sort((a, b) => (byId.get(b) ?? 0) - (byId.get(a) ?? 0))
-  const newIds = sorted.slice(0, newCount)
-  const newSet = new Set(newIds)
-  return {
-    openIds: ids.filter((id) => !newSet.has(id)),
-    newIds,
-  }
-}
-
-function applyIdSnapshot(
-  ids: string[],
-  today: string,
-  meta: GrowthIdMeta[] | undefined,
-  countBaseline: number | undefined,
-  openIdMap: IdDayMap,
-  closeIdMap: IdDayMap,
-  newIdMap: IdDayMap,
-): void {
-  if (!ids.length) return
-  closeIdMap[today] = [...ids]
-
-  const canSeed =
-    Boolean(meta?.length) &&
-    countBaseline != null &&
-    ids.length > countBaseline
-
-  if (!Array.isArray(openIdMap[today])) {
-    if (canSeed) {
-      const seeded = seedIdsFromCountBaseline(ids, meta!, countBaseline!)
-      openIdMap[today] = seeded.openIds
-      if (seeded.newIds.length) newIdMap[today] = seeded.newIds
-    } else {
-      openIdMap[today] = [...ids]
-    }
-  } else if (!newIdMap[today]?.length && canSeed) {
-    // Repair when open ids wrongly matched the full catalog on first snapshot.
-    const seeded = seedIdsFromCountBaseline(ids, meta!, countBaseline!)
-    openIdMap[today] = seeded.openIds
-    if (seeded.newIds.length) newIdMap[today] = seeded.newIds
-  }
-
-  const openSet = new Set(openIdMap[today] ?? ids)
-  const seenNew = new Set(newIdMap[today] ?? [])
-  for (const id of ids) {
-    if (!openSet.has(id)) seenNew.add(id)
-  }
-  if (seenNew.size > 0) {
-    newIdMap[today] = [...seenNew]
-  }
-}
-
-function snapshotSectionIds(
-  store: GrowthStore,
-  category: CategoryId,
-  meta: GrowthIdMeta[],
-  today: string,
-  countBaseline: number | undefined,
-): void {
-  const ids = meta.map((m) => m.id).filter(Boolean)
-  if (!ids.length) return
-  const openIdMap = { ...(store.sectionOpenIds?.[category] ?? {}) }
-  const closeIdMap = { ...(store.sectionCloseIds?.[category] ?? {}) }
-  const newIdMap = { ...(store.sectionNewIds?.[category] ?? {}) }
-
-  applyIdSnapshot(ids, today, meta, countBaseline, openIdMap, closeIdMap, newIdMap)
-
-  store.sectionOpenIds = {
-    ...store.sectionOpenIds,
-    [category]: pruneIdDays(openIdMap),
-  }
-  store.sectionCloseIds = {
-    ...store.sectionCloseIds,
-    [category]: pruneIdDays(closeIdMap),
-  }
-  store.sectionNewIds = {
-    ...store.sectionNewIds,
-    [category]: pruneIdDays(newIdMap),
-  }
-}
-
-function snapshotCatalogIds(
-  store: GrowthStore,
-  meta: GrowthIdMeta[],
-  today: string,
-  countBaseline: number | undefined,
-): void {
-  const ids = meta.map((m) => m.id).filter(Boolean)
-  if (!ids.length) return
-  const openIdMap = { ...(store.catalogOpenIds ?? {}) }
-  const closeIdMap = { ...(store.catalogCloseIds ?? {}) }
-  const newIdMap = { ...(store.catalogNewIds ?? {}) }
-
-  applyIdSnapshot(ids, today, meta, countBaseline, openIdMap, closeIdMap, newIdMap)
-
-  store.catalogOpenIds = pruneIdDays(openIdMap)
-  store.catalogCloseIds = pruneIdDays(closeIdMap)
-  store.catalogNewIds = pruneIdDays(newIdMap)
+  return pruneIdDays(next)
 }
 
 function pruneDays(days: DayCounts, keep = 14): DayCounts {
@@ -255,26 +95,212 @@ function pruneDays(days: DayCounts, keep = 14): DayCounts {
   return next
 }
 
-export function isGrowthTrackedSection(id: CategoryId): boolean {
-  return TRACKED.has(id)
+function slimStore(store: GrowthStore): GrowthStore {
+  const sectionNewIds: Partial<Record<CategoryId, IdDayMap>> = {}
+  for (const [key, map] of Object.entries(store.sectionNewIds ?? {})) {
+    sectionNewIds[key as CategoryId] = capIdDays(map)
+  }
+  return {
+    days: store.days ?? {},
+    open: store.open ?? {},
+    catalogDays: store.catalogDays ?? {},
+    catalogOpen: store.catalogOpen ?? {},
+    sectionNewIds,
+    catalogNewIds: capIdDays(store.catalogNewIds),
+    knownSeeded: Boolean(store.knownSeeded),
+  }
+}
+
+function readStore(): GrowthStore {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (!raw) return emptyStore()
+    if (raw.length > 1_500_000) {
+      try {
+        localStorage.removeItem(STORAGE_KEY)
+      } catch {
+        /* ignore */
+      }
+      return emptyStore()
+    }
+    const parsed = JSON.parse(raw) as GrowthStore
+    if (!parsed || typeof parsed !== 'object') return emptyStore()
+    return slimStore({
+      days: parsed.days && typeof parsed.days === 'object' ? parsed.days : {},
+      open: parsed.open && typeof parsed.open === 'object' ? parsed.open : {},
+      catalogDays:
+        parsed.catalogDays && typeof parsed.catalogDays === 'object' ? parsed.catalogDays : {},
+      catalogOpen:
+        parsed.catalogOpen && typeof parsed.catalogOpen === 'object' ? parsed.catalogOpen : {},
+      sectionNewIds:
+        parsed.sectionNewIds && typeof parsed.sectionNewIds === 'object'
+          ? parsed.sectionNewIds
+          : {},
+      catalogNewIds:
+        parsed.catalogNewIds && typeof parsed.catalogNewIds === 'object'
+          ? parsed.catalogNewIds
+          : {},
+      knownSeeded: Boolean(parsed.knownSeeded),
+    })
+  } catch {
+    return emptyStore()
+  }
+}
+
+function writeStore(store: GrowthStore) {
+  const slim = slimStore(store)
+  try {
+    // Drop the v1 blob (release-date heuristics) so Android quota stays free.
+    localStorage.removeItem('jiyu.library.growth.v1')
+  } catch {
+    /* ignore */
+  }
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(slim))
+    return
+  } catch {
+    /* quota — keep counts + today's new ids only */
+  }
+  try {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        days: slim.days,
+        open: slim.open,
+        catalogDays: slim.catalogDays,
+        catalogOpen: slim.catalogOpen,
+        catalogNewIds: slim.catalogNewIds,
+        sectionNewIds: slim.sectionNewIds,
+        knownSeeded: slim.knownSeeded,
+      }),
+    )
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Ids we have already seen on a shelf (any day). */
+function readKnownIds(): Set<string> {
+  try {
+    const raw = localStorage.getItem(KNOWN_KEY)
+    if (!raw) return new Set()
+    if (raw.length > 2_500_000) {
+      try {
+        localStorage.removeItem(KNOWN_KEY)
+      } catch {
+        /* ignore */
+      }
+      return new Set()
+    }
+    const parsed = JSON.parse(raw) as unknown
+    if (!Array.isArray(parsed)) return new Set()
+    return new Set(parsed.filter((id): id is string => typeof id === 'string' && id.length > 0))
+  } catch {
+    return new Set()
+  }
+}
+
+function writeKnownIds(known: Set<string>) {
+  let ids = [...known]
+  if (ids.length > MAX_KNOWN_IDS) {
+    // Drop oldest-looking entries (stable sort keeps recent appends if we ever switch).
+    ids = ids.slice(ids.length - MAX_KNOWN_IDS)
+  }
+  try {
+    localStorage.setItem(KNOWN_KEY, JSON.stringify(ids))
+  } catch {
+    /* quota — keep going with in-memory known for this session via callers */
+  }
+}
+
+/** Local midnight for date helpers. */
+export function startOfLocalDayMs(from = new Date()): number {
+  const d = new Date(from)
+  d.setHours(0, 0, 0, 0)
+  return d.getTime()
+}
+
+/**
+ * Diff current shelf ids against the known set.
+ * Catalog does the one-time seed (whole library = already known).
+ * Sections wait for that seed so a Movies visit can't mark Series as "new".
+ */
+function observeNewIds(
+  store: GrowthStore,
+  meta: GrowthIdMeta[],
+  priorToday: string[] | undefined,
+  mode: 'section' | 'catalog',
+): { store: GrowthStore; newIds: string[] } {
+  const ids = meta.map((m) => m.id).filter(Boolean)
+  if (!ids.length) return { store, newIds: priorToday ?? [] }
+
+  const known = readKnownIds()
+  // Repair: anything we already logged as new on a prior day counts as known.
+  for (const dayIds of Object.values(store.catalogNewIds ?? {})) {
+    for (const id of dayIds ?? []) known.add(id)
+  }
+  for (const map of Object.values(store.sectionNewIds ?? {})) {
+    for (const dayIds of Object.values(map ?? {})) {
+      for (const id of dayIds ?? []) known.add(id)
+    }
+  }
+
+  if (!store.knownSeeded) {
+    if (mode === 'catalog') {
+      for (const id of ids) known.add(id)
+      writeKnownIds(known)
+      return {
+        store: { ...store, knownSeeded: true },
+        // Do not dump the whole library into Added today on first seed.
+        newIds: [],
+      }
+    }
+    // Section before Home has seeded — don't invent "new" titles yet.
+    return { store, newIds: [] }
+  }
+
+  const seenToday = new Set(priorToday ?? [])
+  const newly: string[] = []
+  for (const id of ids) {
+    if (known.has(id)) continue
+    known.add(id)
+    if (!seenToday.has(id)) {
+      seenToday.add(id)
+      newly.push(id)
+    }
+  }
+  if (newly.length) writeKnownIds(known)
+
+  const merged = [...(priorToday ?? []), ...newly]
+  const dedup: string[] = []
+  const have = new Set<string>()
+  for (const id of merged) {
+    if (have.has(id)) continue
+    have.add(id)
+    dedup.push(id)
+  }
+  return { store: { ...store, knownSeeded: true }, newIds: dedup.slice(0, MAX_NEW_IDS) }
 }
 
 function growthFrom(
   days: DayCounts,
-  open: DayCounts,
   fallbackToday: number,
+  newToday: number,
 ): SectionGrowth {
   const todayKey = localDateKey()
   const yday = yesterdayKey()
   const today = typeof days[todayKey] === 'number' ? days[todayKey] : fallbackToday
   const yesterday = typeof days[yday] === 'number' ? days[yday] : null
-  const openToday = typeof open[todayKey] === 'number' ? open[todayKey] : today
   return {
     yesterday,
     today,
     delta: yesterday == null ? null : today - yesterday,
-    newToday: today - openToday,
+    newToday: Math.max(0, newToday),
   }
+}
+
+export function isGrowthTrackedSection(id: CategoryId): boolean {
+  return TRACKED.has(id)
 }
 
 /**
@@ -296,26 +322,34 @@ export function recordSectionTitleCount(
   }
 
   const today = localDateKey()
-  const store = readStore()
+  let store = readStore()
   const days = { ...(store.days[category] ?? {}) }
   const open = { ...(store.open[category] ?? {}) }
   const n = Math.max(0, Math.round(count))
 
-  // First visit of the calendar day becomes the baseline for "new today".
   if (typeof open[today] !== 'number') {
     open[today] = n
   }
   days[today] = n
 
   if (meta?.length) {
-    snapshotSectionIds(store, category, meta, today, open[today])
+    const prior = store.sectionNewIds?.[category]?.[today]
+    const observed = observeNewIds(store, meta, prior, 'section')
+    store = observed.store
+    const newIdMap = { ...(store.sectionNewIds?.[category] ?? {}) }
+    newIdMap[today] = observed.newIds
+    store.sectionNewIds = {
+      ...store.sectionNewIds,
+      [category]: pruneIdDays(newIdMap),
+    }
   }
 
   store.days[category] = pruneDays(days)
   store.open[category] = pruneDays(open)
   writeStore(store)
 
-  return growthFrom(days, open, n)
+  const newToday = store.sectionNewIds?.[category]?.[today]?.length ?? 0
+  return growthFrom(days, n, newToday)
 }
 
 export function getSectionGrowth(category: CategoryId, fallbackToday = 0): SectionGrowth {
@@ -323,80 +357,60 @@ export function getSectionGrowth(category: CategoryId, fallbackToday = 0): Secti
     return { yesterday: null, today: fallbackToday, delta: null, newToday: 0 }
   }
   const store = readStore()
-  return growthFrom(store.days[category] ?? {}, store.open[category] ?? {}, fallbackToday)
+  const today = localDateKey()
+  const newToday = store.sectionNewIds?.[category]?.[today]?.length ?? 0
+  return growthFrom(store.days[category] ?? {}, fallbackToday, newToday)
 }
 
-/**
- * Home hero growth: "new today" is titles above yesterday's closing library size.
- * A daily sync that reloads the same catalog must not count as thousands of new titles.
- */
-function catalogGrowthFrom(
-  days: DayCounts,
-  open: DayCounts,
-  fallbackToday: number,
-): SectionGrowth {
-  const todayKey = localDateKey()
-  const yday = yesterdayKey()
-  const today = typeof days[todayKey] === 'number' ? days[todayKey] : fallbackToday
-  const yesterday = typeof days[yday] === 'number' ? days[yday] : null
-  const openToday = typeof open[todayKey] === 'number' ? open[todayKey] : today
-  // Prefer yesterday's close. Fall back to today's settled baseline only when
-  // we have no prior day (first run).
-  const baseline = yesterday != null ? yesterday : openToday
-  return {
-    yesterday,
-    today,
-    delta: yesterday == null ? null : today - yesterday,
-    newToday: Math.max(0, today - baseline),
-  }
-}
-
-/** Snapshot the full catalog size for Home (“titles today” / “new today”). */
+/** Snapshot the full catalog size for Home (“titles today” / “Added today”). */
 export function recordCatalogTitleCount(count: number, meta?: GrowthIdMeta[]): SectionGrowth {
   if (!Number.isFinite(count) || count < 0) {
     return { yesterday: null, today: 0, delta: null, newToday: 0 }
   }
   const today = localDateKey()
-  const yday = yesterdayKey()
-  const store = readStore()
+  let store = readStore()
   const days = { ...(store.catalogDays ?? {}) }
   const open = { ...(store.catalogOpen ?? {}) }
   const n = Math.max(0, Math.round(count))
+  const yday = yesterdayKey()
   const yesterdayCount = typeof days[yday] === 'number' ? days[yday] : null
 
   if (typeof open[today] !== 'number') {
-    // Seed baseline from yesterday when possible — not from a pre-sync partial load.
     open[today] = yesterdayCount != null ? yesterdayCount : n
   } else if (yesterdayCount != null && open[today] < yesterdayCount) {
-    // Repair a cold-start baseline that was recorded before the catalog loaded.
     open[today] = yesterdayCount
   } else if (yesterdayCount == null && open[today] < n * 0.5) {
-    // First tracked day: partial load became baseline; treat the filled catalog
-    // as the real start so the initial sync isn't "new".
     open[today] = n
   }
   days[today] = n
 
   if (meta?.length) {
-    snapshotCatalogIds(store, meta, today, open[today])
+    const prior = store.catalogNewIds?.[today]
+    const observed = observeNewIds(store, meta, prior, 'catalog')
+    store = observed.store
+    const newIdMap = { ...(store.catalogNewIds ?? {}) }
+    newIdMap[today] = observed.newIds
+    store.catalogNewIds = pruneIdDays(newIdMap)
   }
 
   store.catalogDays = pruneDays(days)
   store.catalogOpen = pruneDays(open)
   writeStore(store)
 
-  return catalogGrowthFrom(days, open, n)
+  const newToday = store.catalogNewIds?.[today]?.length ?? 0
+  return growthFrom(days, n, newToday)
 }
 
 export function getCatalogGrowth(fallbackToday = 0): SectionGrowth {
   const store = readStore()
-  return catalogGrowthFrom(store.catalogDays ?? {}, store.catalogOpen ?? {}, fallbackToday)
+  const today = localDateKey()
+  const newToday = store.catalogNewIds?.[today]?.length ?? 0
+  return growthFrom(store.catalogDays ?? {}, fallbackToday, newToday)
 }
 
 export function formatSectionGrowth(growth: SectionGrowth): string | null {
   const t = growth.today.toLocaleString()
   if (growth.yesterday == null) {
-    // First snapshot for this section — day-over-day appears next calendar day.
     return `Today ${t} titles`
   }
   const y = growth.yesterday.toLocaleString()
@@ -413,20 +427,20 @@ export function getSectionNewTitleIds(
   const yday = yesterdayKey()
 
   if (kind === 'today') {
-    const tracked = store.sectionNewIds?.[category]?.[today]
-    if (tracked?.length) return tracked
-    const open = store.sectionOpenIds?.[category]?.[today] ?? []
-    const close = store.sectionCloseIds?.[category]?.[today] ?? []
-    if (!close.length) return []
-    const openSet = new Set(open)
-    return close.filter((id) => !openSet.has(id))
+    return store.sectionNewIds?.[category]?.[today] ?? []
   }
 
-  const yesterdayClose = store.sectionCloseIds?.[category]?.[yday] ?? []
-  const todayClose = store.sectionCloseIds?.[category]?.[today] ?? []
-  if (!yesterdayClose.length || !todayClose.length) return []
-  const ySet = new Set(yesterdayClose)
-  return todayClose.filter((id) => !ySet.has(id))
+  const todayNew = store.sectionNewIds?.[category]?.[today] ?? []
+  const ydayNew = store.sectionNewIds?.[category]?.[yday] ?? []
+  if (!todayNew.length && !ydayNew.length) return []
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const id of [...todayNew, ...ydayNew]) {
+    if (seen.has(id)) continue
+    seen.add(id)
+    out.push(id)
+  }
+  return out
 }
 
 export function getCatalogNewTitleIds(kind: NewTitlesKind): string[] {
@@ -435,18 +449,18 @@ export function getCatalogNewTitleIds(kind: NewTitlesKind): string[] {
   const yday = yesterdayKey()
 
   if (kind === 'today') {
-    const tracked = store.catalogNewIds?.[today]
-    if (tracked?.length) return tracked
-    const open = store.catalogOpenIds?.[today] ?? []
-    const close = store.catalogCloseIds?.[today] ?? []
-    if (!close.length) return []
-    const openSet = new Set(open)
-    return close.filter((id) => !openSet.has(id))
+    return store.catalogNewIds?.[today] ?? []
   }
 
-  const yesterdayClose = store.catalogCloseIds?.[yday] ?? []
-  const todayClose = store.catalogCloseIds?.[today] ?? []
-  if (!yesterdayClose.length || !todayClose.length) return []
-  const ySet = new Set(yesterdayClose)
-  return todayClose.filter((id) => !ySet.has(id))
+  const todayNew = store.catalogNewIds?.[today] ?? []
+  const ydayNew = store.catalogNewIds?.[yday] ?? []
+  if (!todayNew.length && !ydayNew.length) return []
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const id of [...todayNew, ...ydayNew]) {
+    if (seen.has(id)) continue
+    seen.add(id)
+    out.push(id)
+  }
+  return out
 }
