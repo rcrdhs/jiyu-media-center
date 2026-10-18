@@ -5,11 +5,95 @@ const fs = require('fs')
 const os = require('os')
 const zlib = require('zlib')
 const http = require('http')
-const { spawn } = require('child_process')
+const { spawn: spawnChildProcess } = require('child_process')
 const { promisify } = require('util')
 
 /** electron-updater — only active in packaged builds (see setupAutoUpdater). */
 let autoUpdaterRef = null
+
+/**
+ * Every child process main spawns (today: ffmpeg from app.asar.unpacked).
+ * Killed on quit and before the updater hands off to the installer, so an
+ * orphaned ffmpeg running out of the install dir can never trip the NSIS
+ * "Jiyu cannot be closed" check.
+ * @type {Set<import('child_process').ChildProcess>}
+ */
+const trackedChildProcesses = new Set()
+
+/** child_process.spawn that remembers the process until it exits. */
+function spawn(...args) {
+  const proc = spawnChildProcess(...args)
+  trackedChildProcesses.add(proc)
+  const forget = () => trackedChildProcesses.delete(proc)
+  proc.once('exit', forget)
+  proc.once('error', forget)
+  return proc
+}
+
+function killTrackedChildProcesses(reason) {
+  if (trackedChildProcesses.size === 0) return 0
+  let killed = 0
+  for (const proc of trackedChildProcesses) {
+    try {
+      if (proc.exitCode === null && proc.signalCode === null && !proc.killed) {
+        proc.kill()
+        killed += 1
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  trackedChildProcesses.clear()
+  if (killed > 0) console.log(`[jiyu] killed ${killed} child process(es) (${reason})`)
+  return killed
+}
+
+/**
+ * Small file logger for electron-updater: <userData>/logs/updater.log
+ * (rolled to updater.log.old past ~1 MB). Lets us see update failures after the fact.
+ */
+function createUpdaterFileLogger() {
+  let file = null
+  try {
+    const dir = path.join(app.getPath('userData'), 'logs')
+    fs.mkdirSync(dir, { recursive: true })
+    file = path.join(dir, 'updater.log')
+    try {
+      if (fs.statSync(file).size > 1_000_000) fs.renameSync(file, `${file}.old`)
+    } catch {
+      /* missing or locked — keep appending */
+    }
+  } catch {
+    file = null
+  }
+  const format = (value) => {
+    if (value instanceof Error) return value.stack || value.message
+    if (typeof value === 'string') return value
+    try {
+      return JSON.stringify(value)
+    } catch {
+      return String(value)
+    }
+  }
+  const write = (level, args) => {
+    if (!file) return
+    try {
+      fs.appendFileSync(
+        file,
+        `[${new Date().toISOString()}] [${level}] ${args.map(format).join(' ')}\n`,
+        'utf8',
+      )
+    } catch {
+      /* ignore */
+    }
+  }
+  return {
+    info: (...args) => write('info', args),
+    warn: (...args) => write('warn', args),
+    error: (...args) => write('error', args),
+    debug: (...args) => write('debug', args),
+  }
+}
 
 /** Tunables pushed from the renderer device profile (defaults = balanced). */
 let performanceKnobs = {
@@ -3995,7 +4079,8 @@ function setupAutoUpdater() {
   autoUpdater.autoDownload = false
   autoUpdater.autoInstallOnAppQuit = true
   try {
-    autoUpdater.logger = null
+    autoUpdater.logger = createUpdaterFileLogger()
+    autoUpdater.logger.info(`[updater] app ${APP_VERSION} starting update checks`)
   } catch {
     /* ignore */
   }
@@ -5322,7 +5407,16 @@ app.whenReady().then(() => {
 
   recoverCatalogFromLegacyApps()
   sweepPartialTorrents()
-  const partialSweep = setInterval(sweepPartialTorrents, 15 * 60 * 1000)
+  // Before any torrent is added: drop leftovers that were never released normally
+  // (force-close, crash, dev restarts) and so never reached the partial ledger.
+  sweepOrphanTorrentDownloads('startup')
+  writeActiveTorrentHeartbeat()
+  const activeHeartbeat = setInterval(writeActiveTorrentHeartbeat, TORRENT_ACTIVE_HEARTBEAT_MS)
+  if (typeof activeHeartbeat.unref === 'function') activeHeartbeat.unref()
+  const partialSweep = setInterval(() => {
+    sweepPartialTorrents()
+    sweepOrphanTorrentDownloads('periodic')
+  }, 15 * 60 * 1000)
   if (typeof partialSweep.unref === 'function') partialSweep.unref()
 
   // Desktop Chrome UA + Sec-CH-UA* on the shared web session. Electron's default
@@ -5673,10 +5767,21 @@ ipcMain.handle('app:updater:install', async () => {
   }
   // isSilent=false, isForceRunAfter=true
   setImmediate(() => {
+    // Stop ffmpeg helpers first so nothing runs from the install dir when NSIS checks.
+    killTrackedChildProcesses('quitAndInstall')
     try {
-      autoUpdaterRef.quitAndInstall(false, true)
+      autoUpdaterRef.logger?.info?.('[updater] quitAndInstall(isSilent=false, isForceRunAfter=true)')
     } catch {
       /* ignore */
+    }
+    try {
+      autoUpdaterRef.quitAndInstall(false, true)
+    } catch (err) {
+      try {
+        autoUpdaterRef.logger?.error?.('[updater] quitAndInstall failed', err)
+      } catch {
+        /* ignore */
+      }
     }
   })
   return { ok: true }
@@ -5758,6 +5863,16 @@ ipcMain.handle('system:setPerformanceKnobs', async (_event, knobs) => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
+})
+
+app.on('before-quit', () => {
+  killTrackedChildProcesses('before-quit')
+  // This instance no longer holds anything in the shared download root.
+  try {
+    fs.rmSync(activeTorrentHeartbeatPath(), { force: true })
+  } catch {
+    /* ignore */
+  }
 })
 
 function catalogPath() {
@@ -7657,6 +7772,8 @@ ipcMain.handle('stream:probeMany', async (_event, entries, timeoutMs) => {
 // ---------------------------------------------------------------------------
 
 let torrentClientPromise = null
+/** Resolved WebTorrent client (null until the first torrent add). Used by the orphan sweep. */
+let torrentClientInstance = null
 let torrentServerPort = 0
 
 async function getTorrentClient() {
@@ -7694,6 +7811,7 @@ async function getTorrentClient() {
         httpServer.listen(0, '127.0.0.1', () => resolve())
       })
       torrentServerPort = httpServer.address().port
+      torrentClientInstance = client
       return client
     })().catch((err) => {
       torrentClientPromise = null
@@ -7875,6 +7993,176 @@ function sweepPartialTorrents() {
     }
   }
   writePartialLedger(kept)
+}
+
+// ---------------------------------------------------------------------------
+// Orphan sweep: the download root is shared by the installed app (user-data) and the
+// dev app (user-data-dev). Anything not released through releaseTorrent (force-close,
+// crash, dev restart) never reaches a partial ledger and used to stay forever.
+// ---------------------------------------------------------------------------
+
+/** Skip anything written this recently: another instance may still be downloading it. */
+const TORRENT_ORPHAN_GRACE_MS = 30 * 60 * 1000
+const TORRENT_ACTIVE_HEARTBEAT_MS = 60 * 1000
+/** A sibling instance's active list counts only while its heartbeat is this fresh. */
+const TORRENT_ACTIVE_HEARTBEAT_STALE_MS = 5 * 60 * 1000
+
+function activeTorrentHeartbeatPath() {
+  return path.join(app.getPath('userData'), 'torrent-active.json')
+}
+
+/** Every Jiyu profile that may use the same download root (installed + dev). */
+function torrentProfileDirs() {
+  const dirs = new Set()
+  try {
+    dirs.add(path.resolve(app.getPath('userData')))
+  } catch {
+    /* ignore */
+  }
+  if (jiyuDataPaths?.root) {
+    dirs.add(path.resolve(jiyuDataPaths.root, 'user-data'))
+    dirs.add(path.resolve(jiyuDataPaths.root, 'user-data-dev'))
+  }
+  return [...dirs]
+}
+
+/** Store dirs/files of torrents this process currently holds. */
+function activeTorrentStorePaths() {
+  const out = []
+  for (const torrent of torrentClientInstance?.torrents || []) {
+    const dir = torrentStoreDir(torrent)
+    if (dir) out.push(dir)
+  }
+  return out
+}
+
+function writeActiveTorrentHeartbeat() {
+  try {
+    fs.writeFileSync(
+      activeTorrentHeartbeatPath(),
+      JSON.stringify({ pid: process.pid, updatedAt: Date.now(), paths: activeTorrentStorePaths() }),
+    )
+  } catch {
+    /* ignore */
+  }
+}
+
+function readJsonFile(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'))
+  } catch {
+    return null
+  }
+}
+
+/** Lower-cased absolute paths that must not be swept right now. */
+function protectedTorrentStorePaths() {
+  const now = Date.now()
+  const keep = new Set(activeTorrentStorePaths().map((p) => path.resolve(p).toLowerCase()))
+  for (const dir of torrentProfileDirs()) {
+    // Still-valid partial ledger rows from either app.
+    const ledger = readJsonFile(path.join(dir, 'torrent-partials.json'))
+    for (const row of Array.isArray(ledger) ? ledger : []) {
+      if (row?.path && Number(row.expiresAt) > now) keep.add(path.resolve(String(row.path)).toLowerCase())
+    }
+    // Torrents the other running instance holds (fresh heartbeat only).
+    const beat = readJsonFile(path.join(dir, 'torrent-active.json'))
+    if (beat && Number(beat.pid) !== process.pid && now - Number(beat.updatedAt) < TORRENT_ACTIVE_HEARTBEAT_STALE_MS) {
+      for (const p of Array.isArray(beat.paths) ? beat.paths : []) {
+        if (p) keep.add(path.resolve(String(p)).toLowerCase())
+      }
+    }
+  }
+  return keep
+}
+
+/**
+ * Newest mtime inside an entry, without following links. Returns null when the entry
+ * (or anything under it) is a symlink/junction: those are never touched.
+ */
+function newestMtimeNoLinks(target, depth = 0) {
+  let st
+  try {
+    st = fs.lstatSync(target)
+  } catch {
+    return null
+  }
+  if (st.isSymbolicLink()) return null
+  let newest = st.mtimeMs
+  if (!st.isDirectory()) return newest
+  if (depth > 8) return null
+  let names = []
+  try {
+    names = fs.readdirSync(target)
+  } catch {
+    return null
+  }
+  for (const name of names) {
+    const child = newestMtimeNoLinks(path.join(target, name), depth + 1)
+    if (child === null) return null
+    newest = Math.max(newest, child)
+  }
+  return newest
+}
+
+/**
+ * Remove direct children of the download root that no torrent is using: not held by
+ * this process, not in a valid partial ledger (installed or dev app), not in the other
+ * instance's fresh active list, and not written in the last 30 minutes. Links and
+ * junctions are skipped; nothing outside the root is touched.
+ */
+function sweepOrphanTorrentDownloads(reason = 'sweep') {
+  // Only the Jiyu data root (never a generic OS temp folder another tool might use).
+  const configured = jiyuDataPaths?.torrents
+  if (!configured) return
+  const root = path.resolve(configured)
+  let rootStat
+  try {
+    rootStat = fs.lstatSync(root)
+  } catch {
+    return
+  }
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) return
+  const keep = protectedTorrentStorePaths()
+  const now = Date.now()
+  let removed = 0
+  let freed = 0
+  let names = []
+  try {
+    names = fs.readdirSync(root)
+  } catch {
+    return
+  }
+  for (const name of names) {
+    const target = path.resolve(root, name)
+    if (path.dirname(target) !== root) continue
+    if (keep.has(target.toLowerCase())) continue
+    const newest = newestMtimeNoLinks(target)
+    if (newest === null) continue // link/junction inside, or unreadable
+    if (now - newest < TORRENT_ORPHAN_GRACE_MS) continue
+    let size = 0
+    try {
+      const st = fs.lstatSync(target)
+      size = st.isDirectory() ? 0 : st.size
+    } catch {
+      /* ignore */
+    }
+    try {
+      fs.rmSync(target, { recursive: true, force: false })
+      removed += 1
+      freed += size
+    } catch (err) {
+      // EBUSY/EPERM: still open by another process - try again next sweep.
+      console.warn('[torrent] orphan cleanup skipped', name, err?.code || err?.message || err)
+    }
+  }
+  if (removed > 0) {
+    console.log('[torrent] removed orphaned downloads', {
+      reason,
+      removed,
+      freedMB: Math.round(freed / (1024 * 1024)),
+    })
+  }
 }
 
 /** Finished downloads are deleted now. Unfinished ones are removed after 3 hours. */
@@ -8404,6 +8692,18 @@ function probeSubtitleTracks(inputSource) {
     proc.once('close', () => {
       clearTimeout(timer)
       const tracks = parseFfmpegSubtitleStreams(stderr)
+      // A sparse torrent file whose header pieces haven't landed reads as zeros:
+      // "invalid as first byte of an EBML number" / "Error opening input: I/O error".
+      // That is "can't read yet", not "no subtitle track". Same when ffmpeg never got
+      // far enough to list a single stream (HTTP probe killed by the 45s timeout while
+      // the header piece is still missing): only a file whose streams were listed
+      // can be trusted to have no subtitle track.
+      tracks.readFailure =
+        tracks.length === 0 &&
+        (/Error opening input|I\/O error|invalid as first byte|EBML header parsing failed|Invalid data found when processing input/i.test(
+          stderr,
+        ) ||
+          !/Stream #\d+:\d+/.test(stderr))
       if (tracks.length === 0) {
         if (/Subtitle:/i.test(stderr)) {
           const hint = stderr
@@ -8614,6 +8914,9 @@ function scheduleSubtitleExtractWhenReady(file, cacheKey) {
 
 function startProgressiveSubtitleExtract(file, cacheKey) {
   if (!file) return
+  // A release already confirmed to have no usable track must not keep re-deferring
+  // every 8s (that loop ran forever for stopped sidecar torrents).
+  if (subtitleJobs.get(cacheKey)?.confirmedMissing) return
   subtitleSources.set(cacheKey, file)
 
   const downloaded = Number(file.downloaded) || 0
@@ -8953,8 +9256,18 @@ function startProgressiveSubtitleExtract(file, cacheKey) {
       return
     }
 
-    const tracks = await probeSubtitleTracks(probeSource)
+    let tracks = await probeSubtitleTracks(probeSource)
     if (subtitleExtractors.get(cacheKey)?.kill !== killActive) return
+    if (tracks.readFailure && path.isAbsolute(String(probeSource)) && httpSource) {
+      // Disk copy is sparse at the header; the HTTP source waits for the pieces.
+      console.warn('[torrent subs] disk probe unreadable, re-probing over http', { file: file.name })
+      tracks = await probeSubtitleTracks(httpSource)
+      if (subtitleExtractors.get(cacheKey)?.kill !== killActive) return
+    }
+    if (tracks.length === 0 && tracks.readFailure) {
+      markRetryable('Subtitles not ready (input unreadable)')
+      return
+    }
 
     console.log('[torrent subs] probed', {
       via: path.isAbsolute(String(probeSource)) ? 'disk' : 'http',

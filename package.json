@@ -1,7 +1,7 @@
 {
   "name": "jiyu-media-center",
   "private": true,
-  "version": "0.3.77",
+  "version": "0.3.78",
   "description": "Jiyu — freedom-focused media center for sports, movies, anime, series, and news streams",
   "author": "Jiyu",
   "repository": {
@@ -68,7 +68,8 @@
     "files": [
       "dist/**/*",
       "electron/**/*",
-      "package.json"
+      "package.json",
+      "!node_modules/@capacitor/**"
     ],
     "win": {
       "target": [
@@ -86,7 +87,8 @@
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "include": "build-resources/installer.nsh"
     },
     "publish": [
       {

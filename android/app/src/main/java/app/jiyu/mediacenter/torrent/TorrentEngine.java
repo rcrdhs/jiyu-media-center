@@ -56,6 +56,13 @@ public final class TorrentEngine {
   private static final long SUB_REKICK_COOLDOWN_MS = 60_000L;
   /** Unfinished downloads are removed after this long. Finished ones go immediately. */
   private static final long PARTIAL_TTL_MS = 3L * 60L * 60L * 1000L;
+  /**
+   * Subtitle-only sidecar torrents (player keeps its own video source): only the file
+   * header is needed before ffmpeg can probe, and the swarm may crawl at ~50 KB/s.
+   * Give up only when nothing has arrived for this long and no cues exist yet.
+   */
+  private static final long SIDECAR_STALL_MS = 4L * 60L * 1000L;
+  private static final int SIDECAR_PREPARE_PIECES = 2;
 
   private static TorrentEngine instance;
 
@@ -121,6 +128,22 @@ public final class TorrentEngine {
     String fileNameHint,
     boolean preferJapaneseAudio
   ) {
+    return stream(uri, keepOthers, fileIndex, fileNameHint, preferJapaneseAudio, false);
+  }
+
+  /**
+   * @param subtitleOnly sidecar torrent used only for its softsubs: returns as soon as the
+   *   torrent is added (no 12 MB / 180 s readiness wait), so a slow swarm neither blocks the
+   *   engine nor gets deleted while it is still making progress.
+   */
+  public synchronized StreamResult stream(
+    String uri,
+    boolean keepOthers,
+    Integer fileIndex,
+    String fileNameHint,
+    boolean preferJapaneseAudio,
+    boolean subtitleOnly
+  ) {
     if (uri == null || uri.trim().isEmpty()) {
       return StreamResult.fail("Missing torrent URI");
     }
@@ -179,13 +202,25 @@ public final class TorrentEngine {
         return StreamResult.fail("Source failed to start");
       }
 
-      prioritizeOpening(handle, selected);
+      prioritizeOpening(handle, selected, subtitleOnly ? SIDECAR_PREPARE_PIECES : 0);
 
       File videoFile = new File(saveDir, info.files().filePath(selected));
       String displayName = torrentDisplayName(info, selected, trimmed);
       ActiveTorrent slot = new ActiveTorrent(hash, displayName, handle, selected, videoFile, info.files().fileSize(selected));
+      if (subtitleOnly) {
+        slot.subtitleOnly = true;
+        slot.prepareCount = Math.min(slot.prepareCount, SIDECAR_PREPARE_PIECES);
+      }
       active.put(hash, slot);
       session.addListener(slot);
+
+      if (subtitleOnly) {
+        // Header pieces may already be on disk (reused cache dir).
+        slot.recheckPrepared();
+        watchSubtitleSidecar(slot);
+        slot.kickSubtitleExtract(httpServer.baseUrl());
+        return StreamResult.ok(slot, httpServer.baseUrl(), preferJapaneseAudio);
+      }
 
       boolean ready = waitUntilReady(slot, READY_TIMEOUT_SEC);
       if (!ready) {
@@ -276,7 +311,8 @@ public final class TorrentEngine {
 
   private void removeSlot(ActiveTorrent slot) {
     try {
-      if (httpServer != null) httpServer.cancelRemux();
+      // A subtitle-only sidecar never owns the remux pipe: don't cut the playing video.
+      if (httpServer != null && !slot.subtitleOnly) httpServer.cancelRemux();
     } catch (Throwable ignored) {}
     boolean complete = false;
     long downloaded = 0;
@@ -526,7 +562,42 @@ public final class TorrentEngine {
     return session.find(info.infoHash());
   }
 
-  private void prioritizeOpening(TorrentHandle handle, int fileIndex) {
+  /**
+   * Watch a subtitle-only sidecar: while bytes keep arriving it stays; once nothing has
+   * arrived for SIDECAR_STALL_MS and no cues exist yet, report "no subtitle track" so the
+   * player moves on to the next release (a manual Retry tries it again).
+   */
+  private void watchSubtitleSidecar(ActiveTorrent slot) {
+    final long[] lastDone = { slot.downloadedBytes() };
+    final long[] lastProgressAt = { System.currentTimeMillis() };
+    final java.util.concurrent.ScheduledFuture<?>[] task = new java.util.concurrent.ScheduledFuture<?>[1];
+    task[0] = sweeper.scheduleWithFixedDelay(() -> {
+      try {
+        if (!slot.isHandleAlive() || slot.readySubtitleVtt() != null || slot.subtitleMissing.get()) {
+          if (task[0] != null) task[0].cancel(false);
+          return;
+        }
+        long done = slot.downloadedBytes();
+        long now = System.currentTimeMillis();
+        if (done > lastDone[0]) {
+          lastDone[0] = done;
+          lastProgressAt[0] = now;
+          slot.touch();
+          return;
+        }
+        if (now - lastProgressAt[0] >= SIDECAR_STALL_MS && slot.partialSubtitleVtt() == null) {
+          Log.i(TAG, "subtitle sidecar stalled, giving up " + slot.infoHash);
+          slot.subtitleMissing.set(true);
+          if (task[0] != null) task[0].cancel(false);
+        }
+      } catch (Throwable t) {
+        Log.w(TAG, "sidecar watch", t);
+      }
+    }, 5, 5, TimeUnit.SECONDS);
+  }
+
+  /** @param preparePiecesOverride when > 0, only this many opening pieces are urgent. */
+  private void prioritizeOpening(TorrentHandle handle, int fileIndex, int preparePiecesOverride) {
     try {
       TorrentInfo ti = handle.torrentFile();
       if (ti == null) return;
@@ -538,7 +609,9 @@ public final class TorrentEngine {
 
       int firstPiece = (int) (fileOffset / pieceLength);
       int lastPiece = (int) ((fileOffset + fileSize - 1) / pieceLength);
-      int preparePieces = (int) Math.max(2, Math.min(20, PREPARE_BYTES / pieceLength));
+      int preparePieces = preparePiecesOverride > 0
+        ? preparePiecesOverride
+        : (int) Math.max(2, Math.min(20, PREPARE_BYTES / pieceLength));
 
       for (int i = firstPiece; i <= lastPiece; i++) {
         handle.piecePriority(i, Priority.IGNORE);
@@ -666,6 +739,8 @@ public final class TorrentEngine {
     final AtomicBoolean subtitleExtracting = new AtomicBoolean(false);
     /** Last time every retry failed; /subs.vtt polls may re-kick after a cool-down. */
     volatile long subtitleGaveUpAt;
+    /** Sidecar torrent used only for softsubs (no remux competes for the opening pieces). */
+    volatile boolean subtitleOnly;
 
     ActiveTorrent(String infoHash, String name, TorrentHandle handle, int fileIndex, File videoFile, long length) {
       this.infoHash = infoHash;
@@ -705,7 +780,8 @@ public final class TorrentEngine {
             Thread.sleep(500);
           }
           // Let remux claim the opening pieces first, then probe embedded softsubs.
-          Thread.sleep(6_000);
+          // Subtitle-only sidecars have no remux: probe straight away.
+          if (!subtitleOnly) Thread.sleep(6_000);
           // Read errors / truncated streams (slow swarm) are retried with backoff; only a
           // probe that really sees no usable dialogue track marks the release as missing.
           for (int attempt = 0; attempt <= SUB_RETRY_BACKOFF_MS.length; attempt++) {
@@ -734,7 +810,11 @@ public final class TorrentEngine {
             if (attempt >= SUB_RETRY_BACKOFF_MS.length) break;
             long waitMs = SUB_RETRY_BACKOFF_MS[attempt];
             Log.i(TAG, "subtitle extract retry " + (attempt + 1) + " in " + waitMs + "ms for " + infoHash);
-            Thread.sleep(waitMs);
+            // Sleep in slices so a stopped sidecar frees the (single) subtitle worker quickly.
+            for (long slept = 0; slept < waitMs; slept += 1000) {
+              if (!active.containsKey(infoHash)) return;
+              Thread.sleep(Math.min(1000, waitMs - slept));
+            }
           }
           // Still failing: leave missing=false (player keeps polling "not ready") and allow
           // a later /subs.vtt poll to start again after a cool-down.
@@ -911,6 +991,21 @@ public final class TorrentEngine {
         }
       } catch (Throwable ignored) {}
       return new StatusRow(infoHash, name, progress, speed, peers, downloaded, length);
+    }
+
+    /** Re-evaluate the opening window from pieces already on disk. */
+    void recheckPrepared() {
+      if (havePieces == null) return;
+      for (int p = firstPiece; p <= lastPiece; p++) {
+        try {
+          if (handle.havePiece(p)) {
+            markPiece(p);
+            if (prepared.get()) return;
+          }
+        } catch (Throwable ignored) {
+          return;
+        }
+      }
     }
 
     private void markPiece(int pieceIndex) {

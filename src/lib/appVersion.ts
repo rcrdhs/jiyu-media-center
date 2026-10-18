@@ -12,6 +12,11 @@ export const APP_VERSION_LABEL = `v${APP_VERSION}`
 /** Short milestone log — newest first — so progress is visible in-app. */
 export const APP_RELEASES: ReadonlyArray<{ version: string; summary: string }> = [
   {
+    version: '0.3.78',
+    summary:
+      'Windows updates install again (the installer no longer ships Android files that broke updating, and cleans up the old ones), with updater logging; desktop anime subtitles from Nyaa load much faster, no more false \'no subtitle track\', and the player says Loading subtitles… until the first lines arrive; leftover torrent downloads are cleaned up automatically; Android: Nyaa subtitles are more patient on slow connections and Retry Subs tries every release again',
+  },
+  {
     version: '0.3.77',
     summary:
       'Anime subtitles: picks Multi-Subs releases instead of dubs, skips signs-only tracks, Android shows subs while the episode downloads and retries instead of giving up, and the player keeps looking for subtitles in the background (Looking for subtitles… / Retry Subs)',

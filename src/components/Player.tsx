@@ -102,6 +102,8 @@ import {
   resolveNyaaEpisodePlay,
   isNyaaSubtitleSidecarPending,
   markNyaaSubtitleSourceUnusable,
+  onNyaaSubtitleSidecarSettled,
+  resetNyaaSubtitleSidecarFailures,
   resolveNyaaSubtitleSidecar,
   shouldTryNyaaForItem,
 } from '../lib/nyaa'
@@ -132,6 +134,7 @@ import {
 } from '../lib/androidCast'
 import {
   isAndroidTorrentAvailable,
+  isDesktopTorrentAvailable,
   isTorrentPlaybackAvailable,
   torrentEnsureDownloading,
   torrentStop,
@@ -235,6 +238,18 @@ function isRemuxPlaybackUrl(url: string | undefined): boolean {
  * probe/extract, so keep looking for ~5 minutes before showing "No subtitles".
  */
 const SIDECAR_RETRY_WINDOW_MS = 5 * 60 * 1000
+/** Android sidecars crawl on slow phone links (~50 KB/s): keep looking longer. */
+const SIDECAR_RETRY_WINDOW_ANDROID_MS = 10 * 60 * 1000
+/** Between background sidecar checks. A sidecar torrent settling wakes the wait early. */
+const SIDECAR_RETRY_BACKOFF_DESKTOP_MS = [3_000, 4_000, 5_000]
+const SIDECAR_RETRY_BACKOFF_ANDROID_MS = [10_000, 20_000, 30_000]
+
+/**
+ * Episodes where Wyzie + OpenSubtitles already came back empty this session, so a
+ * failed Nyaa release (URL dropped -> effect re-runs) goes straight to the next release.
+ * Value = retry tick when recorded; a manual Subs retry (new tick) looks them up again.
+ */
+const softSubsMissByEpisode = new Map<string, number>()
 
 /** WebTorrent / remux URLs die as soon as torrentStop() removes the swarm. */
 function isEphemeralLocalStreamUrl(url: string | undefined): boolean {
@@ -612,6 +627,8 @@ export function Player({
   const sidecarWakeRef = useRef<(() => void) | null>(null)
   /** Bumped by a manual retry to re-run the whole subtitle search for this episode. */
   const [sidecarRetryTick, setSidecarRetryTick] = useState(0)
+  /** Last retry tick that already cleared the failed-release state. */
+  const sidecarResetTickRef = useRef(0)
   /** After Wyzie free-plan ad dump, skip Wyzie and prefer Nyaa softsubs. */
   const skipWyzieSubsRef = useRef(false)
   const hintTimer = useRef<number | null>(null)
@@ -1857,7 +1874,9 @@ export function Player({
             }
             if (cues.length >= latestCount) {
               if (cues.length > latestCount) {
+                const firstCues = latestCount === 0
                 latestCount = cues.length
+                if (firstCues && localExtract && !cancelled) flash('Subtitles ready')
                 lastCueEnd = cues.reduce((max, cue) => Math.max(max, cue.end), 0)
                 if (!cancelled) {
                   setSubtitleCues(cues)
@@ -1939,7 +1958,16 @@ export function Player({
             }
             if (/not ready|timed out|read failed|could not read/i.test(httpBody)) {
               await new Promise((resolve) =>
-                window.setTimeout(resolve, sidecar && !localExtract ? 800 : localExtract ? 2000 : 5000),
+                window.setTimeout(
+                  resolve,
+                  sidecar && !localExtract
+                    ? 800
+                    : localExtract
+                      ? isDesktopTorrentAvailable()
+                        ? 800
+                        : 2000
+                      : 5000,
+                ),
               )
               continue
             }
@@ -1949,7 +1977,10 @@ export function Player({
         }
         // Keep polling even after "done" if cues look short for a long title —
         // progressive extract often resumes after an early EOF.
-        await new Promise((resolve) => window.setTimeout(resolve, sidecar && !localExtract ? 700 : 2000))
+        // Local extract: fast until the first cues land, then every 2s while it grows.
+        await new Promise((resolve) =>
+          window.setTimeout(resolve, sidecar && (!localExtract || latestCount === 0) ? 700 : 2000),
+        )
       }
       if (!cancelled && latestCount === 0) setSubsStatus('missing')
     }
@@ -2056,7 +2087,8 @@ export function Player({
 
     ;(async () => {
       try {
-        if (knownTmdbId || canTitleLookup) {
+        const softMissKey = `${knownTmdbId || showName}|${season}|${episode}|${skipWyzieSubsRef.current ? 'nw' : 'w'}`
+        if ((knownTmdbId || canTitleLookup) && softSubsMissByEpisode.get(softMissKey) !== sidecarRetryTick) {
           flash('Finding subtitles…')
           const soft = await ensureEpisodeSoftSubtitles({
             title: showName,
@@ -2087,6 +2119,7 @@ export function Player({
             settled = true
             return
           }
+          softSubsMissByEpisode.set(softMissKey, sidecarRetryTick)
         }
         if (!canNyaa) {
           giveUp(false)
@@ -2094,6 +2127,11 @@ export function Player({
         }
         flash('Finding subtitles…')
         const sidecarOpts = { showTitle: showName, season, episode }
+        // Manual Retry Subs (tick bumped): try releases that failed or were unusable again.
+        if (sidecarRetryTick > 0 && sidecarRetryTick !== sidecarResetTickRef.current) {
+          sidecarResetTickRef.current = sidecarRetryTick
+          resetNyaaSubtitleSidecarFailures(sidecarOpts)
+        }
         let subs = await resolveNyaaSubtitleSidecar(sidecarOpts)
         if (cancelled || movySubsSidecarRef.current !== sidecarKey) return
         if (!subs?.subtitleUrl && isNyaaSubtitleSidecarPending(sidecarOpts)) {
@@ -2101,15 +2139,25 @@ export function Player({
           // Keep checking in the background; the torrent is reused, never restarted.
           setSubsSearch('searching')
           flash('Looking for subtitles…')
-          const backoffMs = [10_000, 20_000, 30_000]
-          const deadline = Date.now() + SIDECAR_RETRY_WINDOW_MS
-          for (let attempt = 0; Date.now() < deadline; attempt++) {
-            await sleepWakeable(backoffMs[Math.min(attempt, backoffMs.length - 1)]!)
-            if (cancelled || movySubsSidecarRef.current !== sidecarKey) return
-            subs = await resolveNyaaSubtitleSidecar({ ...sidecarOpts, budgetMs: 8_000 })
-            if (cancelled || movySubsSidecarRef.current !== sidecarKey) return
-            if (subs?.subtitleUrl) break
-            if (!isNyaaSubtitleSidecarPending(sidecarOpts)) break
+          const backoffMs = isDesktopTorrentAvailable()
+            ? SIDECAR_RETRY_BACKOFF_DESKTOP_MS
+            : SIDECAR_RETRY_BACKOFF_ANDROID_MS
+          const deadline =
+            Date.now() +
+            (isDesktopTorrentAvailable() ? SIDECAR_RETRY_WINDOW_MS : SIDECAR_RETRY_WINDOW_ANDROID_MS)
+          // A release torrent becoming ready (or failing) wakes the wait immediately.
+          const unsubscribeSettle = onNyaaSubtitleSidecarSettled(() => sidecarWakeRef.current?.())
+          try {
+            for (let attempt = 0; Date.now() < deadline; attempt++) {
+              await sleepWakeable(backoffMs[Math.min(attempt, backoffMs.length - 1)]!)
+              if (cancelled || movySubsSidecarRef.current !== sidecarKey) return
+              subs = await resolveNyaaSubtitleSidecar({ ...sidecarOpts, budgetMs: 8_000 })
+              if (cancelled || movySubsSidecarRef.current !== sidecarKey) return
+              if (subs?.subtitleUrl) break
+              if (!isNyaaSubtitleSidecarPending(sidecarOpts)) break
+            }
+          } finally {
+            unsubscribeSettle()
           }
         }
         if (!subs?.subtitleUrl) {
@@ -2118,7 +2166,16 @@ export function Player({
           return
         }
         settled = true
-        applySubs(subs.subtitleUrl, subs.subtitleKind, 'Subtitles ready')
+        // Local torrent extract: the URL exists before ffmpeg has produced cues, so don't
+        // claim "ready" yet; loadSubtitles flashes it when the first cues arrive.
+        const localExtractUrl =
+          subs.subtitleKind !== 'file' &&
+          /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//i.test(subs.subtitleUrl)
+        applySubs(
+          subs.subtitleUrl,
+          subs.subtitleKind,
+          localExtractUrl ? 'Loading subtitles…' : 'Subtitles ready',
+        )
       } catch {
         if (cancelled || movySubsSidecarRef.current !== sidecarKey) return
         giveUp(true)

@@ -15,6 +15,8 @@ export type TorrentStreamOptions = {
   preferJapaneseAudio?: boolean
   category?: string
   anime?: boolean
+  /** Sidecar torrent used only for its softsubs (Android: no 12 MB / 180 s readiness wait). */
+  subtitleOnly?: boolean
 }
 
 type NativeTorrentStreamer = {
@@ -24,6 +26,7 @@ type NativeTorrentStreamer = {
     fileIndex?: number
     fileName?: string
     preferJapaneseAudio?: boolean
+    subtitleOnly?: boolean
   }) => Promise<TorrentStreamResult>
   stop: (options?: { infoHash?: string }) => Promise<{ ok: boolean; error?: string }>
   status: (options?: { infoHash?: string }) => Promise<{
@@ -81,6 +84,7 @@ export async function torrentStream(
         fileIndex: options?.fileIndex,
         fileName: options?.fileName,
         preferJapaneseAudio,
+        subtitleOnly: options?.subtitleOnly,
       })
     } catch (err) {
       return {

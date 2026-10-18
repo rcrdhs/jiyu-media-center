@@ -17,7 +17,7 @@ import {
   type TorrentResult,
 } from './torrents'
 import { getConnectionDownlinkMbps, resolveRequestedQuality } from './viewingQuality'
-import { isTorrentPlaybackAvailable, torrentStream } from './torrentBridge'
+import { isDesktopTorrentAvailable, isTorrentPlaybackAvailable, torrentStream } from './torrentBridge'
 import { isNativeHttpPlatform, nativeFetchText } from './nativeHttp'
 
 export const NYAA_ORIGIN = 'https://nyaa.si'
@@ -698,6 +698,10 @@ export async function searchNyaaAnimeForShelf(query: string): Promise<
 
 const NYAA_SUB_SIDECAR_TIMEOUT_MS = 18_000
 const NYAA_SUB_SIDECAR_BUDGET_MS = 22_000
+/** Desktop: start the next release in parallel once the first is this slow (0.3.60 behaviour). */
+const NYAA_SUB_SIDECAR_STAGGER_MS = 15_000
+/** Desktop runs two releases at once; Android (phone bandwidth) runs one at a time. */
+const NYAA_SUB_SIDECAR_DESKTOP_PARALLEL = 2
 
 /**
  * English-dub-only release ("[English Dub]", "Dubbed", "ENG DUB"): its English
@@ -714,13 +718,10 @@ export function isDubOnlyRelease(title: string): boolean {
 export function prefersSoftsubRelease(title: string): number {
   const t = String(title || '')
   let score = 0
+  // Strong signals only. Small bonuses (Dual, JAP, group, 1080p) used to outrank a
+  // higher-seeded Multi-Subs release and sent the sidecar to a slow swarm first.
   if (/\bmulti[\s._-]?subs?\b/i.test(t) || /\bm[\s._-]?subs\b/i.test(t)) score += 40
-  if (/\bsoft[\s._-]?sub/i.test(t)) score += 35
-  if (/\bsubs?\b/i.test(t)) score += 10
-  if (/\b(dual[\s._-]?audio|dual)\b/i.test(t)) score += 5
-  if (/\b(jap|jpn|japanese)\b/i.test(t)) score += 8
-  if (/\b(1080p|720p)\b/i.test(t)) score += 3
-  if (releaseGroupBoost(t) > 0) score += 4
+  else if (/\bsoft[\s._-]?sub/i.test(t)) score += 35
   if (isDubOnlyRelease(t)) score -= 100
   return score
 }
@@ -759,10 +760,15 @@ export function markNyaaSubtitleSourceUnusable(subtitleUrl: string): string | nu
   return sidecarHashBySubtitleUrl.has(key) ? hash : null
 }
 
-/** Order sidecar candidates by their own release titles (softsub-first, no dub-only). */
+/**
+ * Order sidecar candidates: the episode search's own pick (candidates[0]) first, then
+ * the rest by seeders; the softsub signal only breaks seeder ties. Dub-only releases
+ * and releases already found to have no usable track are dropped.
+ */
 export function rankNyaaSubtitleCandidates(
   candidates: Array<{ uri: string; title?: string; seeders?: number }>,
 ): Array<{ uri: string; title: string; seeders: number; score: number }> {
+  const primaryUri = candidates[0]?.uri
   return candidates
     .map((c) => {
       const hash = magnetInfoHash(c.uri) || ''
@@ -774,7 +780,12 @@ export function rankNyaaSubtitleCandidates(
     .filter((c, i, arr) => Boolean(c.uri) && arr.findIndex((x) => x.uri === c.uri) === i)
     .filter((c) => !(c.hash && unusableSubtitleHashes.has(c.hash)))
     .filter((c) => !isDubOnlyRelease(c.title))
-    .sort((a, b) => b.score - a.score || b.seeders - a.seeders)
+    .sort(
+      (a, b) =>
+        Number(b.uri === primaryUri) - Number(a.uri === primaryUri) ||
+        b.seeders - a.seeders ||
+        b.score - a.score,
+    )
     .map(({ uri, title, seeders, score }) => ({ uri, title, seeders, score }))
 }
 
@@ -793,6 +804,16 @@ type SidecarStream = {
   startedAt: number
 }
 const sidecarStreams = new Map<string, SidecarStream>()
+/** Notified whenever any sidecar torrent start settles (ready or failed). */
+const sidecarSettleListeners = new Set<() => void>()
+
+/** Subscribe to sidecar settles so the player can attach subs the moment they exist. */
+export function onNyaaSubtitleSidecarSettled(listener: () => void): () => void {
+  sidecarSettleListeners.add(listener)
+  return () => {
+    sidecarSettleListeners.delete(listener)
+  }
+}
 /** Ranked candidate releases per episode, so background retries don't re-search Nyaa. */
 const sidecarCandidatesByEpisode = new Map<
   string,
@@ -813,7 +834,7 @@ function startSidecarStream(uri: string): SidecarStream {
     return existing
   }
   const entry: SidecarStream = { promise: Promise.resolve(), done: false, startedAt: Date.now() }
-  entry.promise = torrentStream(uri, { keepOthers: true })
+  entry.promise = torrentStream(uri, { keepOthers: true, subtitleOnly: true })
     .then((result) => {
       const subtitleUrl = result.ok ? (result.subtitleUrl ?? result.playlist?.[0]?.subtitleUrl) : undefined
       if (subtitleUrl) {
@@ -828,6 +849,13 @@ function startSidecarStream(uri: string): SidecarStream {
     })
     .finally(() => {
       entry.done = true
+      for (const listener of [...sidecarSettleListeners]) {
+        try {
+          listener()
+        } catch {
+          /* ignore */
+        }
+      }
     })
   sidecarStreams.set(uri, entry)
   return entry
@@ -855,12 +883,38 @@ async function sidecarCandidateUris(
       ],
     }
     sidecarCandidatesByEpisode.set(key, cached)
-    if (Date.now() - started > budgetMs) return []
+    if (Date.now() - started > budgetMs) {
+      return []
+    }
   }
   // Re-rank every time: releases marked unusable since the last call drop out.
-  return rankNyaaSubtitleCandidates(cached.candidates)
+  const ranked = rankNyaaSubtitleCandidates(cached.candidates)
     .map((c) => c.uri)
     .slice(0, NYAA_SUB_SIDECAR_MAX_RELEASES)
+  return ranked
+}
+
+/**
+ * Manual "Retry Subs": forget which releases failed or were found unusable for this
+ * episode so they are tried again (a slow swarm may have caught up since). Releases
+ * still starting keep running and are reused.
+ */
+export function resetNyaaSubtitleSidecarFailures(options: {
+  showTitle: string
+  season: number
+  episode: number
+}): void {
+  const cached = sidecarCandidatesByEpisode.get(sidecarEpisodeKey(options))
+  if (!cached) return
+  for (const c of cached.candidates) {
+    const hash = magnetInfoHash(c.uri)
+    if (hash) unusableSubtitleHashes.delete(hash)
+    const s = sidecarStreams.get(c.uri)
+    if (s?.done) {
+      if (s.subtitleUrl) sidecarHashBySubtitleUrl.delete(subtitleUrlKey(s.subtitleUrl))
+      sidecarStreams.delete(c.uri)
+    }
+  }
 }
 
 /**
@@ -890,7 +944,7 @@ export function isNyaaSubtitleSidecarPending(options: {
  * Used when Movy (or another direct HLS source) has no subtitle track.
  * Hard budget so dead swarms don't hang the player toast; a release that is still
  * starting keeps running and later calls (background retries) reuse it instead of
- * restarting the torrent. At most one release starts at a time.
+ * restarting the torrent. Desktop runs two releases in parallel; Android one at a time.
  */
 export async function resolveNyaaSubtitleSidecar(options: {
   showTitle: string
@@ -903,8 +957,8 @@ export async function resolveNyaaSubtitleSidecar(options: {
 
   const started = Date.now()
   const budgetMs = Math.max(1000, options.budgetMs ?? NYAA_SUB_SIDECAR_BUDGET_MS)
-  // Prefer Multi-Sub / SoftSub / JAP magnets ranked by each release's own title;
-  // skip English-dub-only packs (Signs-only subs) and releases already found unusable.
+  // Episode pick first, then by seeders (Multi-Subs/SoftSub break ties); skip
+  // English-dub-only packs (Signs-only subs) and releases already found unusable.
   const uris = await sidecarCandidateUris(options, started, budgetMs)
   if (!uris || uris.length === 0) return null
 
@@ -915,29 +969,51 @@ export async function resolveNyaaSubtitleSidecar(options: {
     }
   }
 
-  for (const uri of uris) {
-    const known = sidecarStreams.get(uri)
-    if (known?.done && !known.subtitleUrl) continue // failed release: never restart
-    // Only one release downloading at a time (phone bandwidth): don't start another
-    // while an earlier candidate is still starting.
-    const pendingOther = uris.some((u) => u !== uri && sidecarStreams.get(u)?.done === false)
-    if (!known && pendingOther) break
+  // Desktop: up to two releases at once, the second starting once the first has had
+  // ~15s (like 0.3.60). Android: one at a time (phone bandwidth). A release that is
+  // still starting keeps running after this call returns and is reused next time.
+  const maxParallel = isDesktopTorrentAvailable() ? NYAA_SUB_SIDECAR_DESKTOP_PARALLEL : 1
+  for (;;) {
+    for (const uri of uris) {
+      const s = sidecarStreams.get(uri)
+      if (s?.done && s.subtitleUrl && Date.now() - s.startedAt <= SIDECAR_SUCCESS_TTL_MS) {
+        return { subtitleUrl: s.subtitleUrl, subtitleKind: s.subtitleKind }
+      }
+    }
     const left = budgetMs - (Date.now() - started)
-    if (left < 1000) break
-    const entry = startSidecarStream(uri)
-    const attemptMs = Math.min(NYAA_SUB_SIDECAR_TIMEOUT_MS, left)
+    if (left < 1000) return null
+    const pending = uris.map((u) => sidecarStreams.get(u)).filter((e): e is SidecarStream => Boolean(e && !e.done))
+    // Failed releases (done without a URL) are never restarted.
+    const untried = uris.filter((u) => {
+      const s = sidecarStreams.get(u)
+      return !s || Boolean(s.done && s.subtitleUrl) // stale success: startSidecarStream restarts it
+    })
+    const newestStart = pending.reduce((max, e) => Math.max(max, e.startedAt), 0)
+    const sinceNewest = newestStart ? Date.now() - newestStart : Infinity
+    if (
+      untried.length > 0 &&
+      pending.length < maxParallel &&
+      (pending.length === 0 || sinceNewest >= NYAA_SUB_SIDECAR_STAGGER_MS)
+    ) {
+      startSidecarStream(untried[0]!)
+      continue
+    }
+    if (pending.length === 0) return null // every candidate settled without subs
+    const canStartMore = untried.length > 0 && pending.length < maxParallel
+    const waitMs = Math.min(
+      left,
+      canStartMore ? Math.max(250, NYAA_SUB_SIDECAR_STAGGER_MS - sinceNewest) : NYAA_SUB_SIDECAR_TIMEOUT_MS,
+    )
     let timer = 0
     await Promise.race([
-      entry.promise,
+      ...pending.map((e) => e.promise),
       new Promise<void>((resolve) => {
-        timer = window.setTimeout(resolve, attemptMs)
+        timer = window.setTimeout(resolve, waitMs)
       }),
     ])
     window.clearTimeout(timer)
-    if (entry.done && entry.subtitleUrl) {
-      return { subtitleUrl: entry.subtitleUrl, subtitleKind: entry.subtitleKind }
-    }
-    if (!entry.done) break // still starting: leave it running for the next retry
+    // One-at-a-time (Android): a release still starting after its attempt window is
+    // left running for the next background retry instead of starting another.
+    if (!canStartMore && pending.every((e) => !e.done) && maxParallel === 1) return null
   }
-  return null
 }

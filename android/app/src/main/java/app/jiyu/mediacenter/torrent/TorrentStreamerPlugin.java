@@ -40,11 +40,12 @@ public class TorrentStreamerPlugin extends Plugin {
     Integer fileIndex = call.getInt("fileIndex");
     String fileName = call.getString("fileName");
     boolean preferJapaneseAudio = Boolean.TRUE.equals(call.getBoolean("preferJapaneseAudio", false));
+    boolean subtitleOnly = Boolean.TRUE.equals(call.getBoolean("subtitleOnly", false));
 
     executor.execute(() -> {
       try {
         TorrentEngine.StreamResult result = TorrentEngine.get(getContext())
-          .stream(uri, keepOthers, fileIndex, fileName, preferJapaneseAudio);
+          .stream(uri, keepOthers, fileIndex, fileName, preferJapaneseAudio, subtitleOnly);
         JSObject out = new JSObject();
         out.put("ok", result.ok);
         if (!result.ok) {
