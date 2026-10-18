@@ -51,6 +51,9 @@ public final class TorrentEngine {
   private static final long PREPARE_BYTES = 12L * 1024L * 1024L;
   private static final int MAGNET_TIMEOUT_SEC = 60;
   private static final int READY_TIMEOUT_SEC = 180;
+  /** Backoff between subtitle extract retries after read errors. */
+  private static final long[] SUB_RETRY_BACKOFF_MS = {15_000L, 30_000L, 60_000L, 120_000L};
+  private static final long SUB_REKICK_COOLDOWN_MS = 60_000L;
   /** Unfinished downloads are removed after this long. Finished ones go immediately. */
   private static final long PARTIAL_TTL_MS = 3L * 60L * 60L * 1000L;
 
@@ -658,6 +661,11 @@ public final class TorrentEngine {
     final AtomicBoolean subtitleExtractStarted = new AtomicBoolean(false);
     final AtomicBoolean subtitleMissing = new AtomicBoolean(false);
     volatile File subtitleVtt;
+    /** VTT being written by a running ffmpeg extract (served progressively, done=0). */
+    volatile File subtitlePartial;
+    final AtomicBoolean subtitleExtracting = new AtomicBoolean(false);
+    /** Last time every retry failed; /subs.vtt polls may re-kick after a cool-down. */
+    volatile long subtitleGaveUpAt;
 
     ActiveTorrent(String infoHash, String name, TorrentHandle handle, int fileIndex, File videoFile, long length) {
       this.infoHash = infoHash;
@@ -677,6 +685,7 @@ public final class TorrentEngine {
       if (!mayHaveSoftSubs(videoFile != null ? videoFile.getName() : "")) return;
       if (subtitleVtt != null && subtitleVtt.isFile() && subtitleVtt.length() > 16) return;
       if (subtitleMissing.get()) return;
+      if (subtitleGaveUpAt > 0 && System.currentTimeMillis() - subtitleGaveUpAt < SUB_REKICK_COOLDOWN_MS) return;
       if (!subtitleExtractStarted.compareAndSet(false, true)) return;
       final String rawUrl = baseUrl + "/stream/" + infoHash;
       final File out = new File(videoFile.getParentFile(), "jiyu-subs-" + infoHash + ".vtt");
@@ -697,22 +706,98 @@ public final class TorrentEngine {
           }
           // Let remux claim the opening pieces first, then probe embedded softsubs.
           Thread.sleep(6_000);
-          if (!active.containsKey(infoHash)) return;
-          boolean ok = TorrentSubtitleExtractor.extractBestEnglish(appContext, rawUrl, out);
-          if (ok) {
-            subtitleVtt = out;
-            subtitleMissing.set(false);
-          } else {
-            subtitleMissing.set(true);
+          // Read errors / truncated streams (slow swarm) are retried with backoff; only a
+          // probe that really sees no usable dialogue track marks the release as missing.
+          for (int attempt = 0; attempt <= SUB_RETRY_BACKOFF_MS.length; attempt++) {
+            if (!active.containsKey(infoHash)) return;
+            subtitlePartial = out;
+            subtitleExtracting.set(true);
+            TorrentSubtitleExtractor.Result result;
+            try {
+              result = TorrentSubtitleExtractor.extractBestEnglish(appContext, rawUrl, out);
+            } finally {
+              subtitleExtracting.set(false);
+            }
+            if (result == TorrentSubtitleExtractor.Result.OK) {
+              subtitleVtt = out;
+              subtitlePartial = null;
+              subtitleMissing.set(false);
+              subtitleGaveUpAt = 0;
+              return;
+            }
+            if (result == TorrentSubtitleExtractor.Result.NO_TRACKS
+              || result == TorrentSubtitleExtractor.Result.NO_USABLE) {
+              subtitlePartial = null;
+              subtitleMissing.set(true);
+              return;
+            }
+            if (attempt >= SUB_RETRY_BACKOFF_MS.length) break;
+            long waitMs = SUB_RETRY_BACKOFF_MS[attempt];
+            Log.i(TAG, "subtitle extract retry " + (attempt + 1) + " in " + waitMs + "ms for " + infoHash);
+            Thread.sleep(waitMs);
           }
+          // Still failing: leave missing=false (player keeps polling "not ready") and allow
+          // a later /subs.vtt poll to start again after a cool-down.
+          subtitleGaveUpAt = System.currentTimeMillis();
+          subtitleExtractStarted.set(false);
         } catch (InterruptedException e) {
           Thread.currentThread().interrupt();
+          subtitleExtracting.set(false);
           subtitleExtractStarted.set(false);
         } catch (Throwable t) {
           Log.w(TAG, "subtitle extract failed", t);
-          subtitleMissing.set(true);
+          subtitleExtracting.set(false);
+          subtitleGaveUpAt = System.currentTimeMillis();
+          subtitleExtractStarted.set(false);
         }
       });
+    }
+
+    /** VTT written so far by a running extract, or null. */
+    File partialSubtitleVtt() {
+      File f = subtitlePartial;
+      if (f != null && f.isFile() && f.length() > 16) return f;
+      return null;
+    }
+
+    boolean isHandleAlive() {
+      try {
+        return active.get(infoHash) == this && handle != null && handle.isValid();
+      } catch (Throwable t) {
+        return false;
+      }
+    }
+
+    long downloadedBytes() {
+      try {
+        TorrentStatus st = handle.status();
+        return st != null ? st.totalDone() : 0;
+      } catch (Throwable t) {
+        return 0;
+      }
+    }
+
+    /**
+     * Wait for a byte range as long as the swarm keeps making progress. A fixed timeout
+     * aborted the HTTP body mid-file ("Stream ends prematurely") on slow swarms.
+     * Gives up only when the torrent is gone or nothing arrived for {@code stallMs}.
+     */
+    boolean waitForRangeWhileProgressing(long fileByteOffset, int count, long stallMs) {
+      long lastDone = downloadedBytes();
+      long lastProgressAt = System.currentTimeMillis();
+      while (true) {
+        if (waitForRange(fileByteOffset, count, 15_000)) return true;
+        if (Thread.currentThread().isInterrupted() || !isHandleAlive()) return false;
+        long done = downloadedBytes();
+        long now = System.currentTimeMillis();
+        if (done > lastDone) {
+          lastDone = done;
+          lastProgressAt = now;
+        } else if (now - lastProgressAt >= stallMs) {
+          return false;
+        }
+        touch();
+      }
     }
 
     File readySubtitleVtt() {
@@ -872,7 +957,14 @@ public final class TorrentEngine {
     @Override
     public void alert(Alert<?> alert) {
       if (alert.type() == AlertType.PIECE_FINISHED) {
-        markPiece(((PieceFinishedAlert) alert).pieceIndex());
+        PieceFinishedAlert finished = (PieceFinishedAlert) alert;
+        // Every slot listens to the whole session: ignore other torrents' pieces, or
+        // hasBytes() can report bytes that were never downloaded for this file.
+        try {
+          TorrentHandle from = finished.handle();
+          if (from != null && !infoHash.equalsIgnoreCase(from.infoHash().toHex())) return;
+        } catch (Throwable ignored) {}
+        markPiece(finished.pieceIndex());
       }
     }
   }

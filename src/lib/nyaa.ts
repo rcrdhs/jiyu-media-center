@@ -19,7 +19,6 @@ import {
 import { getConnectionDownlinkMbps, resolveRequestedQuality } from './viewingQuality'
 import { isTorrentPlaybackAvailable, torrentStream } from './torrentBridge'
 import { isNativeHttpPlatform, nativeFetchText } from './nativeHttp'
-import type { TorrentStreamResult } from '../types'
 
 export const NYAA_ORIGIN = 'https://nyaa.si'
 /** Anime – English-translated */
@@ -146,6 +145,7 @@ function scrapeNyaaSearchResults(html: string): TorrentResult[] {
       seeders,
       sourceLabel: 'Nyaa',
     })
+    rememberNyaaRelease(hash, title, seeders)
   }
 
   return [...byHash.values()].sort(
@@ -157,14 +157,32 @@ function scrapeNyaaSearchResults(html: string): TorrentResult[] {
  * Pick a Nyaa release for playback: seeded H.264 first (Electron remuxes HEVC slowly),
  * otherwise highest seeders. Prefer known softsub groups (e.g. XeNoX) when present.
  */
+const KNOWN_RELEASE_GROUPS =
+  /^(subsplease|erai-?raws|ember|judas|asenshi|yameii|commie|horriblesubs|gsd|fff|varyg|toonshub)$/i
+
+/**
+ * Release group from "[Group] Title ..." or scene-style "... H 264-GROUP (Alt title)".
+ * Returns '' when no group token is found.
+ */
+export function nyaaReleaseGroupName(title: string): string {
+  const t = String(title || '').trim()
+  const lead = /^\[\s*([^\]]+?)\s*\]/.exec(t)
+  if (lead) return lead[1]!.trim()
+  // Last "-GROUP" token followed by "(", "[", an extension or end of string.
+  // "WEB-DL DDP2.0" / "- S02E19" don't match (space or digit after the dash).
+  const trail = [...t.matchAll(/-([A-Za-z][A-Za-z0-9]{1,19})(?=\s*(?:[([]|\.(?:mkv|mp4)\b|$))/g)]
+  return trail.length ? trail[trail.length - 1]![1]! : ''
+}
+
 function releaseGroupBoost(title: string): number {
   const t = String(title || '')
   // User-requested / common softsub crews — boost when they appear in the pool.
   if (/\[\s*xenox\s*\]|\bxenox\b/i.test(t)) return 40
   if (
-    /\[\s*(subsplease|erai-?raws|ember|judas|asenshi|yameii|commie|horriblesubs|gsd|fff)\s*\]/i.test(
+    /\[\s*(subsplease|erai-?raws|ember|judas|asenshi|yameii|commie|horriblesubs|gsd|fff|toonshub)\s*\]/i.test(
       t,
-    )
+    ) ||
+    KNOWN_RELEASE_GROUPS.test(nyaaReleaseGroupName(t))
   ) {
     return 12
   }
@@ -681,15 +699,83 @@ export async function searchNyaaAnimeForShelf(query: string): Promise<
 const NYAA_SUB_SIDECAR_TIMEOUT_MS = 18_000
 const NYAA_SUB_SIDECAR_BUDGET_MS = 22_000
 
-function prefersSoftsubRelease(title: string): number {
+/**
+ * English-dub-only release ("[English Dub]", "Dubbed", "ENG DUB"): its English
+ * track is usually Signs & Songs only, so it is useless as a dialogue subtitle
+ * source. Dual-audio / multi-sub packs still carry full subs and are allowed.
+ * Playback picks are unaffected (dubs are fine to watch).
+ */
+export function isDubOnlyRelease(title: string): boolean {
+  const t = String(title || '')
+  if (!/\b(?:eng(?:lish)?[\s._-]*)?dub(?:bed)?\b/i.test(t)) return false
+  return !/\b(dual[\s._-]?audio|multi[\s._-]?audio|multi[\s._-]?subs?|m[\s._-]?subs)\b/i.test(t)
+}
+
+export function prefersSoftsubRelease(title: string): number {
   const t = String(title || '')
   let score = 0
-  if (/\bmulti[\s._-]?sub/i.test(t)) score += 40
+  if (/\bmulti[\s._-]?subs?\b/i.test(t) || /\bm[\s._-]?subs\b/i.test(t)) score += 40
   if (/\bsoft[\s._-]?sub/i.test(t)) score += 35
   if (/\bsubs?\b/i.test(t)) score += 10
   if (/\b(dual[\s._-]?audio|dual)\b/i.test(t)) score += 5
+  if (/\b(jap|jpn|japanese)\b/i.test(t)) score += 8
   if (/\b(1080p|720p)\b/i.test(t)) score += 3
+  if (releaseGroupBoost(t) > 0) score += 4
+  if (isDubOnlyRelease(t)) score -= 100
   return score
+}
+
+/** Scraped title/seeders per info-hash so alternates can be ranked by their own names. */
+const nyaaReleaseMeta = new Map<string, { title: string; seeders: number }>()
+function rememberNyaaRelease(hash: string, title: string, seeders: number) {
+  if (!hash || !title) return
+  nyaaReleaseMeta.set(hash, { title, seeders })
+  if (nyaaReleaseMeta.size > 2000) {
+    const first = nyaaReleaseMeta.keys().next().value
+    if (first) nyaaReleaseMeta.delete(first)
+  }
+}
+
+/** Releases whose file turned out to have no dialogue softsubs (signs-only / none). */
+const unusableSubtitleHashes = new Set<string>()
+/** subtitleUrl handed to the player -> info-hash of the sidecar torrent that produced it. */
+const sidecarHashBySubtitleUrl = new Map<string, string>()
+
+function subtitleUrlKey(url: string): string {
+  return String(url || '').replace(/([?&])(t|force)=[^&]*/g, '$1').replace(/[?&]+$/, '')
+}
+
+/**
+ * Player reports "no subtitle track" for a sidecar URL: skip that release on the
+ * next sidecar attempt. Returns the info-hash when the URL came from the sidecar.
+ */
+export function markNyaaSubtitleSourceUnusable(subtitleUrl: string): string | null {
+  const key = subtitleUrlKey(subtitleUrl)
+  const hash =
+    sidecarHashBySubtitleUrl.get(key) ||
+    (/[?&]source=([a-f0-9]{40})/i.exec(key)?.[1] || '').toLowerCase() ||
+    null
+  if (hash) unusableSubtitleHashes.add(hash)
+  return sidecarHashBySubtitleUrl.has(key) ? hash : null
+}
+
+/** Order sidecar candidates by their own release titles (softsub-first, no dub-only). */
+export function rankNyaaSubtitleCandidates(
+  candidates: Array<{ uri: string; title?: string; seeders?: number }>,
+): Array<{ uri: string; title: string; seeders: number; score: number }> {
+  return candidates
+    .map((c) => {
+      const hash = magnetInfoHash(c.uri) || ''
+      const meta = hash ? nyaaReleaseMeta.get(hash) : undefined
+      const title = meta?.title || c.title || ''
+      const seeders = meta?.seeders ?? c.seeders ?? 0
+      return { uri: c.uri, hash, title, seeders, score: prefersSoftsubRelease(title) }
+    })
+    .filter((c, i, arr) => Boolean(c.uri) && arr.findIndex((x) => x.uri === c.uri) === i)
+    .filter((c) => !(c.hash && unusableSubtitleHashes.has(c.hash)))
+    .filter((c) => !isDubOnlyRelease(c.title))
+    .sort((a, b) => b.score - a.score || b.seeders - a.seeders)
+    .map(({ uri, title, seeders, score }) => ({ uri, title, seeders, score }))
 }
 
 /**
@@ -697,60 +783,161 @@ function prefersSoftsubRelease(title: string): number {
  * Used when Movy (or another direct HLS source) has no subtitle track.
  * Hard budget — dead swarms must not hang the player toast for minutes.
  */
+/** One sidecar torrent start per magnet: a timed-out wait keeps running and is reused. */
+type SidecarStream = {
+  promise: Promise<void>
+  done: boolean
+  /** Settled with a subtitle URL. */
+  subtitleUrl?: string
+  subtitleKind?: 'file' | 'embedded'
+  startedAt: number
+}
+const sidecarStreams = new Map<string, SidecarStream>()
+/** Ranked candidate releases per episode, so background retries don't re-search Nyaa. */
+const sidecarCandidatesByEpisode = new Map<
+  string,
+  { at: number; candidates: Array<{ uri: string; title?: string; seeders?: number }> }
+>()
+const SIDECAR_CANDIDATE_TTL_MS = 30 * 60 * 1000
+/** Settled successes go stale (torrent may be swept); failures are kept so they never restart. */
+const SIDECAR_SUCCESS_TTL_MS = 30 * 60 * 1000
+const NYAA_SUB_SIDECAR_MAX_RELEASES = 3
+
+function sidecarEpisodeKey(o: { showTitle: string; season: number; episode: number }): string {
+  return `${normalizeShowKey(cleanShowDisplayTitle(o.showTitle) || o.showTitle)}|${o.season}|${o.episode}`
+}
+
+function startSidecarStream(uri: string): SidecarStream {
+  const existing = sidecarStreams.get(uri)
+  if (existing && !(existing.done && existing.subtitleUrl && Date.now() - existing.startedAt > SIDECAR_SUCCESS_TTL_MS)) {
+    return existing
+  }
+  const entry: SidecarStream = { promise: Promise.resolve(), done: false, startedAt: Date.now() }
+  entry.promise = torrentStream(uri, { keepOthers: true })
+    .then((result) => {
+      const subtitleUrl = result.ok ? (result.subtitleUrl ?? result.playlist?.[0]?.subtitleUrl) : undefined
+      if (subtitleUrl) {
+        entry.subtitleUrl = subtitleUrl
+        entry.subtitleKind = result.subtitleKind ?? result.playlist?.[0]?.subtitleKind
+        const hash = magnetInfoHash(uri)
+        if (hash) sidecarHashBySubtitleUrl.set(subtitleUrlKey(subtitleUrl), hash)
+      }
+    })
+    .catch(() => {
+      /* failed start: entry.done without subtitleUrl, never retried */
+    })
+    .finally(() => {
+      entry.done = true
+    })
+  sidecarStreams.set(uri, entry)
+  return entry
+}
+
+async function sidecarCandidateUris(
+  options: { showTitle: string; season: number; episode: number },
+  started: number,
+  budgetMs: number,
+): Promise<string[] | null> {
+  const key = sidecarEpisodeKey(options)
+  let cached = sidecarCandidatesByEpisode.get(key)
+  if (!cached || Date.now() - cached.at > SIDECAR_CANDIDATE_TTL_MS) {
+    const nyaa = await resolveNyaaEpisodePlay({
+      showTitle: options.showTitle,
+      season: options.season,
+      episode: options.episode,
+    })
+    if (!nyaa.ok) return null
+    cached = {
+      at: Date.now(),
+      candidates: [
+        { uri: nyaa.choice.torrentUri, title: nyaa.choice.title, seeders: nyaa.choice.seeders },
+        ...(nyaa.choice.alternates || []).map((uri) => ({ uri })),
+      ],
+    }
+    sidecarCandidatesByEpisode.set(key, cached)
+    if (Date.now() - started > budgetMs) return []
+  }
+  // Re-rank every time: releases marked unusable since the last call drop out.
+  return rankNyaaSubtitleCandidates(cached.candidates)
+    .map((c) => c.uri)
+    .slice(0, NYAA_SUB_SIDECAR_MAX_RELEASES)
+}
+
+/**
+ * Still worth waiting for this episode's sidecar: a release torrent is still starting,
+ * or a ranked release has not been tried yet. False once every candidate failed or
+ * the Nyaa search found nothing.
+ */
+export function isNyaaSubtitleSidecarPending(options: {
+  showTitle: string
+  season: number
+  episode: number
+}): boolean {
+  if (!isTorrentPlaybackAvailable()) return false
+  const cached = sidecarCandidatesByEpisode.get(sidecarEpisodeKey(options))
+  if (!cached) return false
+  const uris = rankNyaaSubtitleCandidates(cached.candidates)
+    .map((c) => c.uri)
+    .slice(0, NYAA_SUB_SIDECAR_MAX_RELEASES)
+  return uris.some((uri) => {
+    const s = sidecarStreams.get(uri)
+    return !s || !s.done || Boolean(s.subtitleUrl)
+  })
+}
+
+/**
+ * Pull softsubs from a Nyaa release without switching the video URL.
+ * Used when Movy (or another direct HLS source) has no subtitle track.
+ * Hard budget so dead swarms don't hang the player toast; a release that is still
+ * starting keeps running and later calls (background retries) reuse it instead of
+ * restarting the torrent. At most one release starts at a time.
+ */
 export async function resolveNyaaSubtitleSidecar(options: {
   showTitle: string
   season: number
   episode: number
+  /** Total wait for this call (default 22s). Background retries pass a short budget. */
+  budgetMs?: number
 }): Promise<{ subtitleUrl: string; subtitleKind?: 'file' | 'embedded' } | null> {
   if (!isTorrentPlaybackAvailable()) return null
 
   const started = Date.now()
-  const nyaa = await resolveNyaaEpisodePlay({
-    showTitle: options.showTitle,
-    season: options.season,
-    episode: options.episode,
-  })
-  if (!nyaa.ok) return null
-  if (Date.now() - started > NYAA_SUB_SIDECAR_BUDGET_MS) return null
-
-  // Prefer Multi-Sub / SoftSub magnets; dead seedless packs waste the budget.
-  const ranked = [nyaa.choice, ...((nyaa.choice.alternates || []).map((uri) => ({
-    ...nyaa.choice,
-    torrentUri: uri,
-    title: nyaa.choice.title,
-  })))].filter((c, i, arr) => {
-    const uri = c.torrentUri
-    return Boolean(uri) && arr.findIndex((x) => x.torrentUri === uri) === i
-  })
-  ranked.sort((a, b) => prefersSoftsubRelease(b.title) - prefersSoftsubRelease(a.title))
-
-  const uris = ranked
-    .flatMap((c) => [c.torrentUri, ...(c.alternates || [])])
-    .filter((uri, i, arr) => Boolean(uri) && arr.indexOf(uri) === i)
-    .slice(0, 2)
+  const budgetMs = Math.max(1000, options.budgetMs ?? NYAA_SUB_SIDECAR_BUDGET_MS)
+  // Prefer Multi-Sub / SoftSub / JAP magnets ranked by each release's own title;
+  // skip English-dub-only packs (Signs-only subs) and releases already found unusable.
+  const uris = await sidecarCandidateUris(options, started, budgetMs)
+  if (!uris || uris.length === 0) return null
 
   for (const uri of uris) {
-    const left = NYAA_SUB_SIDECAR_BUDGET_MS - (Date.now() - started)
-    if (left < 2500) break
-    const attemptMs = Math.min(NYAA_SUB_SIDECAR_TIMEOUT_MS, left)
-    try {
-      const result = await Promise.race<TorrentStreamResult>([
-        torrentStream(uri, { keepOthers: true }),
-        new Promise((_, reject) =>
-          window.setTimeout(() => reject(new Error('Nyaa subtitle sidecar timed out')), attemptMs),
-        ),
-      ])
-      if (!result.ok) continue
-      const subtitleUrl = result.subtitleUrl ?? result.playlist?.[0]?.subtitleUrl
-      if (subtitleUrl) {
-        return {
-          subtitleUrl,
-          subtitleKind: result.subtitleKind ?? result.playlist?.[0]?.subtitleKind,
-        }
-      }
-    } catch {
-      /* try next / give up */
+    const known = sidecarStreams.get(uri)
+    if (known?.done && known.subtitleUrl && Date.now() - known.startedAt <= SIDECAR_SUCCESS_TTL_MS) {
+      return { subtitleUrl: known.subtitleUrl, subtitleKind: known.subtitleKind }
     }
+  }
+
+  for (const uri of uris) {
+    const known = sidecarStreams.get(uri)
+    if (known?.done && !known.subtitleUrl) continue // failed release: never restart
+    // Only one release downloading at a time (phone bandwidth): don't start another
+    // while an earlier candidate is still starting.
+    const pendingOther = uris.some((u) => u !== uri && sidecarStreams.get(u)?.done === false)
+    if (!known && pendingOther) break
+    const left = budgetMs - (Date.now() - started)
+    if (left < 1000) break
+    const entry = startSidecarStream(uri)
+    const attemptMs = Math.min(NYAA_SUB_SIDECAR_TIMEOUT_MS, left)
+    let timer = 0
+    await Promise.race([
+      entry.promise,
+      new Promise<void>((resolve) => {
+        timer = window.setTimeout(resolve, attemptMs)
+      }),
+    ])
+    window.clearTimeout(timer)
+    if (entry.done && entry.subtitleUrl) {
+      return { subtitleUrl: entry.subtitleUrl, subtitleKind: entry.subtitleKind }
+    }
+    if (!entry.done) break // still starting: leave it running for the next retry
   }
   return null
 }

@@ -12,6 +12,11 @@ export const APP_VERSION_LABEL = `v${APP_VERSION}`
 /** Short milestone log — newest first — so progress is visible in-app. */
 export const APP_RELEASES: ReadonlyArray<{ version: string; summary: string }> = [
   {
+    version: '0.3.77',
+    summary:
+      'Anime subtitles: picks Multi-Subs releases instead of dubs, skips signs-only tracks, Android shows subs while the episode downloads and retries instead of giving up, and the player keeps looking for subtitles in the background (Looking for subtitles… / Retry Subs)',
+  },
+  {
     version: '0.3.76',
     summary:
       'Android: anime subtitles now load when they\'re only available from Nyaa releases (Nyaa search works on Android again)',

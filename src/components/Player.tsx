@@ -100,6 +100,8 @@ import {
 import {
   nyaaTorrentCandidates,
   resolveNyaaEpisodePlay,
+  isNyaaSubtitleSidecarPending,
+  markNyaaSubtitleSourceUnusable,
   resolveNyaaSubtitleSidecar,
   shouldTryNyaaForItem,
 } from '../lib/nyaa'
@@ -227,6 +229,12 @@ function isRemuxPlaybackUrl(url: string | undefined): boolean {
     return false
   }
 }
+
+/**
+ * Background Nyaa subtitle retries: native torrent start may take up to 180s plus the
+ * probe/extract, so keep looking for ~5 minutes before showing "No subtitles".
+ */
+const SIDECAR_RETRY_WINDOW_MS = 5 * 60 * 1000
 
 /** WebTorrent / remux URLs die as soon as torrentStop() removes the swarm. */
 function isEphemeralLocalStreamUrl(url: string | undefined): boolean {
@@ -594,6 +602,16 @@ export function Player({
   const subtitleDelayRef = useRef(0)
   const [autoSyncRunning, setAutoSyncRunning] = useState(false)
   const movySubsSidecarRef = useRef('')
+  /**
+   * Nyaa sidecar search state while no subtitle URL is attached:
+   * 'searching' = background retries running (show "Looking for subtitles…"),
+   * 'retryable' = gave up for now (tap Subs to search again).
+   */
+  const [subsSearch, setSubsSearch] = useState<'off' | 'searching' | 'retryable'>('off')
+  /** Wakes the sidecar retry sleep early (manual retry / cleanup). */
+  const sidecarWakeRef = useRef<(() => void) | null>(null)
+  /** Bumped by a manual retry to re-run the whole subtitle search for this episode. */
+  const [sidecarRetryTick, setSidecarRetryTick] = useState(0)
   /** After Wyzie free-plan ad dump, skip Wyzie and prefer Nyaa softsubs. */
   const skipWyzieSubsRef = useRef(false)
   const hintTimer = useRef<number | null>(null)
@@ -779,7 +797,9 @@ export function Player({
   const subtitleKind = activePlaylistItem.subtitleKind
   // Companion files and embedded softsubs both get a Subs control once we have a URL.
   const showSubsLoading = subsStatus === 'loading' && Boolean(subtitleUrl)
-  const showSubsControls = Boolean(subtitleUrl)
+  const subsSearching = !subtitleUrl && subsSearch === 'searching'
+  const subsRetryable = !subtitleUrl && subsSearch === 'retryable'
+  const showSubsControls = Boolean(subtitleUrl) || subsSearching || subsRetryable
   const videoMountKey = `v${AUDIO_PIPELINE_REV}-${item.id}-${activePlaylistItem.url ?? ''}-r${hlsRemountNonce}`
 
   // Allow one auto-advance per episode (ended + near-end timeupdate both fire).
@@ -1704,6 +1724,9 @@ export function Player({
     const sidecar = subtitleKind === 'file' || /^https?:\/\//i.test(subtitleUrl)
     const remoteSidecar =
       sidecar && !/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//i.test(subtitleUrl)
+    // Local torrent extract (Android /subs.vtt, desktop /subs-cache): the VTT grows while
+    // ffmpeg reads the file, so keep polling until the server says done.
+    const localExtract = !remoteSidecar && subtitleKind !== 'file'
 
     async function loadSubtitles() {
       // Companion .srt: poll immediately. Embedded: wait for remux to claim the swarm.
@@ -1859,7 +1882,7 @@ export function Player({
               lastCueEnd < mediaDuration * 0.85
 
             // Sidecar files are complete once we have cues + done (or any cues).
-            if (sidecar && latestCount > 0 && (extractDone || latestCount > 20)) {
+            if (sidecar && latestCount > 0 && (extractDone || (!localExtract && latestCount > 20))) {
               break
             }
 
@@ -1885,10 +1908,21 @@ export function Player({
               continue
             }
           } else if (latestCount === 0 && httpStatus === 404) {
-            if (/no subtitle track/i.test(httpBody)) {
+            if (/no (usable )?(text )?subtitle track|only image subtitles/i.test(httpBody)) {
               // Probe finished: this release has no embedded softsubs — drop the
-              // local URL so Wyzie / OpenSubtitles / Nyaa can still attach.
+              // local URL so Wyzie / OpenSubtitles / Nyaa can still attach. Signs/Songs-only
+              // releases land here too; never pick that release again as a subtitle sidecar.
               if (!cancelled && !remoteSidecar) {
+                const sidecarHash = markNyaaSubtitleSourceUnusable(subtitleUrl!)
+                const playing = String(activePlaylistItem.url || item.url || '').toLowerCase()
+                if (
+                  sidecarHash &&
+                  sidecarHash !== String(item.torrentInfoHash || '').toLowerCase() &&
+                  !playing.includes(sidecarHash)
+                ) {
+                  // Subtitle-only swarm: stop downloading the whole episode in the background.
+                  void torrentStop(sidecarHash).catch(() => {})
+                }
                 setSubtitleCues([])
                 setSubsStatus('idle')
                 movySubsSidecarRef.current = ''
@@ -1904,7 +1938,9 @@ export function Player({
               break
             }
             if (/not ready|timed out|read failed|could not read/i.test(httpBody)) {
-              await new Promise((resolve) => window.setTimeout(resolve, sidecar ? 800 : 5000))
+              await new Promise((resolve) =>
+                window.setTimeout(resolve, sidecar && !localExtract ? 800 : localExtract ? 2000 : 5000),
+              )
               continue
             }
           }
@@ -1913,7 +1949,7 @@ export function Player({
         }
         // Keep polling even after "done" if cues look short for a long title —
         // progressive extract often resumes after an early EOF.
-        await new Promise((resolve) => window.setTimeout(resolve, sidecar ? 700 : 2000))
+        await new Promise((resolve) => window.setTimeout(resolve, sidecar && !localExtract ? 700 : 2000))
       }
       if (!cancelled && latestCount === 0) setSubsStatus('missing')
     }
@@ -1978,9 +2014,30 @@ export function Player({
 
     let settled = false
     let cancelled = false
+    setSubsSearch('off')
+
+    /** Backoff sleep that a manual retry (Subs tap) or cleanup can cut short. */
+    const sleepWakeable = (ms: number) =>
+      new Promise<void>((resolve) => {
+        const done = () => {
+          window.clearTimeout(timer)
+          if (sidecarWakeRef.current === done) sidecarWakeRef.current = null
+          resolve()
+        }
+        const timer = window.setTimeout(done, ms)
+        sidecarWakeRef.current = done
+      })
+
+    const giveUp = (retryable: boolean) => {
+      settled = true
+      if (cancelled || movySubsSidecarRef.current !== sidecarKey) return
+      setSubsSearch(retryable ? 'retryable' : 'off')
+      flash('No subtitles for this episode')
+    }
 
     const applySubs = (url: string, kind?: 'file' | 'embedded', label = 'Subtitles ready') => {
       if (cancelled || movySubsSidecarRef.current !== sidecarKey) return
+      setSubsSearch('off')
       setLocalPlaylist((prev) => {
         const base = prev ?? item.playlist ?? []
         return base.map((row, i) =>
@@ -2032,30 +2089,46 @@ export function Player({
           }
         }
         if (!canNyaa) {
-          settled = true
-          if (!cancelled && movySubsSidecarRef.current === sidecarKey) {
-            flash('No subtitles for this episode')
-          }
+          giveUp(false)
           return
         }
         flash('Finding subtitles…')
-        const subs = await resolveNyaaSubtitleSidecar({ showTitle: showName, season, episode })
-        settled = true
+        const sidecarOpts = { showTitle: showName, season, episode }
+        let subs = await resolveNyaaSubtitleSidecar(sidecarOpts)
         if (cancelled || movySubsSidecarRef.current !== sidecarKey) return
+        if (!subs?.subtitleUrl && isNyaaSubtitleSidecarPending(sidecarOpts)) {
+          // The release torrent is still starting (native engine may take up to ~3 min).
+          // Keep checking in the background; the torrent is reused, never restarted.
+          setSubsSearch('searching')
+          flash('Looking for subtitles…')
+          const backoffMs = [10_000, 20_000, 30_000]
+          const deadline = Date.now() + SIDECAR_RETRY_WINDOW_MS
+          for (let attempt = 0; Date.now() < deadline; attempt++) {
+            await sleepWakeable(backoffMs[Math.min(attempt, backoffMs.length - 1)]!)
+            if (cancelled || movySubsSidecarRef.current !== sidecarKey) return
+            subs = await resolveNyaaSubtitleSidecar({ ...sidecarOpts, budgetMs: 8_000 })
+            if (cancelled || movySubsSidecarRef.current !== sidecarKey) return
+            if (subs?.subtitleUrl) break
+            if (!isNyaaSubtitleSidecarPending(sidecarOpts)) break
+          }
+        }
         if (!subs?.subtitleUrl) {
-          flash('No subtitles for this episode')
+          // Window over (or every release failed): manual retry stays available.
+          giveUp(true)
           return
         }
+        settled = true
         applySubs(subs.subtitleUrl, subs.subtitleKind, 'Subtitles ready')
       } catch {
-        settled = true
         if (cancelled || movySubsSidecarRef.current !== sidecarKey) return
-        flash('No subtitles for this episode')
+        giveUp(true)
       }
     })()
 
     return () => {
       cancelled = true
+      // End any pending backoff sleep so the loop exits now (no stacked timers).
+      sidecarWakeRef.current?.()
       if (!settled && movySubsSidecarRef.current === sidecarKey) {
         movySubsSidecarRef.current = ''
       }
@@ -2075,6 +2148,7 @@ export function Player({
     activePlaylistItem.episodeKey,
     activePlaylistItem.title,
     activePlaylistItem.fileName,
+    sidecarRetryTick,
   ])
 
   useEffect(() => {
@@ -2086,6 +2160,8 @@ export function Player({
 
   useEffect(() => {
     skipWyzieSubsRef.current = false
+    // New episode: drop any "Looking for subtitles" / "Retry Subs" state from the last one.
+    setSubsSearch('off')
   }, [playlistIndex, item.id])
 
   useEffect(() => {
@@ -2152,6 +2228,20 @@ export function Player({
 
   function toggleSubtitles() {
     bumpChrome()
+    if (!subtitleUrl && subsSearch === 'searching') {
+      // Background search running: check right now instead of waiting for the backoff.
+      sidecarWakeRef.current?.()
+      flash('Looking for subtitles…')
+      return
+    }
+    if (!subtitleUrl && subsSearch === 'retryable') {
+      // Manual retry: re-run the subtitle search for this episode (torrents are reused).
+      setSubsEnabled(true)
+      movySubsSidecarRef.current = ''
+      setSidecarRetryTick((n) => n + 1)
+      flash('Looking for subtitles…')
+      return
+    }
     // Not ready yet — kick a forced .srt fetch and leave subs enabled for when they arrive.
     if (subsStatus === 'loading' || subsStatus === 'idle' || subsStatus === 'missing') {
       if (!subtitleUrl) {
@@ -6153,7 +6243,7 @@ export function Player({
           break
         case 'c':
         case 'C':
-          if (showSubsControls && subsStatus !== 'missing') {
+          if (showSubsControls && (subsStatus !== 'missing' || (!subtitleUrl && subsSearch !== 'off'))) {
             e.preventDefault()
             toggleSubtitles()
           }
@@ -6202,7 +6292,7 @@ export function Player({
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [onClose, muted, volume, isTile, showSubsControls, subsStatus, subtitleDelaySec])
+  }, [onClose, muted, volume, isTile, showSubsControls, subsStatus, subtitleDelaySec, subsSearch, subtitleUrl])
 
   useEffect(() => {
     if (isTile || isPip) return
@@ -6339,8 +6429,9 @@ export function Player({
                 {!error
                   ? ` · ${muted ? 'Muted' : `Vol ${Math.round(volume * 100)}%`}`
                   : ''}
+                {!error && subsSearching ? ' · Looking for subtitles…' : ''}
                 {!error && showSubsLoading ? ' · Loading subtitles…' : ''}
-                {!error && subsStatus === 'missing' ? ' · No subs' : ''}
+                {!error && subsStatus === 'missing' && !subsSearching ? ' · No subs' : ''}
                 {!error && subsStatus === 'ready'
                   ? ` · Subs ${subsEnabled ? 'on' : 'off'}${
                       subsEnabled && subtitleDelaySec !== 0
@@ -6551,7 +6642,11 @@ export function Player({
                   className={`ghost-btn control-btn${subsEnabled && subsStatus === 'ready' ? ' is-armed' : ''}`}
                   onClick={toggleSubtitles}
                   title={
-                    showSubsLoading
+                    subsSearching
+                      ? 'Looking for subtitles… (click to check now)'
+                      : subsRetryable
+                        ? 'No subtitles found yet - click to search again'
+                        : showSubsLoading
                       ? 'Click to fetch subtitles now'
                       : subsStatus === 'missing'
                         ? 'Retry loading subtitles'
@@ -6560,7 +6655,11 @@ export function Player({
                           : 'Show subtitles (C)'
                   }
                 >
-                  {showSubsLoading
+                  {subsSearching
+                    ? 'Subs…'
+                    : subsRetryable
+                      ? 'Retry Subs'
+                      : showSubsLoading
                     ? 'Subs…'
                     : subsStatus === 'missing'
                       ? 'Retry Subs'

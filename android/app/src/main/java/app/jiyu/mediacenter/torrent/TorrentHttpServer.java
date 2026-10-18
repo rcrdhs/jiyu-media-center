@@ -84,7 +84,7 @@ final class TorrentHttpServer extends NanoHTTPD {
         return serveRange(torrent, file, total, mime, rangeHeader);
       }
       // Full-body: wait for opening buffer then stream from 0
-      if (!torrent.waitForBytes(0, 60_000)) {
+      if (!torrent.waitForRangeWhileProgressing(0, 1, 60_000)) {
         return newFixedLengthResponse(Response.Status.SERVICE_UNAVAILABLE, MIME_PLAINTEXT, "buffering");
       }
       RandomAccessFile raf = new RandomAccessFile(file, "r");
@@ -121,7 +121,18 @@ final class TorrentHttpServer extends NanoHTTPD {
         return withCors(res);
       } catch (IOException e) {
         Log.w(TAG, "serveSubtitles read failed", e);
-        return newFixedLengthResponse(Response.Status.INTERNAL_ERROR, MIME_PLAINTEXT, "read failed");
+        return withCors(newFixedLengthResponse(Response.Status.INTERNAL_ERROR, MIME_PLAINTEXT, "read failed"));
+      }
+    }
+    // Progressive: serve the cues ffmpeg has flushed so far (done=0, player keeps polling).
+    File partial = torrent.partialSubtitleVtt();
+    if (partial != null) {
+      String text = readCompleteCues(partial);
+      if (text != null && text.contains("-->")) {
+        Response res = newFixedLengthResponse(Response.Status.OK, "text/vtt; charset=utf-8", text);
+        res.addHeader("Cache-Control", "no-store");
+        res.addHeader("X-Jiyu-Subs-Done", "0");
+        return withCors(res);
       }
     }
     if (torrent.subtitleMissing.get()) {
@@ -218,7 +229,33 @@ final class TorrentHttpServer extends NanoHTTPD {
 
   private static Response withCors(Response res) {
     res.addHeader("Access-Control-Allow-Origin", "*");
+    // Let the WebView read X-Jiyu-Subs-Done cross-origin (https://localhost -> 127.0.0.1).
+    res.addHeader("Access-Control-Expose-Headers", "X-Jiyu-Subs-Done");
     return res;
+  }
+
+  /** Read a growing VTT and drop the trailing cue that ffmpeg may still be writing. */
+  private static String readCompleteCues(File vtt) {
+    try {
+      long len = vtt.length();
+      if (len <= 16 || len > 32L * 1024L * 1024L) return null;
+      byte[] buf = new byte[(int) len];
+      int read = 0;
+      try (java.io.FileInputStream in = new java.io.FileInputStream(vtt)) {
+        while (read < buf.length) {
+          int n = in.read(buf, read, buf.length - read);
+          if (n < 0) break;
+          read += n;
+        }
+      }
+      String text = new String(buf, 0, read, java.nio.charset.StandardCharsets.UTF_8).replace("\r\n", "\n");
+      int cut = text.lastIndexOf("\n\n");
+      if (cut <= 0) return null;
+      return text.substring(0, cut + 2);
+    } catch (Throwable t) {
+      Log.w(TAG, "partial subtitles read failed", t);
+      return null;
+    }
   }
 
   private static String firstParam(IHTTPSession session, String name) {
@@ -265,7 +302,7 @@ final class TorrentHttpServer extends NanoHTTPD {
     long length = end - start + 1;
     // Seek support: prioritize & wait for the requested region
     torrent.setInterestedBytes(start);
-    if (!torrent.waitForBytes(start, 90_000)) {
+    if (!torrent.waitForRangeWhileProgressing(start, 1, 90_000)) {
       return newFixedLengthResponse(Response.Status.SERVICE_UNAVAILABLE, MIME_PLAINTEXT, "seeking buffer");
     }
 
@@ -296,6 +333,7 @@ final class TorrentHttpServer extends NanoHTTPD {
    * Reads from an incomplete torrent file, waiting for pieces as needed.
    */
   private static final class WaitingInputStream extends java.io.InputStream {
+    private static final long STALL_TIMEOUT_MS = 180_000L;
     private final TorrentEngine.ActiveTorrent torrent;
     private final RandomAccessFile raf;
     private long remaining;
@@ -319,8 +357,11 @@ final class TorrentHttpServer extends NanoHTTPD {
     public int read(byte[] b, int off, int len) throws IOException {
       if (remaining <= 0) return -1;
       int want = (int) Math.min(len, remaining);
-      if (!torrent.waitForRange(position, want, 90_000)) {
-        throw new IOException("torrent piece timeout at " + position);
+      // Keep the connection open while pieces keep arriving; only a removed torrent
+      // or a swarm stalled for 3 minutes ends the body early (ffmpeg then reconnects
+      // or the subtitle extract retries).
+      if (!torrent.waitForRangeWhileProgressing(position, want, STALL_TIMEOUT_MS)) {
+        throw new IOException("torrent stalled at " + position);
       }
       int n = raf.read(b, off, want);
       if (n < 0) return -1;

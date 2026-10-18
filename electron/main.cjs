@@ -8258,12 +8258,25 @@ function probePreferredAudioOrdinal(httpSource, preferJapanese = false) {
   })
 }
 
+/** Signs / Songs / Forced-only subtitle titles carry no dialogue (e.g. "English Signs"). */
+function isSignsOrForcedOnlySubtitleTitle(rawTitle) {
+  const title = String(rawTitle || '').toLowerCase()
+  if (!title) return false
+  if (/\b(full|dialogue|dialog|complete)\b/.test(title)) return false
+  return /\b(signs?|songs?|forced|karaoke|op\s*\/\s*ed)\b/.test(title)
+}
+
 function scoreSubtitleTrack(track) {
   if (!track) return -Infinity
   let score = 0
   const lang = track.language || ''
   const title = (track.title || '').toLowerCase()
   const codec = track.codec || ''
+
+  // Never pick Signs & Songs / Forced-only tracks for dialogue: report "no usable
+  // track" instead so the player can try the next release / provider.
+  if (isSignsOrForcedOnlySubtitleTitle(title)) return -Infinity
+  if (track.isForced && !/\b(full|dialogue|dialog)\b/.test(title)) return -Infinity
 
   if (isTextSubtitleCodec(codec)) score += 100
   else if (isImageSubtitleCodec(codec)) score -= 200
@@ -9747,7 +9760,11 @@ function torrentRawFileUrl(torrent, file) {
 }
 
 function findCompanionSubtitle(torrent, videoFile) {
-  const subs = torrent.files.filter((file) => SUBTITLE_FILE_RE.test(file.name))
+  const subs = torrent.files.filter(
+    (file) =>
+      SUBTITLE_FILE_RE.test(file.name) &&
+      !isSignsOrForcedOnlySubtitleTitle(file.name.replace(/\.[^.]+$/, '').replace(/[._]+/g, ' ')),
+  )
   if (subs.length === 0) return null
 
   const base = videoFile.name.replace(/\.[^.]+$/, '').toLowerCase()
