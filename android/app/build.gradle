@@ -7,8 +7,8 @@ android {
         applicationId "app.jiyu.mediacenter"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 71
-        versionName "0.3.75"
+        versionCode 72
+        versionName "0.3.76"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         // 16 KB page-size devices (Android 15+): only ship 64-bit natives.
         // libtorrent4j 32-bit builds are still 4 KB-aligned.

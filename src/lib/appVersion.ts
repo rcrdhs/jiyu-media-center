@@ -12,6 +12,11 @@ export const APP_VERSION_LABEL = `v${APP_VERSION}`
 /** Short milestone log — newest first — so progress is visible in-app. */
 export const APP_RELEASES: ReadonlyArray<{ version: string; summary: string }> = [
   {
+    version: '0.3.76',
+    summary:
+      'Android: anime subtitles now load when they\'re only available from Nyaa releases (Nyaa search works on Android again)',
+  },
+  {
     version: '0.3.75',
     summary:
       'Kids movies now show descriptions and open a detail page like Movies; Back from Added today / Saved / new-today returns to the same spot; player title shows what you\'re watching instead of \'Web browser\'; Kids section picks up new releases every few hours, safely prunes stale titles, and EZTV kids shows refresh daily',

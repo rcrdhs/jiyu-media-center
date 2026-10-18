@@ -18,6 +18,7 @@ import {
 } from './torrents'
 import { getConnectionDownlinkMbps, resolveRequestedQuality } from './viewingQuality'
 import { isTorrentPlaybackAvailable, torrentStream } from './torrentBridge'
+import { isNativeHttpPlatform, nativeFetchText } from './nativeHttp'
 import type { TorrentStreamResult } from '../types'
 
 export const NYAA_ORIGIN = 'https://nyaa.si'
@@ -48,6 +49,20 @@ async function fetchNyaaHtml(url: string): Promise<{ ok: boolean; content: strin
   if (window.signalDesktop?.fetchHtml) {
     const result = await window.signalDesktop.fetchHtml(url, { quiet: true })
     return { ok: result.ok, content: result.content || '', error: result.error || '' }
+  }
+  // Android: nyaa.si sends no CORS headers, so WebView fetch() from https://localhost
+  // always fails (CapacitorHttp fetch patching is off). Go through native HTTP instead,
+  // otherwise Nyaa search, episode play and the subtitle sidecar silently find nothing.
+  if (isNativeHttpPlatform()) {
+    try {
+      const r = await nativeFetchText(url, {
+        quiet: true,
+        headers: { Accept: 'text/html,application/xhtml+xml,*/*;q=0.8' },
+      })
+      return { ok: r.ok, content: r.content || '', error: r.ok ? '' : r.error || `HTTP ${r.status}` }
+    } catch (err) {
+      return { ok: false, content: '', error: err instanceof Error ? err.message : 'Native fetch failed' }
+    }
   }
   try {
     const res = await fetch(url)
