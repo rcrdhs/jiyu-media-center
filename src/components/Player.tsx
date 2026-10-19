@@ -11,11 +11,13 @@ import { SeekSkipOverlay } from './SeekSkipOverlay'
 import { isHlsUrl, isMpegTsUrl } from '../lib/iptv'
 import { androidHlsConfig } from '../lib/hlsAndroid'
 import {
+  claimFullscreenOwner,
   enterOsFullscreen,
   exitOsFullscreen,
   getFullscreenOwner,
   syncFullscreenOwnerFromOs,
   usesOsFullscreenOnly,
+  webSurfaceFullscreenMounted,
   webSurfaceOwnsFullscreen,
 } from '../lib/fullscreenSession'
 import { androidSystemPipSettling } from '../lib/androidSystemPip'
@@ -237,6 +239,11 @@ function isRemuxPlaybackUrl(url: string | undefined): boolean {
  * Background Nyaa subtitle retries: native torrent start may take up to 180s plus the
  * probe/extract, so keep looking for ~5 minutes before showing "No subtitles".
  */
+/** Restart: how long saves stay paused waiting for the playhead to reach ~0. */
+const RESTART_GUARD_MS = 30_000
+/** Atlantic / Cinecat hosted HLS (same hosts the stall fallback recognises). */
+const ATLANTIC_HLS_URL_RE = /totallyacdn|cdn\.hls\.lol|stream\.hls\.lol|transcode\.cfd|atlantic\.st/i
+
 const SIDECAR_RETRY_WINDOW_MS = 5 * 60 * 1000
 /** Android sidecars crawl on slow phone links (~50 KB/s): keep looking longer. */
 const SIDECAR_RETRY_WINDOW_ANDROID_MS = 10 * 60 * 1000
@@ -641,6 +648,8 @@ export function Player({
   const resumePendingRef = useRef(false)
   /** After Restart, block saves until the playhead is back near 0 (avoids re-writing old time). */
   const restartGuardRef = useRef(false)
+  /** When the restart guard gives up and saving resumes (keeps the old resume point). */
+  const restartGuardUntilRef = useRef(0)
   /** Furthest absolute playhead this session — a < 60s session is a quick bail for recommendations. */
   const sessionFurthestRef = useRef(0)
   const [resumeOffer, setResumeOffer] = useState<number | null>(null)
@@ -656,7 +665,13 @@ export function Player({
   const selectPlaylistItemRef = useRef<
     (
       index: number,
-      options?: { force?: boolean; rotateTorrent?: boolean; rotateSource?: boolean },
+      options?: {
+        force?: boolean
+        rotateTorrent?: boolean
+        rotateSource?: boolean
+        /** Same-episode Restart: clear stall/auto-seek targets and always remount. */
+        fromRestart?: boolean
+      },
     ) => Promise<void>
   >(async () => {})
   /** Movy → Atlantic mid-playback stall fallback (TMDB meta captured when Movy resolves). */
@@ -1344,9 +1359,14 @@ export function Player({
     if (currentTime > sessionFurthestRef.current) sessionFurthestRef.current = currentTime
     if (restartGuardRef.current) {
       // Drop stale mid-episode ticks until the restarted stream is actually at the start.
-      if (currentTime >= 5) return
-      restartGuardRef.current = false
-      return
+      if (currentTime < 5) {
+        finishRestartGuard(true)
+        return
+      }
+      if (Date.now() < restartGuardUntilRef.current) return
+      // Restart never reached the start (failed / stuck): keep the saved resume
+      // point and go back to saving normally.
+      finishRestartGuard(false)
     }
     const saved = getContinueEntry(item.id)
     const playbackUrl = activePlaylistItem.url || item.url || video.currentSrc
@@ -1453,11 +1473,49 @@ export function Player({
     }
   }
 
+  /** End the Restart save guard. reachedStart: playhead really is back near 0. */
+  function finishRestartGuard(reachedStart: boolean) {
+    if (!restartGuardRef.current) return
+    restartGuardRef.current = false
+    restartGuardUntilRef.current = 0
+    if (reachedStart) {
+      // Only now forget the old resume point, and only when it belongs to this
+      // episode (Continue watching keeps one entry per show).
+      const saved = getContinueEntry(item.id)
+      if (saved && (saved.playlistIndex || 0) === (playlistIndex || 0)) {
+        removeContinueEntry(item.id)
+      }
+      setResumeOffer(null)
+    }
+    const video = videoRef.current
+    setStatusRaw((s) =>
+      /^Restarting/i.test(s) ? (video && !video.paused ? 'Playing' : 'Ready') : s,
+    )
+  }
+
   function restartEpisode() {
     if (isPip || isTile) return
-    // Clear Continue watching for this title — restart is the only bypass for resume.
+    const video = videoRef.current
+    if (!video) return
+    // Continue watching is cleared in saveContinueProgress once the playhead is
+    // really back near 0 (or the guard gives up after RESTART_GUARD_MS and the old
+    // resume point stays).
     restartGuardRef.current = true
-    removeContinueEntry(item.id)
+    restartGuardUntilRef.current = Date.now() + RESTART_GUARD_MS
+    // saveContinueProgress only runs on playback ticks; this ends the guard (and
+    // the Restarting… status) even when the video sits paused or never loads.
+    const checkRestartGuard = () => {
+      if (!restartGuardRef.current) return
+      const left = restartGuardUntilRef.current - Date.now()
+      if (left > 0) {
+        window.setTimeout(checkRestartGuard, left + 250)
+        return
+      }
+      const v = videoRef.current
+      const t = v && Number.isFinite(v.currentTime) ? v.currentTime + timelineOffsetRef.current : 0
+      finishRestartGuard(Boolean(v && !v.error && v.currentSrc && t < 5))
+    }
+    window.setTimeout(checkRestartGuard, RESTART_GUARD_MS + 250)
     resumePendingRef.current = false
     resumeKeyRef.current = `${item.id}:${playlistIndex}:restart`
     autoSeekResumeOnceRef.current = 0
@@ -1472,43 +1530,52 @@ export function Player({
     setTimelineOffsetSeconds(0)
     watchClockRef.current = { lastTs: 0, accrued: 0 }
 
-    const video = videoRef.current
-    if (!video) return
-
     const raw = activePlaylistItem.url || item.url || video.currentSrc
     const url = stripResumeOffset(raw)
-    const hadRemuxSeek =
-      isRemuxPlaybackUrl(raw) ||
-      /[?&]t=\d+/.test(video.currentSrc) ||
-      hadOffset
-    const hadError = Boolean(error)
+    const hadError = Boolean(error) || Boolean(video.error)
     const hls = hlsInstanceRef.current
-    const movyStyle =
-      isMovyStreamUrl(url) ||
-      item.httpReferrer === MOVY_PLAY_REFERER ||
-      /movy\.sx/i.test(activePlaybackReferrerRef.current || '')
+    // Decide from the URL that is actually playing, not item.httpReferrer or a
+    // referrer left over from an earlier Movy attempt. Anime often falls back to
+    // a Nyaa torrent; the stale Movy referrer sent every Restart down the
+    // re-resolve path, which got the same local stream URL back and never reloaded.
+    const localStream = isEphemeralLocalStreamUrl(url) || isRemuxPlaybackUrl(url)
+    const remoteHostedHls = isMovyStreamUrl(url) || ATLANTIC_HLS_URL_RE.test(url)
+    const freshSource = !localStream && (hadError || remoteHostedHls)
 
     setError(null)
     setStatus('Restarting…')
 
-    // Movy signed URLs expire mid-title — Restart must mint a fresh source,
-    // not reload the dead playlist that stalled at e.g. 3:10.
-    if (movyStyle || hadError) {
+    // Movy signed URLs expire mid-title, so Restart mints a fresh source instead
+    // of reloading the dead playlist that stalled at e.g. 3:10.
+    if (freshSource) {
+      // Re-resolving can take ~40s on anime; the success path re-arms a fresh
+      // RESTART_GUARD_MS window once the new source is handed to the player.
+      restartGuardUntilRef.current = Date.now() + RESTART_GUARD_MS + 45_000
       hlsStallRemountRef.current = { key: '', count: 0, playStableSince: 0 }
       if (hlsFallbackMetaRef.current) {
         hlsFallbackMetaRef.current.busy = false
         hlsFallbackMetaRef.current.tried = false
+      }
+      // Stop the old picture/audio so it can't keep playing (or re-pin its
+      // playhead through stall recovery) while the new source resolves.
+      try {
+        video.pause()
+      } catch {
+        /* ignore */
       }
       flash('Restarting with a fresh source…')
       bumpChrome()
       void selectPlaylistItemRef.current(playlistIndex, {
         force: true,
         rotateSource: true,
+        fromRestart: true,
       })
       return
     }
 
-    // Remux / torrent pipe: reopen without t= so ffmpeg starts at 0.
+    // Desktop remux / torrent pipe: reopen without t= so ffmpeg starts at 0.
+    const hadRemuxSeek =
+      isRemuxPlaybackUrl(raw) || /[?&]t=\d+/.test(video.currentSrc) || hadOffset
     if (hadRemuxSeek || isRemuxPlaybackUrl(url)) {
       try {
         const parsed = new URL(url)
@@ -1524,16 +1591,17 @@ export function Player({
       return
     }
 
-    // Errored / missing HLS session — full remount from the start (currentTime=0
-    // alone left anime stuck after a bad scrub with "HLS load timed out").
-    if (isHlsUrl(url) && !hls) {
+    // Errored local torrent stream (Android /stream/<hash>), or an HLS URL with no
+    // live session: full remount from the start. (currentTime=0 alone left anime
+    // stuck after a bad scrub with "HLS load timed out".)
+    if ((localStream && hadError) || (isHlsUrl(url) && !hls)) {
       setRetryTick((n) => n + 1)
       flash('Restarted from beginning')
       bumpChrome()
       return
     }
 
-    // Healthy HLS — stop the old window, then load from 0.
+    // Healthy HLS: stop the old window, then load from 0.
     if (hls) {
       try {
         hls.stopLoad()
@@ -1555,13 +1623,13 @@ export function Player({
       return
     }
 
-    // Progressive / mpeg-ts / native
+    // Progressive / mpeg-ts / local torrent stream: seek in place.
     try {
       video.currentTime = 0
     } catch {
       /* ignore */
     }
-    void video.play().catch(() => undefined)
+    void video.play().catch(() => setStatus('Press play'))
     flash('Restarted from beginning')
     bumpChrome()
   }
@@ -2463,7 +2531,13 @@ export function Player({
 
   async function selectPlaylistItem(
     index: number,
-    options?: { force?: boolean; rotateTorrent?: boolean; rotateSource?: boolean },
+    options?: {
+      force?: boolean
+      rotateTorrent?: boolean
+      rotateSource?: boolean
+      /** Same-episode Restart: clear stall/auto-seek targets and always remount. */
+      fromRestart?: boolean
+    },
   ) {
     if (index < 0 || index >= playlist.length) return
     if (index === playlistIndex && !options?.force && !options?.rotateSource) return
@@ -2548,6 +2622,7 @@ export function Player({
     }
 
     const failOnEpisode = (message: string) => {
+      if (options?.fromRestart) finishRestartGuard(false)
       setEpisodeLoading(false)
       setMediaReady(false)
       setLoadingPlaylistIndex(null)
@@ -2752,6 +2827,8 @@ export function Player({
             ),
           )
           index = nyaa.playIndex
+          // Torrent now: a Movy referrer from an earlier attempt must not stick.
+          activePlaybackReferrerRef.current = ''
           rememberLastGoodPlay(
             playReliabilityKey({
               itemId: item.id,
@@ -3144,6 +3221,8 @@ export function Player({
         }
         if (episodeFailGenRef.current !== failGen) return
         setStatus('Starting playback…')
+        // Torrent now: a Movy referrer from an earlier attempt must not stick.
+        activePlaybackReferrerRef.current = ''
 
         const prevUri = activePlaylistItem.torrentUri || item.torrentUri || ''
         const prevHash = /urn:btih:([a-z0-9]{32,40})/i.exec(prevUri)?.[1]?.toLowerCase()
@@ -3204,9 +3283,15 @@ export function Player({
     setTimelineOffset(0)
     resumeKeyRef.current = null
     resumePendingRef.current = false
-    if (index !== playlistIndex) {
+    if (index !== playlistIndex || options?.fromRestart) {
       autoSeekResumeOnceRef.current = 0
       stallHoldPlayheadRef.current = 0
+    }
+    if (options?.fromRestart) {
+      // Give the new load its own guard window, and remount even when the
+      // resolver handed back the same URL (otherwise nothing reloads).
+      if (restartGuardRef.current) restartGuardUntilRef.current = Date.now() + RESTART_GUARD_MS
+      setRetryTick((n) => n + 1)
     }
     setResumeOffer(null)
     skipDismissedRef.current = null
@@ -3696,16 +3781,33 @@ export function Player({
   }
   skipAnimeIntervalRef.current = skipAnimeInterval
 
-  function toggleFullscreen() {
+  async function toggleFullscreen() {
     const stage = shellRef.current
     if (!stage) return
     // Web embed owns OS fullscreen — don't steal/clear it from the native player.
-    if (webSurfaceOwnsFullscreen() && getFullscreenOwner() === 'web') {
-      flash('Web player is fullscreen')
-      return
+    // A 'web' claim with no web surface on screen is stale (embed closed while it
+    // held Full): take it back instead of blocking Full forever.
+    if (getFullscreenOwner() === 'web') {
+      if (webSurfaceFullscreenMounted()) {
+        flash('Web player is fullscreen')
+        return
+      }
+      claimFullscreenOwner('native')
+    }
+    // Desktop: trust the real window state over our mirror. A missed
+    // leave-full-screen left osFullScreenRef true, so Full only "exited".
+    if (usesOsFullscreenOnly() && window.signalDesktop?.isFullScreen && !document.fullscreenElement) {
+      try {
+        const actual = Boolean(await window.signalDesktop.isFullScreen())
+        if (actual !== osFullScreenRef.current) {
+          osFullScreenRef.current = actual
+          setOsFullScreen(actual)
+        }
+      } catch {
+        /* keep the mirror */
+      }
     }
     const leaving = Boolean(document.fullscreenElement) || osFullScreenRef.current
-
     if (leaving) {
       osFullScreenRef.current = false
       setOsFullScreen(false)
@@ -5065,7 +5167,10 @@ export function Player({
         let resumeAttempt = 0
         const saved = getContinueEntry(item.id)
         const resumeAt =
-          saved && saved.playlistIndex === playlistIndex && saved.currentTime >= 5
+          saved &&
+          !restartGuardRef.current &&
+          saved.playlistIndex === playlistIndex &&
+          saved.currentTime >= 5
             ? saved.currentTime
             : 0
 
@@ -5540,7 +5645,12 @@ export function Player({
           }
           setStatus('Ready')
           const saved = getContinueEntry(item.id)
-          if (saved && saved.playlistIndex === playlistIndex && saved.currentTime >= 5) {
+          if (
+            saved &&
+            !restartGuardRef.current &&
+            saved.playlistIndex === playlistIndex &&
+            saved.currentTime >= 5
+          ) {
             setResumeOffer(saved.currentTime)
             resumePendingRef.current = false
           }
@@ -6285,7 +6395,7 @@ export function Player({
           break
         case 'F11':
           e.preventDefault()
-          toggleFullscreen()
+          void toggleFullscreen()
           break
         case ' ':
         case 'k':
@@ -6321,7 +6431,7 @@ export function Player({
         case 'f':
         case 'F':
           e.preventDefault()
-          toggleFullscreen()
+          void toggleFullscreen()
           break
         case 'ArrowUp':
           e.preventDefault()

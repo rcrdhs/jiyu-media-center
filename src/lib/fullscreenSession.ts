@@ -6,6 +6,8 @@
 export type FullscreenOwner = 'native' | 'web' | 'multi' | null
 
 let owner: FullscreenOwner = null
+/** An OS fullscreen exit is already running; a second one adds nothing. */
+let osExitInFlight = false
 const listeners = new Set<(owner: FullscreenOwner) => void>()
 
 function notify() {
@@ -41,6 +43,12 @@ export function subscribeFullscreenOwner(listener: (owner: FullscreenOwner) => v
 export function webSurfaceOwnsFullscreen(): boolean {
   if (typeof document === 'undefined') return false
   if (owner === 'web') return true
+  return webSurfaceFullscreenMounted()
+}
+
+/** A web / multi-view surface is actually on screen in its fullscreen layout (DOM only). */
+export function webSurfaceFullscreenMounted(): boolean {
+  if (typeof document === 'undefined') return false
   return Boolean(
     document.querySelector('.web-browser-page.is-fullscreen') ||
       document.querySelector('.web-browser-pip-fs-bar') ||
@@ -98,30 +106,38 @@ export async function exitOsFullscreen(options?: {
   }
   owner = null
   notify()
+  // Re-entry guard: an exit still in flight already covers this call, so a
+  // force-exit echo from main can't start another round trip (ping-pong).
+  if (osExitInFlight) return
+  osExitInFlight = true
   try {
-    const { isAndroidShell, setAndroidImmersiveFullscreen } = await import('./androidFullscreen')
-    if (isAndroidShell()) {
-      await setAndroidImmersiveFullscreen(false)
-    }
-  } catch {
-    /* ignore */
-  }
-  try {
-    await window.signalDesktop?.setFullScreen?.(false)
-  } catch {
-    /* ignore */
-  }
-  try {
-    await window.signalDesktop?.exitFullScreen?.()
-  } catch {
-    /* ignore */
-  }
-  if (typeof document !== 'undefined' && document.fullscreenElement) {
     try {
-      await document.exitFullscreen()
+      const { isAndroidShell, setAndroidImmersiveFullscreen } = await import('./androidFullscreen')
+      if (isAndroidShell()) {
+        await setAndroidImmersiveFullscreen(false)
+      }
     } catch {
       /* ignore */
     }
+    try {
+      await window.signalDesktop?.setFullScreen?.(false)
+    } catch {
+      /* ignore */
+    }
+    try {
+      await window.signalDesktop?.exitFullScreen?.()
+    } catch {
+      /* ignore */
+    }
+    if (typeof document !== 'undefined' && document.fullscreenElement) {
+      try {
+        await document.exitFullscreen()
+      } catch {
+        /* ignore */
+      }
+    }
+  } finally {
+    osExitInFlight = false
   }
 }
 

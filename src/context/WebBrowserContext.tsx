@@ -1222,12 +1222,19 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
   }, [fullscreen, exitFullscreen])
 
   // Escape pressed inside the native WebContentsView never hits window — main forwards it.
+  // Main has already left OS fullscreen before it sends this, so only reset this
+  // surface's own view here. Calling exitOsFullscreen again bounced back to main,
+  // which sent force-exit again: an endless loop that undid every later Full.
   useEffect(() => {
     const stop = window.signalDesktop?.onForceExitFullscreen?.(() => {
-      exitFullscreen()
+      if (!desktop) return
+      setFullscreen(false)
+      if (modeRef.current === 'pip') void showAt(pipStageBounds())
+      else if (frameRef.current) void showAt(boundsFromElement(frameRef.current))
+      else if (modeRef.current === 'page') void showAt(fullscreenBounds({ fullBleed: false }))
     })
     return () => stop?.()
-  }, [exitFullscreen])
+  }, [desktop, showAt])
 
   // Keep owner in sync when OS fullscreen changes outside our toggle.
   // Only prefer 'web' while the in-app browser is actually active.

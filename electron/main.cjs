@@ -463,6 +463,8 @@ let multiWebIgnoreFocusUntil = 0
 
 /** @type {boolean} */
 let jiyuWantOsFullScreen = false
+/** Last time main told the renderer to drop its fullscreen views (re-entry guard). */
+let jiyuLastForceExitSentAt = 0
 /** Prefer OS minimize → PiP when the renderer says a stream can demote. */
 let jiyuMinimizeToPipEnabled = true
 let jiyuMinimizeToPipArmed = false
@@ -502,6 +504,9 @@ function endWindowMove() {
 }
 
 function exitAppFullscreenSurfaces() {
+  const wasFullscreen = Boolean(
+    jiyuWantOsFullScreen || (mainWindow && !mainWindow.isDestroyed() && mainWindow.isFullScreen()),
+  )
   jiyuWantOsFullScreen = false
   try {
     if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isFullScreen()) {
@@ -537,6 +542,11 @@ function exitAppFullscreenSurfaces() {
       height: Math.max(1, Math.round(height - top)),
     })
   }
+  // Re-entry guard: nothing was fullscreen and we just told the renderer, so
+  // don't echo again (renderer exit -> force-exit -> exit ... used to loop).
+  const now = Date.now()
+  if (!wasFullscreen && now - jiyuLastForceExitSentAt < 500) return
+  jiyuLastForceExitSentAt = now
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('browser:force-exit-fullscreen')
   }
@@ -10116,6 +10126,79 @@ async function torrentSubtitleUrl(torrent, videoFile, options = {}) {
   return materializeSubtitleUrl(torrent, videoFile, options)
 }
 
+/** .torrent URL -> info hash, so a repeat play (Restart) finds the live swarm. */
+const torrentUrlInfoHashes = new Map()
+
+/** Index just past the bencoded value that starts at i. */
+function bencodeSkip(buf, i, depth = 0) {
+  if (depth > 64 || i >= buf.length) throw new Error('bad bencode')
+  const c = buf[i]
+  if (c === 0x69) {
+    const end = buf.indexOf(0x65, i + 1)
+    if (end < 0) throw new Error('bad bencode int')
+    return end + 1
+  }
+  if (c === 0x6c || c === 0x64) {
+    let j = i + 1
+    while (j < buf.length && buf[j] !== 0x65) j = bencodeSkip(buf, j, depth + 1)
+    if (j >= buf.length) throw new Error('bad bencode list')
+    return j + 1
+  }
+  if (c >= 0x30 && c <= 0x39) {
+    const colon = buf.indexOf(0x3a, i)
+    if (colon < 0) throw new Error('bad bencode string')
+    const len = Number(buf.toString('ascii', i, colon))
+    if (!Number.isFinite(len) || len < 0) throw new Error('bad bencode length')
+    return colon + 1 + len
+  }
+  throw new Error('bad bencode')
+}
+
+/** BitTorrent v1 info hash (sha1 of the raw info dict) from .torrent bytes, or null. */
+function torrentBufferInfoHash(buf) {
+  try {
+    if (!Buffer.isBuffer(buf) || buf[0] !== 0x64) return null
+    let i = 1
+    while (i < buf.length && buf[i] !== 0x65) {
+      const colon = buf.indexOf(0x3a, i)
+      if (colon < 0) return null
+      const len = Number(buf.toString('ascii', i, colon))
+      const key = buf.toString('latin1', colon + 1, colon + 1 + len)
+      i = colon + 1 + len
+      const end = bencodeSkip(buf, i)
+      if (key === 'info') {
+        return require('node:crypto').createHash('sha1').update(buf.subarray(i, end)).digest('hex')
+      }
+      i = end
+    }
+  } catch {
+    /* not parseable: caller falls back to the old behaviour */
+  }
+  return null
+}
+
+async function downloadTorrentFileBytes(uri) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 30000)
+  try {
+    const response = await fetch(uri, {
+      signal: controller.signal,
+      headers: { 'User-Agent': STREAM_UA, Accept: 'application/x-bittorrent,*/*' },
+    })
+    if (!response.ok) {
+      throw new Error(`Torrent download failed (HTTP ${response.status})`)
+    }
+    const bytes = await response.arrayBuffer()
+    if (bytes.byteLength === 0) throw new Error('Downloaded torrent file is empty')
+    if (bytes.byteLength > 25 * 1024 * 1024) {
+      throw new Error('Torrent metadata file is unexpectedly large')
+    }
+    return Buffer.from(bytes)
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 function magnetInfoHash(magnet) {
   const m = /urn:btih:([a-z0-9]{32,40})/i.exec(magnet)
   return m ? m[1].toLowerCase() : null
@@ -10284,20 +10367,37 @@ ipcMain.handle('torrent:stream', async (_event, input, options) => {
 
     let torrent = null
     let addedHere = false
-    const hash = isMagnet ? magnetInfoHash(uri) : null
-    if (hash) {
-      const got = client.get(hash)
-      torrent = got && typeof got.then === 'function' ? await got : got
+    let hash = isMagnet ? magnetInfoHash(uri) : torrentUrlInfoHashes.get(uri) || null
+    const findLiveTorrent = async (infoHash) => {
+      const got = client.get(infoHash)
+      return (got && typeof got.then === 'function' ? await got : got) || null
     }
+    if (hash) torrent = await findLiveTorrent(hash)
+    // .torrent links carry no hash: fetch the file first so the info hash is known
+    // before other swarms are released. Otherwise a same-episode Restart dropped
+    // the playing torrent (and its subtitle sidecars) and re-added it.
+    let prefetchedTorrentFile = null
+    if (!torrent && isTorrentUrl) {
+      prefetchedTorrentFile = await downloadTorrentFileBytes(uri)
+      const parsedHash = torrentBufferInfoHash(prefetchedTorrentFile)
+      if (parsedHash) {
+        hash = parsedHash
+        torrentUrlInfoHashes.set(uri, parsedHash)
+        torrent = await findLiveTorrent(parsedHash)
+      }
+    }
+    const reusingLive = Boolean(torrent)
 
     // Single-play: drop other swarms so a stuck prior episode cannot starve this
     // one. Multi-view passes keepOthers so tile A keeps downloading while B starts.
-    if (!keepOthers) {
+    // Re-opening the swarm that is already live (Restart / same episode) releases
+    // nothing, so Nyaa subtitle sidecars keep downloading.
+    if (!keepOthers && !reusingLive) {
       for (const other of [...client.torrents]) {
         if (hash && other.infoHash === hash) continue
         releaseTorrent(other)
       }
-    } else {
+    } else if (keepOthers) {
       const others = client.torrents.filter((t) => !hash || t.infoHash !== hash)
       const overflow = others.length + 1 - MAX_CONCURRENT_TORRENTS
       if (overflow > 0) {
@@ -10317,25 +10417,7 @@ ipcMain.handle('torrent:stream', async (_event, input, options) => {
       let torrentId = isMagnet ? magnetWithDefaultTrackers(uri) : uri
 
       if (isTorrentUrl) {
-        const controller = new AbortController()
-        const timer = setTimeout(() => controller.abort(), 30000)
-        try {
-          const response = await fetch(uri, {
-            signal: controller.signal,
-            headers: { 'User-Agent': STREAM_UA, Accept: 'application/x-bittorrent,*/*' },
-          })
-          if (!response.ok) {
-            throw new Error(`Torrent download failed (HTTP ${response.status})`)
-          }
-          const bytes = await response.arrayBuffer()
-          if (bytes.byteLength === 0) throw new Error('Downloaded torrent file is empty')
-          if (bytes.byteLength > 25 * 1024 * 1024) {
-            throw new Error('Torrent metadata file is unexpectedly large')
-          }
-          torrentId = Buffer.from(bytes)
-        } finally {
-          clearTimeout(timer)
-        }
+        torrentId = prefetchedTorrentFile || (await downloadTorrentFileBytes(uri))
       }
 
       // Magnets: try the URI first (trackers + DHT). Only pull itorrents if
@@ -10569,7 +10651,9 @@ ipcMain.handle('torrent:stream', async (_event, input, options) => {
     }
 
     // Stop any prior episode's subtitle extractor so it cannot starve playback.
-    abortSubtitleExtractors(null)
+    // Not on a same-swarm re-open (Restart) or a keepOthers sidecar/tile start:
+    // that killed the playing episode's own extractor.
+    if (!reusingLive && !keepOthers) abortSubtitleExtractors(null)
 
     const preferJapaneseAudio = Boolean(
       options?.preferJapaneseAudio ||
