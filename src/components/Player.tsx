@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { useNavigate } from 'react-router-dom'
 import Hls from 'hls.js'
 import mpegts from 'mpegts.js'
@@ -95,6 +95,18 @@ import {
   resolveAtlanticPlay,
 } from '../lib/atlanticHls'
 import { ensureEpisodeSoftSubtitles } from '../lib/softSubs'
+import {
+  SubtitleTranslationSession,
+  detectCueLanguage,
+  type TranslationSnapshot,
+} from '../lib/subtitleTranslate'
+import { loadTranslationAids } from '../lib/subtitleContext'
+import {
+  getAutoTranslateSubsPref,
+  getPreferredSubtitleLanguage,
+  normalizeLanguageCode,
+  subtitleLanguageLabel,
+} from '../lib/language'
 import { subsLog } from '../lib/subsLog'
 import {
   estimateSubtitleDelay,
@@ -251,6 +263,11 @@ const SIDECAR_RETRY_WINDOW_ANDROID_MS = 10 * 60 * 1000
 /** Between background sidecar checks. A sidecar torrent settling wakes the wait early. */
 const SIDECAR_RETRY_BACKOFF_DESKTOP_MS = [3_000, 4_000, 5_000]
 const SIDECAR_RETRY_BACKOFF_ANDROID_MS = [10_000, 20_000, 30_000]
+/**
+ * With a translatable softsub already in hand, stop waiting for a still-starting Nyaa
+ * release after this long (0-seeder releases otherwise hold subtitles back for minutes).
+ */
+const SIDECAR_WAIT_WITH_TRANSLATION_FALLBACK_MS = 45_000
 
 /**
  * Episodes where Wyzie + OpenSubtitles already came back empty this session, so a
@@ -639,6 +656,23 @@ export function Player({
   const sidecarResetTickRef = useRef(0)
   /** After Wyzie free-plan ad dump, skip Wyzie and prefer Nyaa softsubs. */
   const skipWyzieSubsRef = useRef(false)
+  /** True once the current subtitle source is fully loaded (sidecar read / extract done). */
+  const subsExtractDoneRef = useRef(false)
+  /** In-app subtitle translation for the current track (null = not translating). */
+  const translationRef = useRef<SubtitleTranslationSession | null>(null)
+  const [translationSnap, setTranslationSnap] = useState<TranslationSnapshot | null>(null)
+  /** Show translated vs original cue text while a translation exists. */
+  const [translateMode, setTranslateMode] = useState<'translated' | 'original'>('translated')
+  /** Track language when it differs from the preferred one and auto-translate did not run. */
+  const [translateOffer, setTranslateOffer] = useState<string | null>(null)
+  /** Session key the user asked to translate on demand (Translate button). */
+  const translateManualKeyRef = useRef('')
+  const [translateRequestTick, setTranslateRequestTick] = useState(0)
+  /** Detected track language for the current subtitle URL (cached once confident). */
+  const detectedSubLangRef = useRef<{ url: string; lang: string } | null>(null)
+  const translationStatusRef = useRef<TranslationSnapshot['status'] | null>(null)
+  /** Cue array that belonged to the previous subtitle URL (kept on screen while the new one loads). */
+  const staleTranslateCuesRef = useRef<SubtitleCue[] | null>(null)
   const hintTimer = useRef<number | null>(null)
   const chromeTimer = useRef<number | null>(null)
   const resumeKeyRef = useRef<string | null>(null)
@@ -743,6 +777,8 @@ export function Player({
               fileName: item.description,
               subtitleUrl: item.subtitleUrl,
               subtitleKind: item.subtitleKind,
+              subtitleLanguage: item.subtitleLanguage,
+              subtitleNeedsTranslation: item.subtitleNeedsTranslation,
             },
           ]
   const activePlaylistItem = playlist[Math.min(playlistIndex, playlist.length - 1)] ?? {
@@ -750,6 +786,8 @@ export function Player({
     url: item.url,
     subtitleUrl: item.subtitleUrl,
     subtitleKind: item.subtitleKind,
+    subtitleLanguage: item.subtitleLanguage,
+    subtitleNeedsTranslation: item.subtitleNeedsTranslation,
   }
 
   useEffect(() => {
@@ -1828,6 +1866,7 @@ export function Player({
     }
 
     setSubsStatus((prev) => (prev === 'ready' && subtitleCues.length > 0 ? prev : 'loading'))
+    subsExtractDoneRef.current = false
     const startedAt = Date.now()
     // Keep refreshing for a long time — progressive extract fills cues as the
     // torrent downloads; stopping early makes subs vanish mid-episode.
@@ -1925,6 +1964,8 @@ export function Player({
           }
           if (ok) {
             const cues = parseSubtitleCues(text)
+            // Translation may send the (still growing) last chunk once the source is complete.
+            if (extractDone || (remoteSidecar && cues.length > 0)) subsExtractDoneRef.current = true
             const notASubtitle = sidecar && text.length > 40 && !text.includes('-->')
             // Wyzie free-plan ad dump — drop and let Nyaa / next source try.
             // VTT conversion sometimes returns the ad; the raw SRT is still usable.
@@ -2162,7 +2203,12 @@ export function Player({
       flash('No subtitles for this episode')
     }
 
-    const applySubs = (url: string, kind?: 'file' | 'embedded', label = 'Subtitles ready') => {
+    const applySubs = (
+      url: string,
+      kind?: 'file' | 'embedded',
+      label = 'Subtitles ready',
+      extra?: { language?: string; needsTranslation?: boolean },
+    ) => {
       if (cancelled || movySubsSidecarRef.current !== sidecarKey) return
       setSubsSearch('off')
       setLocalPlaylist((prev) => {
@@ -2173,12 +2219,28 @@ export function Player({
                 ...row,
                 subtitleUrl: url,
                 subtitleKind: kind,
+                subtitleLanguage: extra?.language,
+                subtitleNeedsTranslation: extra?.needsTranslation,
               }
             : row,
         )
       })
       setSubsFetchTick((n) => n + 1)
       flash(label)
+    }
+
+    /** Original-language Wyzie/OpenSubtitles track to translate when nothing better exists. */
+    let translationFallback: Awaited<ReturnType<typeof ensureEpisodeSoftSubtitles>>['translationFallback']
+    const applyTranslationFallback = (): boolean => {
+      if (!translationFallback) return false
+      settled = true
+      applySubs(
+        translationFallback.subtitleUrl,
+        translationFallback.subtitleKind,
+        `${translationFallback.language ? subtitleLanguageLabel(translationFallback.language) : 'Other-language'} subtitles found - translating`,
+        { language: translationFallback.language, needsTranslation: true },
+      )
+      return true
     }
 
     ;(async () => {
@@ -2210,6 +2272,7 @@ export function Player({
             applySubs(soft.subtitleUrl, soft.subtitleKind, label)
             return
           }
+          translationFallback = soft.translationFallback
           // English titles that don't need softsubs — stop quietly.
           if (!soft.needsSoftSubs) {
             settled = true
@@ -2218,6 +2281,7 @@ export function Player({
           softSubsMissByEpisode.set(softMissKey, sidecarRetryTick)
         }
         if (!canNyaa) {
+          if (applyTranslationFallback()) return
           giveUp(false)
           return
         }
@@ -2238,9 +2302,19 @@ export function Player({
           const backoffMs = isDesktopTorrentAvailable()
             ? SIDECAR_RETRY_BACKOFF_DESKTOP_MS
             : SIDECAR_RETRY_BACKOFF_ANDROID_MS
+          const windowMs = isDesktopTorrentAvailable() ? SIDECAR_RETRY_WINDOW_MS : SIDECAR_RETRY_WINDOW_ANDROID_MS
           const deadline =
             Date.now() +
-            (isDesktopTorrentAvailable() ? SIDECAR_RETRY_WINDOW_MS : SIDECAR_RETRY_WINDOW_ANDROID_MS)
+            (translationFallback ? Math.min(windowMs, SIDECAR_WAIT_WITH_TRANSLATION_FALLBACK_MS) : windowMs)
+          if (translationFallback) {
+            subsLog('softsubs.translate-fallback.wait', {
+              season,
+              episode,
+              language: translationFallback.language,
+              waitMs: Math.min(windowMs, SIDECAR_WAIT_WITH_TRANSLATION_FALLBACK_MS),
+              reason: 'Nyaa release still starting - translating the fallback track if it does not arrive',
+            })
+          }
           // A release torrent becoming ready (or failing) wakes the wait immediately.
           const unsubscribeSettle = onNyaaSubtitleSidecarSettled(() => sidecarWakeRef.current?.())
           try {
@@ -2257,6 +2331,8 @@ export function Player({
           }
         }
         if (!subs?.subtitleUrl) {
+          // Nyaa had nothing: translate the original-language track if one was found.
+          if (applyTranslationFallback()) return
           // Window over (or every release failed): manual retry stays available.
           giveUp(true)
           return
@@ -2317,12 +2393,136 @@ export function Player({
     setSubsSearch('off')
   }, [playlistIndex, item.id])
 
+  // New subtitle source: forget the previous track's translation / Translate offer.
+  useEffect(() => {
+    setTranslateOffer(null)
+    setTranslationSnap(null)
+    setTranslateMode('translated')
+    translationStatusRef.current = null
+    // Cues still in state belong to the previous track until loadSubtitles replaces them.
+    staleTranslateCuesRef.current = subtitleCues.length ? subtitleCues : null
+    return () => {
+      translationRef.current?.dispose()
+      translationRef.current = null
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- reset per track only
+  }, [subtitleUrl, playlistIndex, item.id])
+
+  /**
+   * In-app subtitle translation (same on desktop dev, installed Windows and Android):
+   * decide once per track whether it needs translating, then feed every (growing) cue
+   * list to the session, which only translates chunks it has not translated yet.
+   */
+  useEffect(() => {
+    if (!subtitleUrl || subtitleCues.length === 0) return
+    if (subtitleCues === staleTranslateCuesRef.current) return
+    const target = getPreferredSubtitleLanguage()
+    const sessionKey = `${subtitleUrl}|${target}`
+    let session = translationRef.current
+    if (session && session.key !== sessionKey) {
+      session.dispose()
+      translationRef.current = null
+      session = null
+      setTranslationSnap(null)
+    }
+    if (!session) {
+      let detected = activePlaylistItem.subtitleNeedsTranslation
+        ? normalizeLanguageCode(activePlaylistItem.subtitleLanguage)
+        : ''
+      if (!detected) {
+        const cached = detectedSubLangRef.current
+        if (cached && cached.url === subtitleUrl) {
+          detected = cached.lang
+        } else {
+          // Early cues of a growing extract are too few to judge the language.
+          if (subtitleCues.length < 20 && !subsExtractDoneRef.current) return
+          detected = detectCueLanguage(subtitleCues)
+          detectedSubLangRef.current = { url: subtitleUrl, lang: detected }
+        }
+      }
+      if (detected && detected === target) {
+        setTranslateOffer(null)
+        return
+      }
+      const manual = translateManualKeyRef.current === sessionKey
+      const auto =
+        getAutoTranslateSubsPref() &&
+        (Boolean(activePlaylistItem.subtitleNeedsTranslation) || Boolean(detected))
+      if (!manual && !auto) {
+        setTranslateOffer(detected || 'auto')
+        return
+      }
+      setTranslateOffer(null)
+      setTranslateMode('translated')
+      translationStatusRef.current = null
+      let announced = false
+      const created: SubtitleTranslationSession = new SubtitleTranslationSession({
+        key: sessionKey,
+        src: detected || 'auto',
+        tgt: target,
+        getPlayhead: () => {
+          const video = videoRef.current
+          return video ? absolutePlayhead(video) - subtitleDelayRef.current : 0
+        },
+        isComplete: () => subsExtractDoneRef.current,
+        // Names glossary + show / episode / synopsis context (TMDB; optional, bounded).
+        loadAids: async () => {
+          const isMovie = item.category === 'movies'
+          const epKey = playlistEpisodeKey(activePlaylistItem) || ''
+          const se = /^S(\d{1,2})E(\d{1,4})$/i.exec(epKey)
+          const showTitle = cleanShowDisplayTitle(item.title) || item.title
+          let tmdbId = rivestreamTmdbIdFromItem(item) || ''
+          if (item.category === 'anime') {
+            tmdbId = (await resolveAnimeTmdbTvId(item.title, tmdbId || null).catch(() => null)) || tmdbId
+          }
+          return loadTranslationAids({
+            tmdbId,
+            kind: isMovie ? 'movie' : 'tv',
+            season: isMovie ? undefined : se ? Number(se[1]) : 1,
+            episode: isMovie ? undefined : se ? Number(se[2]) : playlistIndex + 1,
+            showTitle,
+          })
+        },
+        onChange: (snap) => {
+          if (translationRef.current !== created) return
+          setTranslationSnap(snap)
+          const prev = translationStatusRef.current
+          translationStatusRef.current = snap.status
+          if (snap.status === 'unavailable' && prev !== 'unavailable') {
+            flash('Translation unavailable - showing original subtitles')
+          } else if (!announced && snap.translatedCues > 0) {
+            announced = true
+            flash(`Subtitles translated to ${subtitleLanguageLabel(snap.tgt)}`)
+          }
+        },
+      })
+      translationRef.current = created
+      setTranslationSnap(created.snapshot())
+      session = created
+    }
+    session.update(subtitleCues)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- runs per cue update / manual Translate
+  }, [subtitleCues, subtitleUrl, translateRequestTick])
+
+  /** Cues actually drawn: translated text when a translation exists and is selected. */
+  const displayCues = useMemo(
+    () =>
+      translateMode === 'translated' &&
+      translationRef.current &&
+      translationSnap &&
+      translationSnap.translatedCues > 0
+        ? translationRef.current.apply(subtitleCues)
+        : subtitleCues,
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- translationSnap changes when chunks land
+    [subtitleCues, translationSnap, translateMode],
+  )
+
   useEffect(() => {
     const video = videoRef.current
     if (!video) return
 
     const syncCue = () => {
-      if (!subsEnabledRef.current || subtitleCues.length === 0) {
+      if (!subsEnabledRef.current || displayCues.length === 0) {
         setSubtitleLine('')
         return
       }
@@ -2331,7 +2531,7 @@ export function Player({
       // absolutePlayhead tracks the title clock so cues stay locked to audio.
       setSubtitleLine(
         activeSubtitleText(
-          subtitleCues,
+          displayCues,
           absolutePlayhead(video) - subtitleDelayRef.current,
         ),
       )
@@ -2370,7 +2570,7 @@ export function Player({
       video.removeEventListener('timeupdate', syncCue)
     }
   }, [
-    subtitleCues,
+    displayCues,
     subsEnabled,
     activePlaylistItem.url,
     playlistIndex,
@@ -2411,6 +2611,37 @@ export function Player({
     setSubsEnabled((on) => {
       const next = !on
       flash(next ? 'Subtitles on' : 'Subtitles off')
+      return next
+    })
+  }
+
+  /** Translate button: start an on-demand translation, or retry after it was unavailable. */
+  function requestTranslate() {
+    bumpChrome()
+    const session = translationRef.current
+    if (session) {
+      session.retry()
+      setTranslateMode('translated')
+      flash('Retrying translation\u2026')
+      return
+    }
+    if (!subtitleUrl) return
+    const target = getPreferredSubtitleLanguage()
+    translateManualKeyRef.current = `${subtitleUrl}|${target}`
+    setTranslateRequestTick((n) => n + 1)
+    flash(`Translating subtitles to ${subtitleLanguageLabel(target)}\u2026`)
+  }
+
+  /** Translated / Original toggle (keeps both versions; timings are identical). */
+  function toggleTranslateMode() {
+    if (translationSnap?.status === 'unavailable') {
+      requestTranslate()
+      return
+    }
+    bumpChrome()
+    setTranslateMode((mode) => {
+      const next = mode === 'translated' ? 'original' : 'translated'
+      flash(next === 'translated' ? 'Showing translated subtitles' : 'Showing original subtitles')
       return next
     })
   }
@@ -6862,6 +7093,48 @@ export function Player({
                         ? 'Subs On'
                         : 'Subs Off'}
                 </button>
+                {subtitleUrl && translationSnap && (
+                  <button
+                    type="button"
+                    className={`ghost-btn control-btn${
+                      translateMode === 'translated' && translationSnap.status !== 'unavailable'
+                        ? ' is-armed'
+                        : ''
+                    }`}
+                    onClick={toggleTranslateMode}
+                    title={
+                      translationSnap.status === 'unavailable'
+                        ? `Translation unavailable${translationSnap.error ? ` (${translationSnap.error})` : ''} - click to retry`
+                        : translateMode === 'translated'
+                          ? `Showing ${subtitleLanguageLabel(translationSnap.tgt)} translation${
+                              translationSnap.src !== 'auto'
+                                ? ` of ${subtitleLanguageLabel(translationSnap.src)} subtitles`
+                                : ''
+                            } - click for the original`
+                          : 'Showing original subtitles - click for the translation'
+                    }
+                  >
+                    {translationSnap.status === 'unavailable'
+                      ? 'Translate'
+                      : translateMode === 'original'
+                        ? 'Original'
+                        : translationSnap.translatedCues === 0
+                          ? 'Translating\u2026'
+                          : 'Translated'}
+                  </button>
+                )}
+                {subtitleUrl && !translationSnap && translateOffer && subsStatus === 'ready' && (
+                  <button
+                    type="button"
+                    className="ghost-btn control-btn"
+                    onClick={requestTranslate}
+                    title={`Translate ${
+                      translateOffer === 'auto' ? 'these' : subtitleLanguageLabel(translateOffer)
+                    } subtitles to ${subtitleLanguageLabel(getPreferredSubtitleLanguage())}`}
+                  >
+                    Translate
+                  </button>
+                )}
                 {subsStatus === 'ready' && subsEnabled && (
                   <span className="sub-sync-control" title="Subtitle sync — [ earlier, ] later">
                     <button

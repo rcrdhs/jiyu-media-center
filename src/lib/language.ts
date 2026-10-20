@@ -229,3 +229,56 @@ export function setPreferredSubtitleLanguage(code: string) {
     /* ignore */
   }
 }
+
+const AUTO_TRANSLATE_KEY = 'signal.pref.autoTranslateSubs'
+
+/**
+ * Auto-translate subtitles: when the only subtitle track found is in another language,
+ * translate it to the preferred subtitle language (via the jiyu-wyzie Worker). Default on.
+ */
+export function getAutoTranslateSubsPref(): boolean {
+  try {
+    const raw = localStorage.getItem(AUTO_TRANSLATE_KEY)
+    if (raw === null) return true
+    return raw === '1' || raw === 'true'
+  } catch {
+    return true
+  }
+}
+
+export function setAutoTranslateSubsPref(value: boolean) {
+  try {
+    localStorage.setItem(AUTO_TRANSLATE_KEY, value ? '1' : '0')
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Subtitle language choices for Settings (codes understood by normalizeLanguageCode). */
+export const SUBTITLE_LANGUAGE_OPTIONS: ReadonlyArray<{ code: string; label: string }> = [
+  { code: 'en', label: 'English' },
+  { code: 'es', label: 'Spanish' },
+  { code: 'pt', label: 'Portuguese' },
+  { code: 'fr', label: 'French' },
+  { code: 'de', label: 'German' },
+  { code: 'it', label: 'Italian' },
+  { code: 'nl', label: 'Dutch' },
+  { code: 'pl', label: 'Polish' },
+  { code: 'ru', label: 'Russian' },
+  { code: 'tr', label: 'Turkish' },
+  { code: 'ar', label: 'Arabic' },
+  { code: 'hi', label: 'Hindi' },
+  { code: 'id', label: 'Indonesian' },
+  { code: 'vi', label: 'Vietnamese' },
+  { code: 'th', label: 'Thai' },
+  { code: 'ja', label: 'Japanese' },
+  { code: 'ko', label: 'Korean' },
+  { code: 'zh', label: 'Chinese' },
+]
+
+/** Human label for a subtitle language code (falls back to the upper-cased code). */
+export function subtitleLanguageLabel(code?: string | null): string {
+  const c = normalizeLanguageCode(code)
+  if (!c) return 'Unknown'
+  return SUBTITLE_LANGUAGE_OPTIONS.find((o) => o.code === c)?.label || c.toUpperCase()
+}

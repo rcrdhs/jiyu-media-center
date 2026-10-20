@@ -2674,6 +2674,10 @@ export function cleanShowDisplayTitle(title: string): string {
     )
     .replace(/\s+/g, ' ')
     .trim()
+    // Separators left dangling once "· S01E03" is cut ("Show ·", "Show · ·").
+    // Without this the player title grew a "·" on every Continue-watching resume.
+    .replace(/(?:\s*[\u00b7\u2022|\u2013\u2014-])+$/u, '')
+    .trim()
 }
 
 export interface EpisodeChoice {

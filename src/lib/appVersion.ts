@@ -12,6 +12,11 @@ export const APP_VERSION_LABEL = `v${APP_VERSION}`
 /** Short milestone log — newest first — so progress is visible in-app. */
 export const APP_RELEASES: ReadonlyArray<{ version: string; summary: string }> = [
   {
+    version: '0.3.81',
+    summary:
+      'Subtitles can now be translated in the app: when there are no English subtitles, Jiyu translates another language to English (on by default, in Settings); when no Japanese or English track exists, subtitles in any language are used, original Japanese first; translations keep character names and use the show and episode for context, with the first lines showing up within about a second; the stray · in show titles is gone; anime subtitles from Nyaa also match releases listed under an alternate title',
+  },
+  {
     version: '0.3.80',
     summary:
       'Subtitles now work the same on the installed Windows app as in dev and on the phone, through the subtitle service; anime subtitles from Nyaa no longer pick a release from a different season; dead or slow releases are skipped faster and retried later instead of being given up on; Restart works on the first press for MovieBox episodes; subtitle lookups are written to a subtitle log for troubleshooting',

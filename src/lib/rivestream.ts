@@ -859,6 +859,36 @@ export async function resolveAnimeTmdbTvId(
   return lookupRivestreamTmdbId(title, { preferAnime: true })
 }
 
+/**
+ * GET a TMDB v3 path (e.g. `/tv/1/season/1/aggregate_credits`) with the embedded public key.
+ * Desktop goes through the main-process JSON fetch like the other TMDB lookups here; returns
+ * parsed JSON or null (never throws).
+ */
+export async function fetchTmdbJson(
+  path: string,
+  params: Record<string, string> = {},
+): Promise<unknown | null> {
+  if (!/^\/[a-z0-9_/-]+$/i.test(path)) return null
+  const qs = new URLSearchParams({ ...params, api_key: TMDB_KEY })
+  const url = `${TMDB_API}${path}?${qs.toString()}`
+  if (window.signalDesktop?.fetchJsonGet) {
+    try {
+      const result = await window.signalDesktop.fetchJsonGet(url, RIVESTREAM_PLAY_REFERER)
+      if (!result.ok) return null
+      return JSON.parse(result.content || 'null') as unknown
+    } catch {
+      return null
+    }
+  }
+  try {
+    const res = await fetch(url)
+    if (!res.ok) return null
+    return (await res.json()) as unknown
+  } catch {
+    return null
+  }
+}
+
 /** Genre ids for a TMDB TV show (Animation = 16). */
 export async function fetchTmdbTvGenreIds(tmdbId: string): Promise<number[] | null> {
   const id = String(tmdbId || '').trim()

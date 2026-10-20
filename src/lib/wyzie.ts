@@ -223,6 +223,75 @@ async function resolveViaProxy(options: {
   }
 }
 
+export type WyzieAnyLanguageResult =
+  | { ok: true; hits: (WyzieSubtitleHit & { subtitleUrl: string })[]; via: 'worker' }
+  | { ok: false; error: string; via: 'worker' }
+
+/**
+ * Every Wyzie track for the episode, any language (translation fallback). Always via the
+ * Worker - same request on desktop dev, installed builds and Android; no local keys involved.
+ */
+export async function listWyzieHitsAnyLanguage(options: {
+  tmdbId: string | number
+  season?: number
+  episode?: number
+}): Promise<WyzieAnyLanguageResult> {
+  const started = Date.now()
+  const target = { tmdbId: options.tmdbId, season: options.season, episode: options.episode, language: 'any' }
+  const base = getWyzieProxyUrl()
+  const id = String(options.tmdbId || '').trim()
+  if (!base || !id) {
+    const error = !base ? 'WYZIE_PROXY_URL missing' : 'No TMDB id for Wyzie'
+    subsLog('wyzie', { ...target, path: 'worker', via: 'worker', ok: false, error })
+    return { ok: false, error, via: 'worker' }
+  }
+  const params = new URLSearchParams({ id, format: 'srt,vtt,ass' })
+  if (options.season != null && options.episode != null) {
+    params.set('season', String(Math.max(1, options.season)))
+    params.set('episode', String(Math.max(1, options.episode)))
+  }
+  const res = await fetchSubtitleProxyText(`${base}/search?${params.toString()}`, 'Wyzie')
+  let result: WyzieAnyLanguageResult
+  if (!res.ok) {
+    let detail = res.error || `HTTP ${res.status}`
+    try {
+      const err = JSON.parse(res.text) as { message?: string; details?: string }
+      detail = err.message || err.details || detail
+    } catch {
+      /* keep */
+    }
+    result = { ok: false, error: detail, via: 'worker' }
+  } else {
+    let hits: WyzieSubtitleHit[] = []
+    try {
+      const parsed = JSON.parse(res.text) as unknown
+      if (Array.isArray(parsed)) hits = parsed as WyzieSubtitleHit[]
+      else if (parsed && typeof parsed === 'object' && Array.isArray((parsed as { data?: unknown }).data)) {
+        hits = (parsed as { data: WyzieSubtitleHit[] }).data
+      }
+    } catch {
+      hits = []
+    }
+    const usable = hits
+      .filter((h) => h && /^https?:\/\//i.test(String(h.url || '')))
+      .map((h) => ({ ...h, subtitleUrl: withVttOutput(String(h.url)) }))
+    result = usable.length
+      ? { ok: true, hits: usable, via: 'worker' }
+      : { ok: false, error: 'No subtitles found', via: 'worker' }
+  }
+  subsLog('wyzie', {
+    ...target,
+    path: 'worker',
+    via: 'worker',
+    ok: result.ok,
+    error: result.ok ? undefined : result.error,
+    hits: result.ok ? result.hits.length : 0,
+    languages: result.ok ? [...new Set(result.hits.map((h) => h.language || '?'))].join(',') : undefined,
+    ms: Date.now() - started,
+  })
+  return result
+}
+
 export async function resolveWyzieSubtitle(options: {
   tmdbId: string | number
   season?: number

@@ -6,14 +6,22 @@
  *   WYZIE_API_KEY           — required for /search
  *   OPENSUBTITLES_API_KEY   — optional; enables /opensubtitles
  *
+ *   GEMINI_API_KEY          - optional; /translate provider 1
+ *   DEEPL_API_KEY           - optional; /translate provider 2 (":fx" = API Free)
+ *
+ * Bindings (wrangler.toml, optional): TRANSLATE_CACHE (KV), AI (Workers AI, provider 3),
+ *   TRANSLATE_RATE_LIMITER (rate limit). See src/translate.js.
+ *
  * Optional vars (wrangler.toml [vars]):
  *   ALLOWED_UA_SUBSTR — default "Jiyu" (soft filter; not real auth)
  */
+import { availableProviders, handleTranslate } from './translate.js'
+
 const WYZIE_ORIGIN = 'https://sub.wyzie.io'
 const OPENSUBTITLES_ORIGIN = 'https://api.opensubtitles.com/api/v1'
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url)
 
     if (request.method === 'OPTIONS') {
@@ -27,6 +35,8 @@ export default {
           service: 'jiyu-wyzie-proxy',
           hasKey: Boolean(env.WYZIE_API_KEY),
           hasOpenSubtitles: Boolean(env.OPENSUBTITLES_API_KEY),
+          translateProviders: availableProviders(env),
+          hasTranslateCache: Boolean(env.TRANSLATE_CACHE),
         }),
       )
     }
@@ -44,6 +54,22 @@ export default {
       client.includes('JiyuMedia')
     if (!clientOk) {
       return cors(Response.json({ code: 403, message: 'Forbidden' }, { status: 403 }))
+    }
+
+    if (url.pathname === '/translate') {
+      if (request.method !== 'POST') {
+        return cors(Response.json({ ok: false, error: 'Use POST' }, { status: 405 }))
+      }
+      try {
+        return cors(await handleTranslate(request, env, ctx))
+      } catch (err) {
+        return cors(
+          Response.json(
+            { ok: false, error: err instanceof Error ? err.message : 'Translate failed' },
+            { status: 500 },
+          ),
+        )
+      }
     }
 
     if (url.pathname === '/opensubtitles' && request.method === 'GET') {
@@ -122,6 +148,15 @@ async function handleOpenSubtitles(url, env) {
   }
 
   const language = String(url.searchParams.get('language') || 'en').trim() || 'en'
+  // language=any: no language filter; rank by the client's `prefer` list (translation source).
+  const anyLanguage = language === 'any' || language === '*'
+  const prefer = String(url.searchParams.get('prefer') || '')
+    .split(',')
+    .map(normalizeTrackLanguage)
+    .filter(Boolean)
+    .slice(0, 24)
+  // Title's original language: always beats other languages regardless of release quality.
+  const original = normalizeTrackLanguage(url.searchParams.get('original') || '')
   const season = Number(url.searchParams.get('season'))
   const episode = Number(url.searchParams.get('episode'))
   const isEpisode =
@@ -136,7 +171,7 @@ async function handleOpenSubtitles(url, env) {
 
   try {
     const search = new URL(`${OPENSUBTITLES_ORIGIN}/subtitles`)
-    search.searchParams.set('languages', language)
+    if (!anyLanguage) search.searchParams.set('languages', language)
     search.searchParams.set('order_by', 'download_count')
     search.searchParams.set('order_direction', 'desc')
     if (isEpisode) {
@@ -174,10 +209,19 @@ async function handleOpenSubtitles(url, env) {
         const file = Array.isArray(attrs.files) ? attrs.files[0] : null
         const fileId = Number(file?.file_id)
         if (!Number.isFinite(fileId) || fileId < 1) return null
-        let score = Number(attrs.download_count) || 0
-        if (attrs.hearing_impaired) score -= 500
-        if (String(attrs.language || '').toLowerCase().startsWith('en')) score += 1000
-        return { fileId, score }
+        const lang = normalizeTrackLanguage(attrs.language)
+        let score
+        if (anyLanguage) {
+          score = scoreAnyLanguage(lang, prefer, original)
+          score += Math.min(100, (Number(attrs.download_count) || 0) / 2.5)
+          if (attrs.hearing_impaired) score -= 80
+          if (attrs.ai_translated || attrs.machine_translated) score -= 300
+        } else {
+          score = Number(attrs.download_count) || 0
+          if (attrs.hearing_impaired) score -= 500
+          if (String(attrs.language || '').toLowerCase().startsWith('en')) score += 1000
+        }
+        return { fileId, score, language: lang, release: String(attrs.release || '').slice(0, 200) }
       })
       .filter(Boolean)
       .sort((a, b) => b.score - a.score)
@@ -215,7 +259,14 @@ async function handleOpenSubtitles(url, env) {
       return Response.json({ ok: false, error: 'OpenSubtitles returned no download link' })
     }
 
-    return Response.json({ ok: true, subtitleUrl: link, source: 'opensubtitles' })
+    return Response.json({
+      ok: true,
+      subtitleUrl: link,
+      source: 'opensubtitles',
+      language: best.language || undefined,
+      release: best.release || undefined,
+      candidates: anyLanguage ? ranked.length : undefined,
+    })
   } catch (err) {
     return Response.json(
       { ok: false, error: err instanceof Error ? err.message : 'OpenSubtitles upstream failed' },
@@ -224,10 +275,31 @@ async function handleOpenSubtitles(url, env) {
   }
 }
 
+/** OpenSubtitles / Wyzie track codes -> base language (pt-BR/pb -> pt, zh-TW/zt -> zh, ea -> es). */
+export function normalizeTrackLanguage(raw) {
+  const s = String(raw || '').trim().toLowerCase()
+  if (!s) return ''
+  const legacy = { pb: 'pt', pob: 'pt', zt: 'zh', ze: 'zh', zhs: 'zh', zht: 'zh', ea: 'es', spl: 'es', chi: 'zh', jpn: 'ja', eng: 'en' }
+  if (legacy[s]) return legacy[s]
+  const m = /^([a-z]{2,3})(?:[-_][a-z0-9]{2,4})?$/.exec(s)
+  return m ? m[1] : ''
+}
+
+/**
+ * Language rank for language=any: the title's original language first (dominates every quality
+ * signal), then earlier in `prefer` (x10 so downloads only break near-ties).
+ */
+export function scoreAnyLanguage(lang, prefer, original = '') {
+  if (lang && original && lang === original) return 10000
+  const i = prefer.indexOf(lang)
+  if (i >= 0) return (100 - i * 6) * 10
+  return lang ? 200 : 0
+}
+
 function cors(res) {
   const headers = new Headers(res.headers)
   headers.set('Access-Control-Allow-Origin', '*')
-  headers.set('Access-Control-Allow-Methods', 'GET, OPTIONS')
+  headers.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
   headers.set(
     'Access-Control-Allow-Headers',
     'Accept, Content-Type, User-Agent, X-Jiyu-Client, Referer, Origin',

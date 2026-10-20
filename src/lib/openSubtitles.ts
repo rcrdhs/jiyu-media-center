@@ -74,6 +74,96 @@ async function resolveViaProxy(options: {
   }
 }
 
+export type OpenSubtitlesAnyLanguageResult =
+  | {
+      ok: true
+      subtitleUrl: string
+      subtitleKind: 'file'
+      source: 'opensubtitles'
+      via: 'worker'
+      /** Track language as reported by OpenSubtitles (normalized by the Worker, e.g. pt-BR -> pt). */
+      language: string
+      release?: string
+    }
+  | { ok: false; error: string; via: 'worker' }
+
+/**
+ * Best OpenSubtitles track in ANY language (translation fallback), ranked by the Worker
+ * using `prefer` (earlier = better). Always via the Worker on every platform.
+ */
+export async function resolveOpenSubtitlesAnyLanguage(options: {
+  tmdbId: string | number
+  season?: number
+  episode?: number
+  prefer: string[]
+  /** Title's original language: the Worker ranks it above every other language. */
+  original?: string
+}): Promise<OpenSubtitlesAnyLanguageResult> {
+  const started = Date.now()
+  const target = { tmdbId: options.tmdbId, season: options.season, episode: options.episode, language: 'any' }
+  const base = getWyzieProxyUrl()
+  const id = String(options.tmdbId || '').trim()
+  let result: OpenSubtitlesAnyLanguageResult
+  if (!base || !id) {
+    result = { ok: false, error: !base ? 'Subtitle proxy URL missing' : 'No TMDB id for OpenSubtitles', via: 'worker' }
+  } else {
+    const params = new URLSearchParams({ id, language: 'any', prefer: options.prefer.join(',') })
+    if (options.original) params.set('original', options.original)
+    if (options.season != null && options.episode != null) {
+      params.set('season', String(Math.max(1, options.season)))
+      params.set('episode', String(Math.max(1, options.episode)))
+    }
+    const r = await fetchSubtitleProxyText(`${base}/opensubtitles?${params.toString()}`, 'OpenSubtitles')
+    if (!r.ok) {
+      let detail = r.error || `HTTP ${r.status}`
+      try {
+        const err = JSON.parse(r.text) as { message?: string; error?: string }
+        detail = err.message || err.error || detail
+      } catch {
+        /* keep */
+      }
+      result = { ok: false, error: detail, via: 'worker' }
+    } else {
+      try {
+        const parsed = JSON.parse(r.text) as {
+          ok?: boolean
+          subtitleUrl?: string
+          error?: string
+          language?: string
+          release?: string
+        }
+        const url = String(parsed.subtitleUrl || '').trim()
+        result =
+          parsed.ok && /^https?:\/\//i.test(url)
+            ? {
+                ok: true,
+                subtitleUrl: url,
+                subtitleKind: 'file',
+                source: 'opensubtitles',
+                via: 'worker',
+                language: String(parsed.language || ''),
+                release: parsed.release,
+              }
+            : { ok: false, error: parsed.error || 'No OpenSubtitles for this episode', via: 'worker' }
+      } catch {
+        result = { ok: false, error: 'Invalid OpenSubtitles proxy response', via: 'worker' }
+      }
+    }
+  }
+  subsLog('opensubtitles', {
+    ...target,
+    path: 'worker',
+    via: 'worker',
+    ok: result.ok,
+    error: result.ok ? undefined : result.error,
+    chosenLanguage: result.ok ? result.language : undefined,
+    release: result.ok ? result.release : undefined,
+    host: result.ok ? result.subtitleUrl : undefined,
+    ms: Date.now() - started,
+  })
+  return result
+}
+
 export async function resolveOpenSubtitlesSubtitle(options: {
   tmdbId: string | number
   season?: number

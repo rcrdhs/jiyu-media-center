@@ -94,6 +94,10 @@ export interface StreamItem {
   subtitleUrl?: string
   /** Companion subtitle file vs speculative embedded softsub extract */
   subtitleKind?: 'file' | 'embedded'
+  /** Known language of subtitleUrl (ISO 639-1) when the provider reported it. */
+  subtitleLanguage?: string
+  /** subtitleUrl is an original-language fallback that should be translated in-app. */
+  subtitleNeedsTranslation?: boolean
   /**
    * Authoritative title length in seconds (YTS/TMDB runtime or ffprobe).
    * Prefer this over remux `video.duration`, which often tracks the buffer only.
@@ -110,6 +114,10 @@ export interface StreamPlaylistItem {
   subtitleUrl?: string
   /** Companion subtitle file vs speculative embedded softsub extract */
   subtitleKind?: 'file' | 'embedded'
+  /** Known language of subtitleUrl (ISO 639-1) when the provider reported it. */
+  subtitleLanguage?: string
+  /** subtitleUrl is an original-language fallback that should be translated in-app. */
+  subtitleNeedsTranslation?: boolean
   /** Magnet / .torrent to resolve when switching episodes (SubsPlease-style shows). */
   torrentUri?: string
   /** Fallback magnets when the primary swarm is dead. */

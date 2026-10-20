@@ -219,15 +219,26 @@ function pickNyaaRelease(
   )
 }
 
-function releaseMatchesShow(releaseTitle: string, showTitle: string): boolean {
-  const release = normalizeShowKey(releaseTitle)
-  const show = normalizeShowKey(cleanShowDisplayTitle(showTitle) || showTitle)
+function showKeyMatches(release: string, show: string): boolean {
   if (!release || !show) return false
   if (release.includes(show) || show.includes(release)) return true
   const words = show.split(/\s+/).filter((w) => w.length > 2 && !/^(the|and|of|a|an)$/i.test(w))
   if (words.length === 0) return false
   const hits = words.filter((w) => release.includes(w)).length
   return hits >= Math.min(2, words.length)
+}
+
+export function releaseMatchesShow(releaseTitle: string, showTitle: string): boolean {
+  const show = normalizeShowKey(cleanShowDisplayTitle(showTitle) || showTitle)
+  if (!show) return false
+  if (showKeyMatches(normalizeShowKey(releaseTitle), show)) return true
+  // Fansubs often name the romaji title and put the English one in parentheses, which
+  // cleanShowDisplayTitle drops: "[EMBER] Tensei Kizoku, ... S01E03 [1080p] (As a Reincarnated ...)".
+  for (const m of releaseTitle.matchAll(/\(([^()]{6,})\)/g)) {
+    const alt = normalizeShowKey(m[1])
+    if (alt.length >= 6 && showKeyMatches(alt, show)) return true
+  }
+  return false
 }
 
 export async function searchNyaaTorrents(

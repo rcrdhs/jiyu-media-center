@@ -6,7 +6,46 @@ account_id = "66ce46c9393edb3e5926e91f390fcfb7"
 # Soft UA filter (not a secret). Clients send User-Agent containing this / Electron.
 [vars]
 ALLOWED_UA_SUBSTR = "Jiyu"
+# /translate: Gemini model (change here when Google retires it; no redeploy of the apps needed).
+GEMINI_MODEL = "gemini-3.8-flash"
+# Gemini 3.8 Flash thinking: low | medium (model default) | high; "off" = send no thinkingConfig.
+GEMINI_THINKING_LEVEL = "low"
+# Gemini free-tier latency is 15-40 s even for tiny chunks; past this DeepL takes over.
+GEMINI_TIMEOUT_MS = "25000"
+# Workers AI (fallback) results are cached only this long so Gemini/DeepL can replace them.
+FALLBACK_CACHE_TTL_SECONDS = "86400"
+# Monthly source-character caps per provider (soft, counted in KV). DeepL Free = 500k/month.
+GEMINI_MONTHLY_CHARS = "3000000"
+DEEPL_MONTHLY_CHARS = "490000"
+WORKERS_AI_MONTHLY_CHARS = "1500000"
+# In-memory per-IP fallback when the TRANSLATE_RATE_LIMITER binding is absent.
+TRANSLATE_RATE_PER_MIN = "40"
 
 # Set after deploy:
 #   npx wrangler secret put WYZIE_API_KEY
 # (paste your Wyzie key — never commit it)
+
+# /translate cache (provider-independent, ~90 day TTL) + monthly budget counters.
+# Create it once:  npx wrangler kv namespace create TRANSLATE_CACHE
+# then paste the printed id below.
+[[kv_namespaces]]
+binding = "TRANSLATE_CACHE"
+id = "1b3dc02ef4c34e6e83f8ffc73a357538"
+
+# Workers AI (m2m100) - last-resort translate provider. Free: 10k Neurons/day.
+[ai]
+binding = "AI"
+
+# Per-IP rate limit for /translate (needs Wrangler >= 4.36). namespace_id is any
+# integer unique in this Cloudflare account.
+[[ratelimits]]
+name = "TRANSLATE_RATE_LIMITER"
+namespace_id = "4101"
+
+  [ratelimits.simple]
+  limit = 30
+  period = 60
+
+# Secrets (never commit):
+#   npx wrangler secret put GEMINI_API_KEY   # optional, provider 1
+#   npx wrangler secret put DEEPL_API_KEY    # optional, provider 2 (":fx" key = API Free)

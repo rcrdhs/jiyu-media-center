@@ -8,6 +8,7 @@
 
 import {
   detectItemOriginalLanguage,
+  getAutoTranslateSubsPref,
   getPreferredSubtitleLanguage,
   itemNeedsSoftSubtitles,
   normalizeLanguageCode,
@@ -19,8 +20,12 @@ import {
   resolveAnimeTmdbTvId,
   rivestreamTmdbIdFromItem,
 } from './rivestream'
-import { resolveOpenSubtitlesSubtitle, isOpenSubtitlesAvailable } from './openSubtitles'
-import { resolveWyzieSubtitle, isWyzieAvailable } from './wyzie'
+import {
+  resolveOpenSubtitlesAnyLanguage,
+  resolveOpenSubtitlesSubtitle,
+  isOpenSubtitlesAvailable,
+} from './openSubtitles'
+import { listWyzieHitsAnyLanguage, resolveWyzieSubtitle, isWyzieAvailable } from './wyzie'
 import { subsLog } from './subsLog'
 
 export type SoftSubResolveResult =
@@ -40,6 +45,187 @@ export type EnsureSoftSubtitlesResult = {
   subtitleUrl?: string
   subtitleKind?: 'file'
   source?: 'wyzie' | 'opensubtitles'
+  /**
+   * Preferred language missed, but a track in another language exists (original language
+   * first, then any language the translator handles well). The player uses it as a last
+   * resort (after Nyaa) and translates it in-app.
+   */
+  translationFallback?: {
+    subtitleUrl: string
+    subtitleKind: 'file'
+    source: 'wyzie' | 'opensubtitles'
+    /** Source language for the translator ('' = unknown -> Worker auto-detects). */
+    language: string
+    release?: string
+  }
+}
+
+/**
+ * Languages the translator chain (Gemini / DeepL / m2m100) handles well, in fallback order
+ * after the title's original language.
+ */
+export const TRANSLATION_SOURCE_LANGUAGES = [
+  'es', 'pt', 'fr', 'de', 'it', 'id', 'zh', 'ko', 'ru', 'nl', 'pl', 'tr', 'vi', 'ja', 'ar', 'th', 'uk', 'cs', 'sv',
+] as const
+
+/** Wyzie / OpenSubtitles track codes -> base language (pb/pt-BR -> pt, zt/zh-TW -> zh, ea -> es). */
+export function normalizeSubtitleTrackLanguage(raw?: string | null): string {
+  const s = String(raw || '').trim().toLowerCase()
+  if (!s) return ''
+  const legacy: Record<string, string> = {
+    pb: 'pt', pob: 'pt', zt: 'zh', ze: 'zh', zhs: 'zh', zht: 'zh', ea: 'es', spl: 'es',
+  }
+  return legacy[s] || normalizeLanguageCode(s)
+}
+
+/** Ordered translation-source preference: original language, then TRANSLATION_SOURCE_LANGUAGES. */
+export function translationSourcePreference(originalLanguage: string | undefined, preferredLanguage: string): string[] {
+  const out: string[] = []
+  for (const raw of [originalLanguage, ...TRANSLATION_SOURCE_LANGUAGES]) {
+    const lang = normalizeLanguageCode(raw)
+    if (!lang || lang === 'xx' || lang === preferredLanguage || out.includes(lang)) continue
+    out.push(lang)
+  }
+  return out
+}
+
+export type TranslationTrackCandidate = {
+  subtitleUrl: string
+  language: string
+  release?: string
+  format?: string
+  hearingImpaired?: boolean
+  downloadCount?: number
+}
+
+/**
+ * Score a track for the any-language fallback. Language dominates: the preferred language
+ * wins outright, then the title's ORIGINAL language regardless of release quality (unless the
+ * release is tagged as a different episode), then earlier in `prefer`; this episode's SxxEyy,
+ * non-HI, text formats and downloads only break ties.
+ */
+export const ORIGINAL_LANGUAGE_SCORE = 1000
+
+export function scoreTranslationCandidate(
+  c: TranslationTrackCandidate,
+  opts: {
+    prefer: string[]
+    preferredLanguage: string
+    originalLanguage?: string
+    season?: number
+    episode?: number
+  },
+): number {
+  const { season, episode } = opts
+  let episodeMatch = 0
+  if (season != null && episode != null && season >= 1 && episode >= 1) {
+    const blob = String(c.release || '').toLowerCase()
+    const tag = `s${String(season).padStart(2, '0')}e${String(episode).padStart(2, '0')}`
+    if (blob.includes(tag) || blob.includes(`s${season}e${episode}`)) episodeMatch = 1
+    else if (/s\d{1,2}e\d{1,3}/i.test(blob)) episodeMatch = -1
+  }
+  let score: number
+  const original = normalizeLanguageCode(opts.originalLanguage)
+  if (c.language && c.language === opts.preferredLanguage) score = 300 + ORIGINAL_LANGUAGE_SCORE
+  else if (c.language && original && original !== 'xx' && c.language === original && episodeMatch >= 0) {
+    score = ORIGINAL_LANGUAGE_SCORE
+  } else {
+    const i = c.language ? opts.prefer.indexOf(c.language) : -1
+    score = i >= 0 ? 100 - i * 6 : c.language ? 20 : 0
+  }
+  if (c.hearingImpaired) score -= 8
+  const fmt = String(c.format || '').toLowerCase()
+  if (fmt === 'srt' || fmt === 'vtt') score += 4
+  else if (fmt === 'ass' || fmt === 'ssa') score += 2
+  score += Math.min(10, Math.floor((Number(c.downloadCount) || 0) / 25))
+  if (episodeMatch > 0) score += 15
+  else if (episodeMatch < 0) score -= 60
+  return score
+}
+
+/**
+ * Any-language softsub for translation: Wyzie (all languages, ranked here), then OpenSubtitles
+ * (language=any, ranked by the Worker with the same preference list). Worker path on every
+ * platform so dev, installed and Android pick the same track.
+ */
+async function findAnyLanguageTrack(options: {
+  tmdbId: string
+  season?: number
+  episode?: number
+  preferredLanguage: string
+  originalLanguage?: string
+  skipWyzie?: boolean
+}): Promise<
+  | (TranslationTrackCandidate & { source: 'wyzie' | 'opensubtitles'; candidates?: string })
+  | { error: string }
+> {
+  const prefer = translationSourcePreference(options.originalLanguage, options.preferredLanguage)
+  const original = normalizeLanguageCode(options.originalLanguage)
+  const opts = {
+    prefer,
+    preferredLanguage: options.preferredLanguage,
+    originalLanguage: original,
+    season: options.season,
+    episode: options.episode,
+  }
+  let error = 'No subtitles in any language'
+  let wyzieBest: (TranslationTrackCandidate & { source: 'wyzie'; candidates?: string }) | null = null
+  if (!options.skipWyzie && isWyzieAvailable()) {
+    const w = await listWyzieHitsAnyLanguage(options)
+    if (w.ok) {
+      const ranked = w.hits
+        .map((h) => {
+          const c: TranslationTrackCandidate = {
+            subtitleUrl: h.subtitleUrl,
+            language: normalizeSubtitleTrackLanguage(h.language),
+            release: h.release || h.fileName || h.display,
+            format: h.format,
+            hearingImpaired: h.isHearingImpaired,
+            downloadCount: h.downloadCount,
+          }
+          return { c, score: scoreTranslationCandidate(c, opts) }
+        })
+        .sort((a, b) => b.score - a.score)
+      const best = ranked[0]
+      if (best && best.score > 0) {
+        wyzieBest = {
+          ...best.c,
+          source: 'wyzie',
+          candidates: ranked
+            .slice(0, 8)
+            .map((r) => `${r.c.language || '?'}:${r.score}`)
+            .join(','),
+        }
+        if (best.score >= ORIGINAL_LANGUAGE_SCORE) return wyzieBest
+      }
+    } else error = w.error
+  }
+  // Original language first: Wyzie had none, so ask OpenSubtitles for exactly that language
+  // (a language-filtered search only spends a download when such a track exists).
+  const wantOriginal = Boolean(original && original !== 'xx' && original !== options.preferredLanguage)
+  if (wantOriginal && isOpenSubtitlesAvailable()) {
+    const os = await resolveOpenSubtitlesSubtitle({
+      tmdbId: options.tmdbId,
+      season: options.season,
+      episode: options.episode,
+      language: original,
+    })
+    if (os.ok) return { subtitleUrl: os.subtitleUrl, language: original, source: 'opensubtitles' }
+  }
+  if (wyzieBest) return wyzieBest
+  if (isOpenSubtitlesAvailable()) {
+    const os = await resolveOpenSubtitlesAnyLanguage({ ...options, prefer, original })
+    if (os.ok) {
+      return {
+        subtitleUrl: os.subtitleUrl,
+        language: normalizeSubtitleTrackLanguage(os.language),
+        release: os.release,
+        source: 'opensubtitles',
+      }
+    }
+    error = os.error
+  }
+  return { error }
 }
 
 export async function resolveSoftSubtitles(options: {
@@ -131,6 +317,11 @@ export async function ensureEpisodeSoftSubtitles(options: {
    * Default: only when itemNeedsSoftSubtitles (or language unknown on series/M2Box).
    */
   force?: boolean
+  /**
+   * When the preferred language misses, also look for an original-language track to
+   * translate (default: follows the Auto-translate subtitles setting).
+   */
+  allowTranslationFallback?: boolean
 }): Promise<EnsureSoftSubtitlesResult> {
   const preferredLanguage =
     normalizeLanguageCode(options.language) || getPreferredSubtitleLanguage()
@@ -229,11 +420,88 @@ export async function ensureEpisodeSoftSubtitles(options: {
     skipWyzie: options.skipWyzie,
   })
   if (!soft.ok) {
+    const allowFallback = options.allowTranslationFallback ?? getAutoTranslateSubsPref()
+    const sourceLanguage = normalizeLanguageCode(originalLanguage)
+    let translationFallback: EnsureSoftSubtitlesResult['translationFallback']
+    if (allowFallback && sourceLanguage && sourceLanguage !== 'xx' && sourceLanguage !== preferredLanguage) {
+      const original = await resolveSoftSubtitles({
+        tmdbId,
+        season: options.season,
+        episode: options.episode,
+        language: sourceLanguage,
+        skipWyzie: options.skipWyzie,
+      })
+      subsLog('softsubs.translate-fallback', {
+        tmdbId,
+        season: options.season,
+        episode: options.episode,
+        language: sourceLanguage,
+        preferredLanguage,
+        ok: original.ok,
+        source: original.ok ? original.source : undefined,
+        error: original.ok ? undefined : original.error,
+      })
+      if (original.ok) {
+        translationFallback = {
+          subtitleUrl: original.subtitleUrl,
+          subtitleKind: original.subtitleKind,
+          source: original.source,
+          language: sourceLanguage,
+        }
+      }
+    }
+    // Still nothing: take a track in ANY language (original first, then translator-friendly).
+    if (allowFallback && !translationFallback) {
+      const any = await findAnyLanguageTrack({
+        tmdbId,
+        season: options.season,
+        episode: options.episode,
+        preferredLanguage,
+        originalLanguage: sourceLanguage || undefined,
+        skipWyzie: options.skipWyzie,
+      })
+      const found = 'subtitleUrl' in any
+      subsLog('softsubs.translate-fallback', {
+        tmdbId,
+        season: options.season,
+        episode: options.episode,
+        language: 'any',
+        preferredLanguage,
+        ok: found,
+        source: found ? any.source : undefined,
+        chosenLanguage: found ? any.language || 'unknown' : undefined,
+        release: found ? any.release : undefined,
+        candidates: found ? any.candidates : undefined,
+        error: found ? undefined : any.error,
+      })
+      if (found) {
+        if (any.language && any.language === preferredLanguage) {
+          // The any-language list had a preferred-language track after all: use it as-is.
+          return {
+            tmdbId,
+            originalLanguage: originalLanguage || undefined,
+            preferredLanguage,
+            needsSoftSubs: true,
+            subtitleUrl: any.subtitleUrl,
+            subtitleKind: 'file',
+            source: any.source,
+          }
+        }
+        translationFallback = {
+          subtitleUrl: any.subtitleUrl,
+          subtitleKind: 'file',
+          source: any.source,
+          language: any.language,
+          release: any.release,
+        }
+      }
+    }
     return {
       tmdbId,
       originalLanguage: originalLanguage || undefined,
       preferredLanguage,
       needsSoftSubs: true,
+      translationFallback,
     }
   }
   return {

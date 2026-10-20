@@ -27,6 +27,7 @@ import {
 } from '../lib/debridSettings'
 import { ProgressSyncSettings } from '../components/ProgressSyncSettings'
 import { HideKeywordsSettings } from '../components/HideKeywordsSettings'
+import { SubtitleTranslateSettings } from '../components/SubtitleTranslateSettings'
 import {
   getViewingQuality,
   setViewingQuality,
@@ -424,6 +425,7 @@ export function LibraryPage() {
             </p>
             <ProgressSyncSettings />
             <HideKeywordsSettings />
+            <SubtitleTranslateSettings />
             <label className="check-toggle">
               <input
                 type="checkbox"
