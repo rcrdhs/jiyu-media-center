@@ -21,6 +21,7 @@ import {
 } from './rivestream'
 import { resolveOpenSubtitlesSubtitle, isOpenSubtitlesAvailable } from './openSubtitles'
 import { resolveWyzieSubtitle, isWyzieAvailable } from './wyzie'
+import { subsLog } from './subsLog'
 
 export type SoftSubResolveResult =
   | {
@@ -52,6 +53,9 @@ export async function resolveSoftSubtitles(options: {
   const tmdbId = String(options.tmdbId || '').trim()
   if (!tmdbId) return { ok: false, error: 'No TMDB id for subtitles' }
 
+  if (options.skipWyzie) {
+    subsLog('softsubs.skip', { tmdbId, provider: 'wyzie', reason: 'skipWyzie (bad pack earlier)' })
+  }
   if (!options.skipWyzie && isWyzieAvailable()) {
     const wyzie = await resolveWyzieSubtitle({
       tmdbId,
@@ -84,9 +88,16 @@ export async function resolveSoftSubtitles(options: {
         source: 'opensubtitles',
       }
     }
+    subsLog('softsubs.miss', {
+      tmdbId,
+      season: options.season,
+      episode: options.episode,
+      reason: 'Wyzie and OpenSubtitles had nothing — caller may try Nyaa',
+    })
     return { ok: false, error: os.error }
   }
 
+  subsLog('softsubs.miss', { tmdbId, reason: 'no subtitle providers available' })
   return { ok: false, error: 'No subtitle providers available' }
 }
 
@@ -180,6 +191,12 @@ export async function ensureEpisodeSoftSubtitles(options: {
         Boolean(options.item?.m2boxSubjectId)))
 
   if (!tmdbId) {
+    subsLog('softsubs.stop', {
+      title: options.title,
+      season: options.season,
+      episode: options.episode,
+      reason: 'no TMDB id — Wyzie/OpenSubtitles not tried',
+    })
     return {
       tmdbId: '',
       originalLanguage: originalLanguage || undefined,
@@ -189,6 +206,13 @@ export async function ensureEpisodeSoftSubtitles(options: {
   }
 
   if (!needsSoftSubs) {
+    subsLog('softsubs.stop', {
+      title: options.title,
+      tmdbId,
+      originalLanguage,
+      preferredLanguage,
+      reason: 'title does not need softsubs (audio matches preferred language)',
+    })
     return {
       tmdbId,
       originalLanguage: originalLanguage || undefined,

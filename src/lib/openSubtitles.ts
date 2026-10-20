@@ -1,16 +1,25 @@
 /**
  * OpenSubtitles.com — secondary softsub lookup when Wyzie has nothing.
  *
- * Desktop: Electron IPC uses OPENSUBTITLES_API_KEY from main .env (never Vite).
+ * Desktop: Electron IPC uses OPENSUBTITLES_API_KEY from main .env (never Vite); without a
+ * local key main — or, on an older main, the renderer — uses the jiyu-wyzie Worker.
  * Android / web: same WYZIE_PROXY_URL Worker with /opensubtitles (Worker holds the key).
  */
 
-import { getWyzieProxyUrl } from './wyzie'
+import { fetchSubtitleProxyText, getWyzieProxyUrl, isMissingKeyError } from './wyzie'
+import { subsLog } from './subsLog'
 
 export type OpenSubtitlesResolveResult =
-  | { ok: true; subtitleUrl: string; subtitleKind: 'file'; source: 'opensubtitles' }
-  | { ok: false; error: string }
+  | {
+      ok: true
+      subtitleUrl: string
+      subtitleKind: 'file'
+      source: 'opensubtitles'
+      via?: 'direct' | 'worker'
+    }
+  | { ok: false; error: string; via?: 'direct' | 'worker' }
 
+/** Desktop IPC (direct key or main-side Worker fallback) or the Worker itself. */
 export function isOpenSubtitlesAvailable(): boolean {
   if (typeof window !== 'undefined' && window.signalDesktop?.resolveOpenSubtitlesSubtitle) {
     return true
@@ -39,49 +48,8 @@ async function resolveViaProxy(options: {
     params.set('episode', String(Math.max(1, options.episode)))
   }
 
-  const searchUrl = `${base}/opensubtitles?${params.toString()}`
-  const headers: Record<string, string> = {
-    Accept: 'application/json',
-    'User-Agent': `JiyuMedia/${typeof __JIYU_VERSION__ !== 'undefined' ? __JIYU_VERSION__ : 'dev'} (OpenSubtitles)`,
-    // Browsers may strip User-Agent; Worker also accepts this custom header.
-    'X-Jiyu-Client': `JiyuMedia/${typeof __JIYU_VERSION__ !== 'undefined' ? __JIYU_VERSION__ : 'dev'}`,
-  }
-
-  let text = ''
-  let ok = false
-  let status = 0
-  let error: string | undefined
-
-  if (typeof window !== 'undefined' && window.signalDesktop?.fetchJsonGet) {
-    const r = await window.signalDesktop.fetchJsonGet(searchUrl, base + '/')
-    ok = r.ok
-    status = r.status
-    text = String(r.content || '')
-    error = r.error
-  } else {
-    try {
-      const { nativeFetchText } = await import('./nativeHttp')
-      const r = await nativeFetchText(searchUrl, {
-        headers: { ...headers, Referer: base + '/' },
-      })
-      ok = r.ok
-      status = r.status
-      text = String(r.content || '')
-      error = r.error
-    } catch {
-      try {
-        const res = await fetch(searchUrl, { headers })
-        ok = res.ok
-        status = res.status
-        text = await res.text()
-      } catch (err) {
-        return {
-          ok: false,
-          error: err instanceof Error ? err.message : 'OpenSubtitles proxy request failed',
-        }
-      }
-    }
-  }
+  const r = await fetchSubtitleProxyText(`${base}/opensubtitles?${params.toString()}`, 'OpenSubtitles')
+  const { ok, status, text, error } = r
 
   if (!ok) {
     let detail = error || `HTTP ${status}`
@@ -91,18 +59,18 @@ async function resolveViaProxy(options: {
     } catch {
       /* keep */
     }
-    return { ok: false, error: detail }
+    return { ok: false, error: detail, via: 'worker' }
   }
 
   try {
     const parsed = JSON.parse(text) as { ok?: boolean; subtitleUrl?: string; error?: string }
     const url = String(parsed.subtitleUrl || '').trim()
     if (!parsed.ok || !/^https?:\/\//i.test(url)) {
-      return { ok: false, error: parsed.error || 'No OpenSubtitles for this episode' }
+      return { ok: false, error: parsed.error || 'No OpenSubtitles for this episode', via: 'worker' }
     }
-    return { ok: true, subtitleUrl: url, subtitleKind: 'file', source: 'opensubtitles' }
+    return { ok: true, subtitleUrl: url, subtitleKind: 'file', source: 'opensubtitles', via: 'worker' }
   } catch {
-    return { ok: false, error: 'Invalid OpenSubtitles proxy response' }
+    return { ok: false, error: 'Invalid OpenSubtitles proxy response', via: 'worker' }
   }
 }
 
@@ -112,23 +80,48 @@ export async function resolveOpenSubtitlesSubtitle(options: {
   episode?: number
   language?: string
 }): Promise<OpenSubtitlesResolveResult> {
+  const started = Date.now()
+  const target = { tmdbId: options.tmdbId, season: options.season, episode: options.episode, language: options.language }
+  const log = (path: string, r: OpenSubtitlesResolveResult, extra?: Record<string, unknown>) =>
+    subsLog('opensubtitles', {
+      ...target,
+      path,
+      via: r.via,
+      ...extra,
+      ok: r.ok,
+      error: r.ok ? undefined : r.error,
+      host: r.ok ? r.subtitleUrl : undefined,
+      ms: Date.now() - started,
+    })
+
   if (window.signalDesktop?.resolveOpenSubtitlesSubtitle) {
+    let ipc: OpenSubtitlesResolveResult
     try {
-      return await window.signalDesktop.resolveOpenSubtitlesSubtitle(options)
+      ipc = await window.signalDesktop.resolveOpenSubtitlesSubtitle(options)
     } catch (err) {
-      return {
-        ok: false,
-        error: err instanceof Error ? err.message : 'OpenSubtitles IPC failed',
-      }
+      ipc = { ok: false, error: err instanceof Error ? err.message : 'OpenSubtitles IPC failed' }
     }
+    const ipcFailedHard = !ipc.ok && (isMissingKeyError(ipc.error) || /IPC failed|No handler/i.test(ipc.error))
+    if (ipc.ok || !ipcFailedHard || !getWyzieProxyUrl()) {
+      log('ipc', ipc)
+      return ipc
+    }
+    // Main has no key (and no Worker fallback of its own): ask the Worker from here.
+    const viaWorker = await resolveViaProxy(options)
+    log('renderer-worker', viaWorker, { after: ipc.error })
+    return viaWorker
   }
 
   if (getWyzieProxyUrl()) {
-    return resolveViaProxy(options)
+    const viaWorker = await resolveViaProxy(options)
+    log('worker', viaWorker)
+    return viaWorker
   }
 
-  return {
+  const none: OpenSubtitlesResolveResult = {
     ok: false,
     error: 'OpenSubtitles unavailable — set OPENSUBTITLES_API_KEY (desktop) or deploy Worker secret',
   }
+  log('none', none)
+  return none
 }

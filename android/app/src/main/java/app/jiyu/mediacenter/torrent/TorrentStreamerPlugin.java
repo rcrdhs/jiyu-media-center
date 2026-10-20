@@ -113,6 +113,19 @@ public class TorrentStreamerPlugin extends Plugin {
     });
   }
 
+  /**
+   * Subtitle-step diagnostics from JS (src/lib/subsLog.ts) → logcat, tag JiyuSubs.
+   * Lines are already scrubbed of keys / URLs on the JS side; capped here as well.
+   */
+  @PluginMethod
+  public void log(PluginCall call) {
+    String message = call.getString("message", "");
+    if (message == null) message = "";
+    if (message.length() > 2000) message = message.substring(0, 2000) + "…";
+    Log.i(TorrentEngine.SUBS_TAG, message);
+    call.resolve();
+  }
+
   @PluginMethod
   public void ensureDownloading(PluginCall call) {
     String infoHash = call.getString("infoHash");

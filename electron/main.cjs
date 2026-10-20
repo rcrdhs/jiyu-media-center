@@ -95,6 +95,84 @@ function createUpdaterFileLogger() {
   }
 }
 
+/**
+ * Subtitle-step diagnostics: <userData>/logs/subtitles.log (rolled to subtitles.log.old
+ * past ~1 MB, like updater.log). Provider attempts (Wyzie / OpenSubtitles, direct vs
+ * Worker), Nyaa sidecar picks and stop reasons. Never write keys: callers pass hosts only,
+ * and query strings / magnets are scrubbed here as a safety net.
+ */
+const SUBTITLES_LOG_MAX_BYTES = 1_000_000
+let subtitlesLogFile = null
+let subtitlesLogBytes = 0
+let subtitlesLogInitTried = false
+
+function scrubSubtitlesLogText(text) {
+  return String(text)
+    .replace(/magnet:\?[^\s"']*/gi, (m) => {
+      const hash = /xt=urn:btih:([a-z0-9]{32,40})/i.exec(m)?.[1]
+      return hash ? `magnet:${hash.toLowerCase()}` : 'magnet:…'
+    })
+    .replace(/\bhttps?:\/\/[^\s"'<>]+/gi, (u) => {
+      try {
+        return `${new URL(u).origin}/…`
+      } catch {
+        return 'url:…'
+      }
+    })
+    .replace(/([?&](?:key|api_key|apikey|token|tok)=)[^&\s"']+/gi, '$1…')
+}
+
+function writeSubtitlesLog(source, event, data) {
+  if (!subtitlesLogInitTried) {
+    subtitlesLogInitTried = true
+    try {
+      const dir = path.join(app.getPath('userData'), 'logs')
+      fs.mkdirSync(dir, { recursive: true })
+      subtitlesLogFile = path.join(dir, 'subtitles.log')
+      try {
+        subtitlesLogBytes = fs.statSync(subtitlesLogFile).size
+      } catch {
+        subtitlesLogBytes = 0
+      }
+    } catch {
+      subtitlesLogFile = null
+    }
+  }
+  let body = String(event || '')
+  if (data !== undefined) {
+    try {
+      body += ` ${typeof data === 'string' ? data : JSON.stringify(data)}`
+    } catch {
+      /* keep the bare event */
+    }
+  }
+  body = scrubSubtitlesLogText(body).slice(0, 2000)
+  const line = `[${new Date().toISOString()}] [${source}] ${body}\n`
+  if (!subtitlesLogFile) return
+  try {
+    if (subtitlesLogBytes > SUBTITLES_LOG_MAX_BYTES) {
+      try {
+        fs.renameSync(subtitlesLogFile, `${subtitlesLogFile}.old`)
+      } catch {
+        /* locked — keep appending */
+      }
+      subtitlesLogBytes = 0
+    }
+    fs.appendFileSync(subtitlesLogFile, line, 'utf8')
+    subtitlesLogBytes += Buffer.byteLength(line)
+  } catch {
+    /* ignore */
+  }
+}
+
+function subtitleUrlHost(url) {
+  try {
+    return new URL(String(url || '')).host
+  } catch {
+    return ''
+  }
+}
+
 /** Tunables pushed from the renderer device profile (defaults = balanced). */
 let performanceKnobs = {
   torrentMaxConns: 64,
@@ -7043,15 +7121,105 @@ ipcMain.handle('page:fetchJsonPost', async (_event, url, body, referer) => {
   }
 })
 
-/** OpenSubtitles softsubs — secondary after Wyzie; key in main .env only. */
-ipcMain.handle('opensubtitles:resolveSubtitle', async (_event, options = {}) => {
-  const key = String(process.env.OPENSUBTITLES_API_KEY || '').trim()
-  if (!key) {
+/**
+ * jiyu-wyzie Worker (Cloudflare) — holds the Wyzie + OpenSubtitles keys server-side, same
+ * routes Android uses. Desktop falls back to it when main has no local .env key (installed
+ * builds), so no key ever ships in the app.
+ */
+const DEFAULT_SUBTITLE_WORKER_URL = 'https://jiyu-wyzie.free-river.workers.dev'
+
+function subtitleWorkerBase() {
+  return String(
+    process.env.WYZIE_PROXY_URL || process.env.VITE_WYZIE_PROXY_URL || DEFAULT_SUBTITLE_WORKER_URL,
+  )
+    .trim()
+    .replace(/\/+$/, '')
+}
+
+/** The Worker's soft gate wants "Jiyu" in the UA or X-Jiyu-Client (a plain Chrome UA gets 403). */
+function subtitleWorkerHeaders(tag) {
+  return {
+    Accept: 'application/json',
+    'User-Agent': `JiyuMedia/${APP_VERSION} (Electron; ${tag})`,
+    'X-Jiyu-Client': `JiyuMedia/${APP_VERSION}`,
+  }
+}
+
+async function resolveOpenSubtitlesViaWorker(options = {}) {
+  const tmdbId = String(options?.tmdbId || '').trim()
+  if (!tmdbId) return { ok: false, error: 'No TMDB id for OpenSubtitles' }
+  const params = new URLSearchParams({
+    id: tmdbId,
+    language: String(options?.language || 'en').trim() || 'en',
+  })
+  const season = Number(options?.season)
+  const episode = Number(options?.episode)
+  if (Number.isFinite(season) && Number.isFinite(episode) && season >= 1 && episode >= 1) {
+    params.set('season', String(Math.floor(season)))
+    params.set('episode', String(Math.floor(episode)))
+  }
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 25_000)
+  let response
+  try {
+    response = await fetch(`${subtitleWorkerBase()}/opensubtitles?${params.toString()}`, {
+      method: 'GET',
+      redirect: 'follow',
+      signal: controller.signal,
+      headers: subtitleWorkerHeaders('OpenSubtitles'),
+    })
+  } finally {
+    clearTimeout(timer)
+  }
+  const text = await response.text()
+  let parsed = null
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    /* handled below */
+  }
+  if (!response.ok) {
     return {
       ok: false,
-      error: 'OPENSUBTITLES_API_KEY missing — add a free key from opensubtitles.com to .env',
+      error: parsed?.message || parsed?.error || `Worker HTTP ${response.status}`,
     }
   }
+  const link = String(parsed?.subtitleUrl || '').trim()
+  if (!parsed?.ok || !/^https?:\/\//i.test(link)) {
+    return { ok: false, error: parsed?.error || 'No OpenSubtitles for this episode' }
+  }
+  return { ok: true, subtitleUrl: link, subtitleKind: 'file', source: 'opensubtitles' }
+}
+
+/** OpenSubtitles softsubs — secondary after Wyzie; key in main .env, else the Worker. */
+ipcMain.handle('opensubtitles:resolveSubtitle', async (_event, options = {}) => {
+  const started = Date.now()
+  const hasKey = Boolean(String(process.env.OPENSUBTITLES_API_KEY || '').trim())
+  const via = hasKey ? 'direct' : 'worker'
+  let result
+  try {
+    result = hasKey
+      ? await resolveOpenSubtitlesDirect(options)
+      : await resolveOpenSubtitlesViaWorker(options)
+  } catch (err) {
+    result = { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
+  writeSubtitlesLog('main', 'opensubtitles', {
+    via,
+    tmdbId: String(options?.tmdbId || ''),
+    season: options?.season,
+    episode: options?.episode,
+    language: options?.language,
+    ok: Boolean(result?.ok),
+    error: result?.ok ? undefined : result?.error,
+    host: result?.ok ? subtitleUrlHost(result.subtitleUrl) : undefined,
+    ms: Date.now() - started,
+  })
+  return { ...result, via }
+})
+
+async function resolveOpenSubtitlesDirect(options = {}) {
+  const key = String(process.env.OPENSUBTITLES_API_KEY || '').trim()
   const tmdbId = String(options?.tmdbId || '').trim()
   if (!tmdbId) return { ok: false, error: 'No TMDB id for OpenSubtitles' }
 
@@ -7176,24 +7344,48 @@ ipcMain.handle('opensubtitles:resolveSubtitle', async (_event, options = {}) => 
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) }
   }
+}
+
+/**
+ * Wyzie softsubs — API key stays in main-process .env only (never in Vite/Android bundle).
+ * No local key: same /search on the jiyu-wyzie Worker, which injects its own key.
+ */
+ipcMain.handle('wyzie:resolveSubtitle', async (_event, options = {}) => {
+  const started = Date.now()
+  const via = String(process.env.WYZIE_API_KEY || '').trim() ? 'direct' : 'worker'
+  let result
+  try {
+    result = await resolveWyzieInMain(options)
+  } catch (err) {
+    result = { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
+  writeSubtitlesLog('main', 'wyzie', {
+    via,
+    tmdbId: String(options?.tmdbId || ''),
+    season: options?.season,
+    episode: options?.episode,
+    language: options?.language,
+    ok: Boolean(result?.ok),
+    error: result?.ok ? undefined : result?.error,
+    host: result?.ok ? subtitleUrlHost(result.subtitleUrl) : undefined,
+    release: result?.ok ? result.hit?.release || result.hit?.fileName : undefined,
+    ms: Date.now() - started,
+  })
+  return { ...result, via }
 })
 
-/** Wyzie softsubs — API key stays in main-process .env only (never in Vite/Android bundle). */
-ipcMain.handle('wyzie:resolveSubtitle', async (_event, options = {}) => {
+async function resolveWyzieInMain(options = {}) {
   const key = String(process.env.WYZIE_API_KEY || '').trim()
-  if (!key) {
-    return { ok: false, error: 'WYZIE_API_KEY missing — add it to .env (Electron only)' }
-  }
   const tmdbId = String(options?.tmdbId || '').trim()
   if (!tmdbId) return { ok: false, error: 'No TMDB id for Wyzie' }
 
   const params = new URLSearchParams({
     id: tmdbId,
-    key,
     language: String(options?.language || 'en').trim() || 'en',
     format: 'srt,vtt,ass',
     limit: '12',
   })
+  if (key) params.set('key', key)
   const season = Number(options?.season)
   const episode = Number(options?.episode)
   if (Number.isFinite(season) && Number.isFinite(episode) && season >= 1 && episode >= 1) {
@@ -7206,15 +7398,20 @@ ipcMain.handle('wyzie:resolveSubtitle', async (_event, options = {}) => {
     const timer = setTimeout(() => controller.abort(), 20_000)
     let response
     try {
-      response = await fetch(`https://sub.wyzie.io/search?${params.toString()}`, {
-        method: 'GET',
-        redirect: 'follow',
-        signal: controller.signal,
-        headers: {
-          Accept: 'application/json',
-          'User-Agent': BROWSER_UA,
+      response = await fetch(
+        `${key ? 'https://sub.wyzie.io' : subtitleWorkerBase()}/search?${params.toString()}`,
+        {
+          method: 'GET',
+          redirect: 'follow',
+          signal: controller.signal,
+          headers: key
+            ? {
+                Accept: 'application/json',
+                'User-Agent': BROWSER_UA,
+              }
+            : subtitleWorkerHeaders('Wyzie'),
         },
-      })
+      )
     } finally {
       clearTimeout(timer)
     }
@@ -7301,6 +7498,11 @@ ipcMain.handle('wyzie:resolveSubtitle', async (_event, options = {}) => {
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) }
   }
+}
+
+/** Renderer subtitle-step lines (src/lib/subsLog.ts) → subtitles.log. */
+ipcMain.on('subs:log', (_event, line) => {
+  writeSubtitlesLog('renderer', String(line || '').slice(0, 2000))
 })
 
 /**
@@ -8904,19 +9106,79 @@ function subtitleSourceReadyForExtract(file) {
   return downloaded >= SUBTITLE_EXTRACT_MIN_BYTES || progress >= 0.12
 }
 
+/**
+ * Deferred-extract self-loop guard: after this many timer rounds with no new bytes the
+ * loop parks (a later subtitle request from the player re-arms it).
+ */
+const SUBTITLE_DEFER_MAX_IDLE_ROUNDS = 20
+/** cacheKey -> { bytes, idle } for the deferred-extract loop. */
+const subtitleDeferIdle = new Map()
+
+/** File's torrent was removed / dropped (WebTorrent File._destroy nulls _torrent). */
+function subtitleSourceGone(file) {
+  if (!file) return true
+  if (file._destroyed) return true
+  const torrent = file._torrent
+  return !torrent || Boolean(torrent.destroyed)
+}
+
+/** End the defer-extract loop for this cacheKey (torrent gone or idle) and say so once. */
+function stopDeferredSubtitleExtract(cacheKey, reason, { forgetSource = true } = {}) {
+  const timer = subtitleExtractDeferred.get(cacheKey)
+  if (timer) clearTimeout(timer)
+  subtitleExtractDeferred.delete(cacheKey)
+  subtitleDeferIdle.delete(cacheKey)
+  if (forgetSource) subtitleSources.delete(cacheKey)
+  const hash = String(cacheKey || '').split(':')[0].slice(0, 8)
+  console.log('[torrent subs] stop deferred extract', { hash, reason })
+  writeSubtitlesLog('main', 'torrent.extract.stop', { hash, reason })
+}
+
 function scheduleSubtitleExtractWhenReady(file, cacheKey) {
   if (!file || !cacheKey) return
+  if (subtitleSourceGone(file)) {
+    // Removed / dropped torrent: never start (or keep) a defer loop for it.
+    const live = subtitleSources.get(cacheKey)
+    if (!live || live === file || subtitleSourceGone(live)) {
+      if (subtitleSources.has(cacheKey) || subtitleExtractDeferred.has(cacheKey)) {
+        stopDeferredSubtitleExtract(cacheKey, 'torrent removed')
+      }
+      return
+    }
+    file = live
+  }
   subtitleSources.set(cacheKey, file)
   if (subtitleExtractDeferred.has(cacheKey)) return
   const sidecar = SUBTITLE_FILE_RE.test(file.name || '')
+  const scheduledBytes = Number(file.downloaded) || 0
   console.log('[torrent subs] defer extract (need buffer first)', {
     file: file.name,
-    downloaded: Number(file.downloaded) || 0,
+    downloaded: scheduledBytes,
     need: SUBTITLE_EXTRACT_MIN_BYTES,
   })
   const timer = setTimeout(() => {
     subtitleExtractDeferred.delete(cacheKey)
     const source = subtitleSources.get(cacheKey) || file
+    if (subtitleSourceGone(source)) {
+      stopDeferredSubtitleExtract(cacheKey, 'torrent removed')
+      return
+    }
+    const bytes = Number(source.downloaded) || 0
+    const state = subtitleDeferIdle.get(cacheKey) || { bytes: scheduledBytes, idle: 0 }
+    if (bytes > state.bytes) {
+      state.bytes = bytes
+      state.idle = 0
+    } else {
+      state.idle += 1
+    }
+    subtitleDeferIdle.set(cacheKey, state)
+    if (state.idle >= SUBTITLE_DEFER_MAX_IDLE_ROUNDS) {
+      // Torrent still listed but not downloading (deselected / dead swarm): park the loop.
+      stopDeferredSubtitleExtract(cacheKey, `no new bytes for ${state.idle} rounds — parked`, {
+        forgetSource: false,
+      })
+      return
+    }
     startProgressiveSubtitleExtract(source, cacheKey)
   }, sidecar ? 1_500 : 8_000)
   subtitleExtractDeferred.set(cacheKey, timer)
@@ -8924,6 +9186,16 @@ function scheduleSubtitleExtractWhenReady(file, cacheKey) {
 
 function startProgressiveSubtitleExtract(file, cacheKey) {
   if (!file) return
+  if (subtitleSourceGone(file)) {
+    const live = cacheKey ? subtitleSources.get(cacheKey) : null
+    if (!live || live === file || subtitleSourceGone(live)) {
+      if (cacheKey && (subtitleSources.has(cacheKey) || subtitleExtractDeferred.has(cacheKey))) {
+        stopDeferredSubtitleExtract(cacheKey, 'torrent removed')
+      }
+      return
+    }
+    file = live
+  }
   // A release already confirmed to have no usable track must not keep re-deferring
   // every 8s (that loop ran forever for stopped sidecar torrents).
   if (subtitleJobs.get(cacheKey)?.confirmedMissing) return
@@ -8972,6 +9244,7 @@ function startProgressiveSubtitleExtract(file, cacheKey) {
     clearTimeout(deferred)
     subtitleExtractDeferred.delete(cacheKey)
   }
+  subtitleDeferIdle.delete(cacheKey)
 
   // Focus bandwidth on the episode currently being watched.
   abortSubtitleExtractors(cacheKey)
@@ -10337,7 +10610,28 @@ async function torrentFilePlaybackUrl(torrent, file, options = {}) {
 
 const MAX_CONCURRENT_TORRENTS = 4
 
-ipcMain.handle('torrent:stream', async (_event, input, options) => {
+/** Subtitle-only sidecar (Nyaa softsubs): cached-metadata add gives up sooner (~45 s total). */
+const SUBTITLE_ONLY_READY_MS = 25_000
+
+ipcMain.handle('torrent:stream', async (event, input, options) => {
+  if (!options?.subtitleOnly) return torrentStreamHandler(event, input, options)
+  const started = Date.now()
+  const hash = typeof input === 'string' ? (magnetInfoHash(input.trim()) || '').slice(0, 8) : ''
+  writeSubtitlesLog('main', 'torrent.sidecar.start', { hash })
+  const result = await torrentStreamHandler(event, input, options)
+  const subtitleUrl = result?.subtitleUrl || result?.playlist?.[0]?.subtitleUrl
+  writeSubtitlesLog('main', 'torrent.sidecar.result', {
+    hash,
+    ok: Boolean(result?.ok),
+    subtitle: Boolean(subtitleUrl),
+    kind: result?.subtitleKind || result?.playlist?.[0]?.subtitleKind,
+    error: result?.ok ? undefined : result?.error,
+    ms: Date.now() - started,
+  })
+  return result
+})
+
+async function torrentStreamHandler(_event, input, options) {
   try {
     if (typeof input !== 'string') {
       return { ok: false, error: 'Invalid torrent link' }
@@ -10474,7 +10768,12 @@ ipcMain.handle('torrent:stream', async (_event, input, options) => {
           announce,
           strategy: 'sequential',
         })
-        torrent = await waitForTorrentReady(added)
+        // Subtitle-only sidecars: a dead swarm must not hold the slot for ~80 s; the renderer
+        // already moves to the next release after 45 s.
+        torrent = await waitForTorrentReady(
+          added,
+          options?.subtitleOnly && isMagnet ? SUBTITLE_ONLY_READY_MS : METADATA_TIMEOUT_MS,
+        )
       }
     } else if (!torrent.ready || !torrent.files || torrent.files.length === 0) {
       torrent = await waitForTorrentReady(torrent)
@@ -10736,7 +11035,7 @@ ipcMain.handle('torrent:stream', async (_event, input, options) => {
   } catch (err) {
     return { ok: false, error: err?.message || 'Could not start torrent stream' }
   }
-})
+}
 
 ipcMain.handle('torrent:status', async (_event, infoHash) => {
   if (!torrentClientPromise) return { ok: true, torrents: [] }

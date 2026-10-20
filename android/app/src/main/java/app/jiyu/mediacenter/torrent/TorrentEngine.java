@@ -63,6 +63,12 @@ public final class TorrentEngine {
    */
   private static final long SIDECAR_STALL_MS = 4L * 60L * 1000L;
   private static final int SIDECAR_PREPARE_PIECES = 2;
+  /** Subtitle-only sidecar: metadata wait before giving up (dead swarm → next release). */
+  private static final int SIDECAR_MAGNET_TIMEOUT_SEC = 45;
+  /** Subtitle-only sidecar that has received 0 bytes this long is a dead swarm: give up. */
+  private static final long SIDECAR_NO_DATA_MS = 45_000L;
+  /** Logcat tag for subtitle-step diagnostics (shared with the JS subsLog bridge). */
+  static final String SUBS_TAG = "JiyuSubs";
 
   private static TorrentEngine instance;
 
@@ -156,8 +162,14 @@ public final class TorrentEngine {
     }
 
     try {
-      TorrentInfo info = resolveTorrentInfo(trimmed);
+      TorrentInfo info = resolveTorrentInfo(
+        trimmed,
+        subtitleOnly ? SIDECAR_MAGNET_TIMEOUT_SEC : MAGNET_TIMEOUT_SEC
+      );
       if (info == null) {
+        if (subtitleOnly) {
+          Log.i(SUBS_TAG, "sidecar no metadata in " + SIDECAR_MAGNET_TIMEOUT_SEC + "s, giving up");
+        }
         return StreamResult.fail("Could not fetch torrent metadata (no peers / timed out)");
       }
 
@@ -165,6 +177,7 @@ public final class TorrentEngine {
       ActiveTorrent existing = active.get(hash);
       if (existing != null && existing.videoFile != null && existing.videoFile.exists()) {
         existing.touch();
+        // kickSubtitleExtract is a no-op once this release was given up on (subtitleMissing).
         existing.kickSubtitleExtract(httpServer.baseUrl());
         return StreamResult.ok(existing, httpServer.baseUrl(), preferJapaneseAudio);
       }
@@ -416,13 +429,22 @@ public final class TorrentEngine {
     if (!file.delete()) Log.w(TAG, "could not delete " + file.getAbsolutePath());
   }
 
+  private static String shortHash(String hash) {
+    if (hash == null) return "";
+    return hash.length() > 8 ? hash.substring(0, 8) : hash;
+  }
+
   private TorrentInfo resolveTorrentInfo(String uri) throws Exception {
+    return resolveTorrentInfo(uri, MAGNET_TIMEOUT_SEC);
+  }
+
+  private TorrentInfo resolveTorrentInfo(String uri, int magnetTimeoutSec) throws Exception {
     if (uri.regionMatches(true, 0, "magnet:", 0, 7)) {
       File temp = new File(appContext.getCacheDir(), "torrent-meta");
       if (!temp.isDirectory() && !temp.mkdirs()) {
         throw new IOException("meta cache mkdir failed");
       }
-      byte[] data = session.fetchMagnet(uri, MAGNET_TIMEOUT_SEC, temp);
+      byte[] data = session.fetchMagnet(uri, magnetTimeoutSec, temp);
       if (data == null || data.length == 0) return null;
       return TorrentInfo.bdecode(data);
     }
@@ -568,8 +590,9 @@ public final class TorrentEngine {
    * player moves on to the next release (a manual Retry tries it again).
    */
   private void watchSubtitleSidecar(ActiveTorrent slot) {
+    final long startedAt = System.currentTimeMillis();
     final long[] lastDone = { slot.downloadedBytes() };
-    final long[] lastProgressAt = { System.currentTimeMillis() };
+    final long[] lastProgressAt = { startedAt };
     final java.util.concurrent.ScheduledFuture<?>[] task = new java.util.concurrent.ScheduledFuture<?>[1];
     task[0] = sweeper.scheduleWithFixedDelay(() -> {
       try {
@@ -579,6 +602,16 @@ public final class TorrentEngine {
         }
         long done = slot.downloadedBytes();
         long now = System.currentTimeMillis();
+        // Dead swarm: nothing at all after SIDECAR_NO_DATA_MS → report missing so the
+        // player drops this release and the next candidate starts (not re-armed).
+        if (done <= 0 && now - startedAt >= SIDECAR_NO_DATA_MS && slot.partialSubtitleVtt() == null) {
+          Log.i(TAG, "subtitle sidecar got 0 bytes in " + (SIDECAR_NO_DATA_MS / 1000) + "s, giving up " + slot.infoHash);
+          Log.i(SUBS_TAG, "sidecar " + shortHash(slot.infoHash) + " 0 bytes in "
+            + (SIDECAR_NO_DATA_MS / 1000) + "s — giving up, next release");
+          slot.subtitleMissing.set(true);
+          if (task[0] != null) task[0].cancel(false);
+          return;
+        }
         if (done > lastDone[0]) {
           lastDone[0] = done;
           lastProgressAt[0] = now;
@@ -587,6 +620,8 @@ public final class TorrentEngine {
         }
         if (now - lastProgressAt[0] >= SIDECAR_STALL_MS && slot.partialSubtitleVtt() == null) {
           Log.i(TAG, "subtitle sidecar stalled, giving up " + slot.infoHash);
+          Log.i(SUBS_TAG, "sidecar " + shortHash(slot.infoHash) + " stalled "
+            + (SIDECAR_STALL_MS / 1000) + "s — giving up");
           slot.subtitleMissing.set(true);
           if (task[0] != null) task[0].cancel(false);
         }
@@ -768,7 +803,7 @@ public final class TorrentEngine {
         try {
           // Prefer a companion .srt/.ass once it lands (tiny; often ready early).
           for (int i = 0; i < 20; i++) {
-            if (!active.containsKey(infoHash)) return;
+            if (!isCurrentSlot()) return;
             File companion = TorrentSubtitleExtractor.findCompanionSubtitle(videoFile);
             if (companion != null && companion.length() > 32) {
               if (TorrentSubtitleExtractor.convertCompanionFile(companion, out)) {
@@ -785,7 +820,8 @@ public final class TorrentEngine {
           // Read errors / truncated streams (slow swarm) are retried with backoff; only a
           // probe that really sees no usable dialogue track marks the release as missing.
           for (int attempt = 0; attempt <= SUB_RETRY_BACKOFF_MS.length; attempt++) {
-            if (!active.containsKey(infoHash)) return;
+            // Removed / replaced slot (same hash re-added) or given up: stop this worker.
+            if (!isCurrentSlot() || subtitleMissing.get()) return;
             subtitlePartial = out;
             subtitleExtracting.set(true);
             TorrentSubtitleExtractor.Result result;
@@ -812,7 +848,7 @@ public final class TorrentEngine {
             Log.i(TAG, "subtitle extract retry " + (attempt + 1) + " in " + waitMs + "ms for " + infoHash);
             // Sleep in slices so a stopped sidecar frees the (single) subtitle worker quickly.
             for (long slept = 0; slept < waitMs; slept += 1000) {
-              if (!active.containsKey(infoHash)) return;
+              if (!isCurrentSlot() || subtitleMissing.get()) return;
               Thread.sleep(Math.min(1000, waitMs - slept));
             }
           }
@@ -838,6 +874,11 @@ public final class TorrentEngine {
       File f = subtitlePartial;
       if (f != null && f.isFile() && f.length() > 16) return f;
       return null;
+    }
+
+    /** This slot is still the registered torrent for its hash (not removed or replaced). */
+    boolean isCurrentSlot() {
+      return active.get(infoHash) == this;
     }
 
     boolean isHandleAlive() {

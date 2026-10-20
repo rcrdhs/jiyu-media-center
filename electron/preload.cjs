@@ -84,6 +84,7 @@ contextBridge.exposeInMainWorld('signalDesktop', {
   fetchHtml: (url, opts) => ipcRenderer.invoke('page:fetchHtml', url, opts || {}),
   fetchJsonPost: (url, body, referer) => ipcRenderer.invoke('page:fetchJsonPost', url, body, referer),
   fetchJsonGet: (url, referer) => ipcRenderer.invoke('page:fetchJsonGet', url, referer),
+  logSubtitleEvent: (line) => ipcRenderer.send('subs:log', String(line || '')),
   resolveWyzieSubtitle: (options) => ipcRenderer.invoke('wyzie:resolveSubtitle', options || {}),
   resolveOpenSubtitlesSubtitle: (options) =>
     ipcRenderer.invoke('opensubtitles:resolveSubtitle', options || {}),

@@ -380,7 +380,9 @@ declare global {
         referer?: string,
       ) => Promise<PlaylistFetchResult>
       fetchJsonGet?: (url: string, referer?: string) => Promise<PlaylistFetchResult>
-      /** Softsubs via Wyzie — key stays in Electron main .env only. */
+      /** Subtitle-step diagnostics → <userData>/logs/subtitles.log (main, ~1 MB roll). */
+      logSubtitleEvent?: (line: string) => void
+      /** Softsubs via Wyzie — key stays in Electron main .env; no key → jiyu-wyzie Worker. */
       resolveWyzieSubtitle?: (options: {
         tmdbId: string | number
         season?: number
@@ -392,6 +394,8 @@ declare global {
             subtitleUrl: string
             subtitleKind: 'file'
             source: 'wyzie'
+            /** direct = sub.wyzie.io with the .env key; worker = jiyu-wyzie Worker. */
+            via?: 'direct' | 'worker'
             hit?: {
               id?: string
               format?: string
@@ -401,7 +405,7 @@ declare global {
               release?: string
             }
           }
-        | { ok: false; error: string }
+        | { ok: false; error: string; via?: 'direct' | 'worker' }
       >
       /** Softsubs via OpenSubtitles — key stays in Electron main .env only. */
       resolveOpenSubtitlesSubtitle?: (options: {
@@ -415,8 +419,9 @@ declare global {
             subtitleUrl: string
             subtitleKind: 'file'
             source: 'opensubtitles'
+            via?: 'direct' | 'worker'
           }
-        | { ok: false; error: string }
+        | { ok: false; error: string; via?: 'direct' | 'worker' }
       >
       /** Close the Cloudflare Chrome helper (after Show List sync). */
       closeCfBrowser?: (options?: { soon?: boolean; reason?: string }) => Promise<{ ok: boolean }>

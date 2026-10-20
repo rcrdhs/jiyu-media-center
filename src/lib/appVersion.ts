@@ -12,6 +12,11 @@ export const APP_VERSION_LABEL = `v${APP_VERSION}`
 /** Short milestone log — newest first — so progress is visible in-app. */
 export const APP_RELEASES: ReadonlyArray<{ version: string; summary: string }> = [
   {
+    version: '0.3.80',
+    summary:
+      'Subtitles now work the same on the installed Windows app as in dev and on the phone, through the subtitle service; anime subtitles from Nyaa no longer pick a release from a different season; dead or slow releases are skipped faster and retried later instead of being given up on; Restart works on the first press for MovieBox episodes; subtitle lookups are written to a subtitle log for troubleshooting',
+  },
+  {
     version: '0.3.79',
     summary:
       'Restart now reliably restarts the title, including torrent and anime streams; full screen no longer drops back out after you\'ve exited it once',

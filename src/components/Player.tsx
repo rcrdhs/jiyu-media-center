@@ -95,6 +95,7 @@ import {
   resolveAtlanticPlay,
 } from '../lib/atlanticHls'
 import { ensureEpisodeSoftSubtitles } from '../lib/softSubs'
+import { subsLog } from '../lib/subsLog'
 import {
   estimateSubtitleDelay,
   isSubtitleAutoSyncAvailable,
@@ -1540,7 +1541,17 @@ export function Player({
     // re-resolve path, which got the same local stream URL back and never reloaded.
     const localStream = isEphemeralLocalStreamUrl(url) || isRemuxPlaybackUrl(url)
     const remoteHostedHls = isMovyStreamUrl(url) || ATLANTIC_HLS_URL_RE.test(url)
-    const freshSource = !localStream && (hadError || remoteHostedHls)
+    // Remote element with nothing loaded (readyState 0) can't seek in place: re-resolve.
+    const remoteNotLoaded = !localStream && video.readyState === 0
+    const freshSource = !localStream && (hadError || remoteHostedHls || remoteNotLoaded)
+    const logRestart = (branch: string) =>
+      subsLog('player.restart', {
+        branch,
+        host: url,
+        local: localStream,
+        hadError,
+        readyState: video.readyState,
+      })
 
     setError(null)
     setStatus('Restarting…')
@@ -1565,6 +1576,13 @@ export function Player({
       }
       flash('Restarting with a fresh source…')
       bumpChrome()
+      logRestart(
+        hadError
+          ? 'fresh-source (error)'
+          : remoteNotLoaded
+            ? 'fresh-source (not loaded)'
+            : 'fresh-source (hosted HLS)',
+      )
       void selectPlaylistItemRef.current(playlistIndex, {
         force: true,
         rotateSource: true,
@@ -1573,10 +1591,17 @@ export function Player({
       return
     }
 
-    // Desktop remux / torrent pipe: reopen without t= so ffmpeg starts at 0.
+    // Desktop remux / torrent pipe: reopen without t= so ffmpeg starts at 0. Local only:
+    // remote signed URLs carry their own t= (MovieBox `&t=<unix>`); rewriting those broke
+    // the signature, so the first Restart only moved the seek bar.
     const hadRemuxSeek =
-      isRemuxPlaybackUrl(raw) || /[?&]t=\d+/.test(video.currentSrc) || hadOffset
-    if (hadRemuxSeek || isRemuxPlaybackUrl(url)) {
+      localStream &&
+      (isRemuxPlaybackUrl(raw) ||
+        isRemuxPlaybackUrl(url) ||
+        /[?&]t=\d+/.test(video.currentSrc) ||
+        hadOffset)
+    if (hadRemuxSeek) {
+      logRestart('reopen-local-remux')
       try {
         const parsed = new URL(url)
         parsed.searchParams.set('r', String(Date.now()))
@@ -1595,6 +1620,7 @@ export function Player({
     // live session: full remount from the start. (currentTime=0 alone left anime
     // stuck after a bad scrub with "HLS load timed out".)
     if ((localStream && hadError) || (isHlsUrl(url) && !hls)) {
+      logRestart('remount')
       setRetryTick((n) => n + 1)
       flash('Restarted from beginning')
       bumpChrome()
@@ -1603,6 +1629,7 @@ export function Player({
 
     // Healthy HLS: stop the old window, then load from 0.
     if (hls) {
+      logRestart('hls-startLoad-0')
       try {
         hls.stopLoad()
       } catch {
@@ -1623,7 +1650,8 @@ export function Player({
       return
     }
 
-    // Progressive / mpeg-ts / local torrent stream: seek in place.
+    // Progressive (MovieBox MP4) / mpeg-ts / local torrent stream: seek in place.
+    logRestart('seek-in-place')
     try {
       video.currentTime = 0
     } catch {

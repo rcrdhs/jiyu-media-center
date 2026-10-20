@@ -1,10 +1,17 @@
 /**
  * Wyzie Subs — softsub lookup when a stream has no captions.
  *
- * Desktop: Electron IPC injects WYZIE_API_KEY in main (never in the bundle).
+ * Desktop: Electron IPC injects WYZIE_API_KEY in main (never in the bundle). Without a
+ * local key (installed builds) main — or, on an older main, the renderer — uses the
+ * jiyu-wyzie Worker instead.
  * Android / Tizen / web: call WYZIE_PROXY_URL (Cloudflare Worker) — Worker holds the key.
  * Never put WYZIE_API_KEY in Vite envPrefix / APK / wgt.
  */
+
+import { subsLog } from './subsLog'
+
+/** Public jiyu-wyzie Worker (no secrets; holds the Wyzie + OpenSubtitles keys server-side). */
+export const DEFAULT_SUBTITLE_PROXY_URL = 'https://jiyu-wyzie.free-river.workers.dev'
 
 export type WyzieSubtitleHit = {
   id?: string
@@ -19,20 +26,36 @@ export type WyzieSubtitleHit = {
 }
 
 export type WyzieResolveResult =
-  | { ok: true; subtitleUrl: string; subtitleKind: 'file'; source: 'wyzie'; hit?: WyzieSubtitleHit }
-  | { ok: false; error: string }
+  | {
+      ok: true
+      subtitleUrl: string
+      subtitleKind: 'file'
+      source: 'wyzie'
+      via?: 'direct' | 'worker'
+      hit?: WyzieSubtitleHit
+    }
+  | { ok: false; error: string; via?: 'direct' | 'worker' }
 
-/** Public proxy base URL only — no secrets. Set WYZIE_PROXY_URL in .env for mobile/TV builds. */
+/**
+ * Public proxy base URL only — no secrets. WYZIE_PROXY_URL in .env overrides; otherwise
+ * the jiyu-wyzie Worker, so builds without the env value still get softsubs.
+ */
 export function getWyzieProxyUrl(): string {
   const env = import.meta.env as Record<string, string | undefined>
-  return String(env.WYZIE_PROXY_URL || env.VITE_WYZIE_PROXY_URL || '')
+  return String(env.WYZIE_PROXY_URL || env.VITE_WYZIE_PROXY_URL || DEFAULT_SUBTITLE_PROXY_URL)
     .trim()
     .replace(/\/+$/, '')
 }
 
+/** Desktop IPC (direct key or main-side Worker fallback) or the Worker itself. */
 export function isWyzieAvailable(): boolean {
   if (typeof window !== 'undefined' && window.signalDesktop?.resolveWyzieSubtitle) return true
   return Boolean(getWyzieProxyUrl())
+}
+
+/** Electron main answered "no local key" (main before the Worker fallback, or IPC broke). */
+export function isMissingKeyError(error: string | undefined): boolean {
+  return /API_KEY missing|api key missing|no api key/i.test(String(error || ''))
 }
 
 function scoreHit(hit: WyzieSubtitleHit, season?: number, episode?: number): number {
@@ -83,17 +106,35 @@ function proxyClientHeaders(tag: string): Record<string, string> {
   }
 }
 
-async function fetchProxySearch(searchUrl: string): Promise<{ ok: boolean; status: number; text: string; error?: string }> {
-  const headers = proxyClientHeaders('Wyzie')
+/**
+ * GET a jiyu-wyzie Worker URL. Desktop uses the renderer's own fetch (Worker sends CORS *
+ * and accepts X-Jiyu-Client) — the fetchJsonGet IPC sends a plain Chrome UA without the
+ * client header, which the Worker gate rejects with 403.
+ */
+export async function fetchSubtitleProxyText(
+  url: string,
+  tag: string,
+): Promise<{ ok: boolean; status: number; text: string; error?: string }> {
+  const headers = proxyClientHeaders(tag)
+  const isDesktop = typeof window !== 'undefined' && Boolean(window.signalDesktop)
 
-  if (typeof window !== 'undefined' && window.signalDesktop?.fetchJsonGet) {
-    const r = await window.signalDesktop.fetchJsonGet(searchUrl, getWyzieProxyUrl() + '/')
-    return { ok: r.ok, status: r.status, text: String(r.content || ''), error: r.error }
+  if (isDesktop) {
+    try {
+      const res = await fetch(url, { headers })
+      return { ok: res.ok, status: res.status, text: await res.text() }
+    } catch (err) {
+      return {
+        ok: false,
+        status: 0,
+        text: '',
+        error: err instanceof Error ? err.message : `${tag} proxy request failed`,
+      }
+    }
   }
 
   try {
     const { nativeFetchText } = await import('./nativeHttp')
-    const r = await nativeFetchText(searchUrl, {
+    const r = await nativeFetchText(url, {
       headers: {
         ...headers,
         Referer: getWyzieProxyUrl() + '/',
@@ -105,14 +146,14 @@ async function fetchProxySearch(searchUrl: string): Promise<{ ok: boolean; statu
   }
 
   try {
-    const res = await fetch(searchUrl, { headers })
+    const res = await fetch(url, { headers })
     return { ok: res.ok, status: res.status, text: await res.text() }
   } catch (err) {
     return {
       ok: false,
       status: 0,
       text: '',
-      error: err instanceof Error ? err.message : 'Wyzie proxy request failed',
+      error: err instanceof Error ? err.message : `${tag} proxy request failed`,
     }
   }
 }
@@ -140,7 +181,7 @@ async function resolveViaProxy(options: {
     params.set('episode', String(Math.max(1, options.episode)))
   }
 
-  const res = await fetchProxySearch(`${base}/search?${params.toString()}`)
+  const res = await fetchSubtitleProxyText(`${base}/search?${params.toString()}`, 'Wyzie')
   if (!res.ok) {
     let detail = res.error || `HTTP ${res.status}`
     try {
@@ -149,7 +190,7 @@ async function resolveViaProxy(options: {
     } catch {
       /* keep */
     }
-    return { ok: false, error: detail }
+    return { ok: false, error: detail, via: 'worker' }
   }
 
   let hits: WyzieSubtitleHit[] = []
@@ -160,7 +201,7 @@ async function resolveViaProxy(options: {
       hits = (parsed as { data: WyzieSubtitleHit[] }).data
     }
   } catch {
-    return { ok: false, error: 'Invalid Wyzie proxy response' }
+    return { ok: false, error: 'Invalid Wyzie proxy response', via: 'worker' }
   }
 
   const ranked = hits
@@ -170,13 +211,14 @@ async function resolveViaProxy(options: {
         scoreHit(b, options.season, options.episode) - scoreHit(a, options.season, options.episode),
     )
   const best = ranked[0]
-  if (!best?.url) return { ok: false, error: 'No Wyzie subtitles for this episode' }
+  if (!best?.url) return { ok: false, error: 'No Wyzie subtitles for this episode', via: 'worker' }
 
   return {
     ok: true,
     subtitleUrl: withVttOutput(best.url),
     subtitleKind: 'file',
     source: 'wyzie',
+    via: 'worker',
     hit: best,
   }
 }
@@ -187,19 +229,59 @@ export async function resolveWyzieSubtitle(options: {
   episode?: number
   language?: string
 }): Promise<WyzieResolveResult> {
-  // Prefer Electron main (local .env key) when available.
+  const started = Date.now()
+  const target = { tmdbId: options.tmdbId, season: options.season, episode: options.episode, language: options.language }
+  // Prefer Electron main: local .env key, or (current main) its own Worker fallback.
   if (window.signalDesktop?.resolveWyzieSubtitle) {
+    let ipc: WyzieResolveResult
     try {
-      return await window.signalDesktop.resolveWyzieSubtitle(options)
+      ipc = await window.signalDesktop.resolveWyzieSubtitle(options)
     } catch (err) {
-      return { ok: false, error: err instanceof Error ? err.message : 'Wyzie IPC failed' }
+      ipc = { ok: false, error: err instanceof Error ? err.message : 'Wyzie IPC failed' }
     }
+    const ipcFailedHard = !ipc.ok && (isMissingKeyError(ipc.error) || /IPC failed|No handler/i.test(ipc.error))
+    if (ipc.ok || !ipcFailedHard || !getWyzieProxyUrl()) {
+      subsLog('wyzie', {
+        ...target,
+        path: 'ipc',
+        via: ipc.via,
+        ok: ipc.ok,
+        error: ipc.ok ? undefined : ipc.error,
+        host: ipc.ok ? ipc.subtitleUrl : undefined,
+        ms: Date.now() - started,
+      })
+      return ipc
+    }
+    // Main has no key (and no Worker fallback of its own): ask the Worker from here.
+    const viaWorker = await resolveViaProxy(options)
+    subsLog('wyzie', {
+      ...target,
+      path: 'renderer-worker',
+      via: 'worker',
+      after: ipc.error,
+      ok: viaWorker.ok,
+      error: viaWorker.ok ? undefined : viaWorker.error,
+      host: viaWorker.ok ? viaWorker.subtitleUrl : undefined,
+      ms: Date.now() - started,
+    })
+    return viaWorker
   }
 
   if (getWyzieProxyUrl()) {
-    return resolveViaProxy(options)
+    const viaWorker = await resolveViaProxy(options)
+    subsLog('wyzie', {
+      ...target,
+      path: 'worker',
+      via: 'worker',
+      ok: viaWorker.ok,
+      error: viaWorker.ok ? undefined : viaWorker.error,
+      host: viaWorker.ok ? viaWorker.subtitleUrl : undefined,
+      ms: Date.now() - started,
+    })
+    return viaWorker
   }
 
+  subsLog('wyzie', { ...target, ok: false, error: 'no IPC and no Worker URL' })
   return {
     ok: false,
     error: 'Wyzie unavailable — set WYZIE_PROXY_URL (Worker) or use desktop with WYZIE_API_KEY',

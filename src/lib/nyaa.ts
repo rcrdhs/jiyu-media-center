@@ -19,6 +19,12 @@ import {
 import { getConnectionDownlinkMbps, resolveRequestedQuality } from './viewingQuality'
 import { isDesktopTorrentAvailable, isTorrentPlaybackAvailable, torrentStream } from './torrentBridge'
 import { isNativeHttpPlatform, nativeFetchText } from './nativeHttp'
+import {
+  nyaaReleaseEpisodeKey,
+  nyaaReleaseMatchesEpisode,
+  nyaaReleaseSeasonConflicts,
+} from './nyaaSeason'
+import { shortHash, subsLog } from './subsLog'
 
 export const NYAA_ORIGIN = 'https://nyaa.si'
 /** Anime – English-translated */
@@ -333,12 +339,13 @@ export async function searchNyaaShowEpisodes(
   const preferred = resolveRequestedQuality()
 
   // Group by episode, pick best (seeded AVC preferred), keep high-seed alternates.
-  // Normalize fansub "Show - 06" (E06) → S01E06 so lookup by season/episode works.
+  // Normalize fansub "Show - 06" (E06) → S01E06 so lookup by season/episode works —
+  // unless the title states its season ("Show Season 3 - 1" → S03E01, not S01E01).
   const byEpisode = new Map<string, TorrentResult[]>()
   for (const result of pool) {
     const parsed = parseEpisodeKey(result.title)
     if (!parsed || !isEpisodeChoiceKey(parsed)) continue
-    const key = normalizeNyaaEpisodeKey(parsed) || parsed
+    const key = nyaaReleaseEpisodeKey(result.title, parsed) || parsed
     if (!/^S\d{2}E\d{2,3}$/i.test(key)) continue
     const list = byEpisode.get(key)
     if (list) list.push(result)
@@ -350,7 +357,7 @@ export async function searchNyaaShowEpisodes(
       minDistinctEpisodes: options?.minDistinctEpisodes ?? 1,
     })
       .map((ep) => {
-        const key = normalizeNyaaEpisodeKey(ep.key) || ep.key
+        const key = nyaaReleaseEpisodeKey(ep.title, ep.key) || normalizeNyaaEpisodeKey(ep.key) || ep.key
         return { ...ep, key }
       })
       .filter((ep) => /^S\d{2}E\d{2,3}$/i.test(ep.key))
@@ -404,23 +411,18 @@ export function findNyaaEpisode(
   const wantSeason = Math.max(1, season)
   const wantEp = Math.max(1, episode)
   const key = `S${padEp(wantSeason)}E${padEp(wantEp)}`
-  const exact = episodes.find((ep) => ep.key.toUpperCase() === key)
+  // A release that states another season ("… Season 3 - 1") never stands in for S01E01.
+  const exact = episodes.find(
+    (ep) => ep.key.toUpperCase() === key && !nyaaReleaseSeasonConflicts(ep.title, wantSeason),
+  )
   if (exact) return exact
 
-  const matchesWanted = (token: string | null | undefined): boolean => {
-    if (!token) return false
-    const normalized = normalizeNyaaEpisodeKey(token, wantSeason)
-    if (normalized === key) return true
-    // Bare E06 / E6 against the requested episode number.
-    const eOnly = /^E(\d{1,3})(?:\.\d+)?$/i.exec(String(token).trim())
-    if (eOnly && Number(eOnly[1]) === wantEp && wantSeason === 1) return true
-    return false
-  }
-
-  const loose = episodes.find((ep) => {
-    if (matchesWanted(ep.key)) return true
-    return matchesWanted(parseEpisodeKey(ep.title))
-  })
+  // Season-less "Show - 06" still matches episode 6 of the wanted season (absolute numbering).
+  const loose = episodes.find(
+    (ep) =>
+      nyaaReleaseMatchesEpisode(ep.title, ep.key, wantSeason, wantEp) ||
+      nyaaReleaseMatchesEpisode(ep.title, parseEpisodeKey(ep.title), wantSeason, wantEp),
+  )
   return loose || null
 }
 
@@ -513,15 +515,9 @@ export async function resolveNyaaEpisodePlay(options: {
       const use = pool.length > 0 ? pool : raw.results
       const downlink = getConnectionDownlinkMbps()
       const preferred = resolveRequestedQuality()
-      const matching = use.filter((r) => {
-        const parsed = parseEpisodeKey(r.title)
-        if (!parsed) return false
-        const normalized = normalizeNyaaEpisodeKey(parsed, season)
-        const want = `S${padEp(season)}E${padEp(episode)}`
-        if (normalized === want) return true
-        const eOnly = /^E(\d{1,3})/i.exec(parsed)
-        return Boolean(eOnly && Number(eOnly[1]) === episode && season === 1)
-      })
+      const matching = use.filter((r) =>
+        nyaaReleaseMatchesEpisode(r.title, parseEpisodeKey(r.title), season, episode),
+      )
       const pick = pickNyaaRelease(matching, downlink, preferred)
       if (!pick) continue
       const key = `S${padEp(season)}E${padEp(episode)}`
@@ -702,6 +698,14 @@ const NYAA_SUB_SIDECAR_BUDGET_MS = 22_000
 const NYAA_SUB_SIDECAR_STAGGER_MS = 15_000
 /** Desktop runs two releases at once; Android (phone bandwidth) runs one at a time. */
 const NYAA_SUB_SIDECAR_DESKTOP_PARALLEL = 2
+/**
+ * A subtitle release that has produced nothing (no metadata / no bytes → no subtitle URL)
+ * after this long is treated as dead: the next candidate starts and it is not re-armed.
+ * A late success from it is still used.
+ */
+const NYAA_SUB_SIDECAR_STALL_MS = 45_000
+/** How long a given-up release stays out of the candidate list (also across "Retry Subs"). */
+const NYAA_SUB_DEAD_TTL_MS = 15 * 60 * 1000
 
 /**
  * English-dub-only release ("[English Dub]", "Dubbed", "ENG DUB"): its English
@@ -756,8 +760,34 @@ export function markNyaaSubtitleSourceUnusable(subtitleUrl: string): string | nu
     sidecarHashBySubtitleUrl.get(key) ||
     (/[?&]source=([a-f0-9]{40})/i.exec(key)?.[1] || '').toLowerCase() ||
     null
-  if (hash) unusableSubtitleHashes.add(hash)
+  if (hash) {
+    unusableSubtitleHashes.add(hash)
+    subsLog('nyaa.sidecar.unusable', {
+      hash: shortHash(hash),
+      title: nyaaReleaseMeta.get(hash)?.title,
+      reason: 'no dialogue subtitle track in release — skipping it',
+    })
+  }
   return sidecarHashBySubtitleUrl.has(key) ? hash : null
+}
+
+/** Sidecar releases given up on (stalled / dead swarm) → when, so they are not re-armed. */
+const deadSubtitleHashes = new Map<string, number>()
+
+function isDeadSubtitleHash(hash: string): boolean {
+  const at = deadSubtitleHashes.get(hash)
+  if (at == null) return false
+  if (Date.now() - at > NYAA_SUB_DEAD_TTL_MS) {
+    deadSubtitleHashes.delete(hash)
+    return false
+  }
+  return true
+}
+
+/** 2 = seeded, 1 = seeders unknown, 0 = Nyaa listed 0 seeders (dead swarm, try last). */
+function seedTier(seeders: number | null): number {
+  if (seeders == null) return 1
+  return seeders > 0 ? 2 : 0
 }
 
 /**
@@ -767,6 +797,7 @@ export function markNyaaSubtitleSourceUnusable(subtitleUrl: string): string | nu
  */
 export function rankNyaaSubtitleCandidates(
   candidates: Array<{ uri: string; title?: string; seeders?: number }>,
+  opts?: { season?: number },
 ): Array<{ uri: string; title: string; seeders: number; score: number }> {
   const primaryUri = candidates[0]?.uri
   return candidates
@@ -774,19 +805,25 @@ export function rankNyaaSubtitleCandidates(
       const hash = magnetInfoHash(c.uri) || ''
       const meta = hash ? nyaaReleaseMeta.get(hash) : undefined
       const title = meta?.title || c.title || ''
-      const seeders = meta?.seeders ?? c.seeders ?? 0
+      const known = meta?.seeders ?? c.seeders
+      const seeders = typeof known === 'number' && Number.isFinite(known) ? known : null
       return { uri: c.uri, hash, title, seeders, score: prefersSoftsubRelease(title) }
     })
     .filter((c, i, arr) => Boolean(c.uri) && arr.findIndex((x) => x.uri === c.uri) === i)
     .filter((c) => !(c.hash && unusableSubtitleHashes.has(c.hash)))
+    .filter((c) => !(c.hash && isDeadSubtitleHash(c.hash)))
     .filter((c) => !isDubOnlyRelease(c.title))
+    // Wrong-season packs ("… Season 3 - 1" for S01E01) never feed subtitles.
+    .filter((c) => !(opts?.season && c.title && nyaaReleaseSeasonConflicts(c.title, opts.season)))
     .sort(
       (a, b) =>
+        // 0-seeder releases go last, even when they were the episode pick.
+        seedTier(b.seeders) - seedTier(a.seeders) ||
         Number(b.uri === primaryUri) - Number(a.uri === primaryUri) ||
-        b.seeders - a.seeders ||
+        (b.seeders ?? 0) - (a.seeders ?? 0) ||
         b.score - a.score,
     )
-    .map(({ uri, title, seeders, score }) => ({ uri, title, seeders, score }))
+    .map(({ uri, title, seeders, score }) => ({ uri, title, seeders: seeders ?? 0, score }))
 }
 
 /**
@@ -802,7 +839,50 @@ type SidecarStream = {
   subtitleUrl?: string
   subtitleKind?: 'file' | 'embedded'
   startedAt: number
+  /** Gave up waiting (no subtitle URL within NYAA_SUB_SIDECAR_STALL_MS); next release starts. */
+  stalled?: boolean
+  /** Start settled without a subtitle URL at this time (cold swarm / no peers / error). */
+  failedAt?: number
+  /** Failure that retrying cannot fix (no playable video file / file has no subtitle source). */
+  permanent?: boolean
+  /** Starts so far for this magnet (1 = first try). Reset by manual Retry Subs. */
+  attempts: number
 }
+/** A failed (not permanent) start may be tried again after this long… */
+export const NYAA_SUB_SIDECAR_RETRY_AFTER_MS = 3 * 60 * 1000
+/** …up to this many starts in total per magnet (automatic retries only). */
+export const NYAA_SUB_SIDECAR_MAX_ATTEMPTS = 3
+
+type SidecarRetryState = Pick<SidecarStream, 'done' | 'subtitleUrl' | 'failedAt' | 'permanent' | 'attempts'>
+
+/**
+ * Classify a settled start without a subtitle URL. Permanent only when the torrent itself
+ * cannot help: no playable video file, or it started fine but has no subtitle source.
+ * Timeouts / no peers / IPC errors are retryable (a cold swarm may warm up).
+ */
+export function isPermanentSidecarFailure(result: { ok: boolean; error?: string } | null): boolean {
+  if (!result) return false
+  if (result.ok) return true
+  return /no playable video file/i.test(String(result.error || ''))
+}
+
+/** Failed start that automatic retries will try again later (cool-down may still be running). */
+export function isSidecarRetryPending(s: SidecarRetryState | undefined): boolean {
+  return Boolean(
+    s &&
+      s.done &&
+      !s.subtitleUrl &&
+      !s.permanent &&
+      s.failedAt != null &&
+      s.attempts < NYAA_SUB_SIDECAR_MAX_ATTEMPTS,
+  )
+}
+
+/** Failed start whose cool-down is over: startSidecarStream will start it again. */
+export function isSidecarRetryReady(s: SidecarRetryState | undefined, now = Date.now()): boolean {
+  return isSidecarRetryPending(s) && now - (s!.failedAt as number) >= NYAA_SUB_SIDECAR_RETRY_AFTER_MS
+}
+
 const sidecarStreams = new Map<string, SidecarStream>()
 /** Notified whenever any sidecar torrent start settles (ready or failed). */
 const sidecarSettleListeners = new Set<() => void>()
@@ -828,24 +908,100 @@ function sidecarEpisodeKey(o: { showTitle: string; season: number; episode: numb
   return `${normalizeShowKey(cleanShowDisplayTitle(o.showTitle) || o.showTitle)}|${o.season}|${o.episode}`
 }
 
+function logSidecarFailure(entry: SidecarStream, hash: string | null, ms: number, error?: string) {
+  const willRetry = isSidecarRetryPending({ ...entry, done: true })
+  subsLog('nyaa.sidecar.failed', {
+    hash: shortHash(hash),
+    ms,
+    error,
+    attempt: entry.attempts,
+    permanent: Boolean(entry.permanent),
+    retryInMs: willRetry ? NYAA_SUB_SIDECAR_RETRY_AFTER_MS : undefined,
+    reason: entry.permanent
+      ? 'release cannot provide subtitles — not retried'
+      : willRetry
+        ? 'start failed (cold swarm / timeout) — retry after cool-down'
+        : `start failed ${entry.attempts}x — giving up on this release`,
+  })
+}
+
+/** Log an episode-level stop reason once (background polls would repeat it every few s). */
+const sidecarEpisodeLastLog = new Map<string, string>()
+function logSidecarEpisodeOnce(
+  options: { showTitle: string; season: number; episode: number },
+  event: string,
+  reason: string,
+) {
+  const key = sidecarEpisodeKey(options)
+  if (sidecarEpisodeLastLog.get(key) === `${event}|${reason}`) return
+  sidecarEpisodeLastLog.set(key, `${event}|${reason}`)
+  if (sidecarEpisodeLastLog.size > 200) {
+    const first = sidecarEpisodeLastLog.keys().next().value
+    if (first) sidecarEpisodeLastLog.delete(first)
+  }
+  subsLog(event, {
+    show: options.showTitle,
+    season: options.season,
+    episode: options.episode,
+    reason,
+  })
+}
+
 function startSidecarStream(uri: string): SidecarStream {
   const existing = sidecarStreams.get(uri)
-  if (existing && !(existing.done && existing.subtitleUrl && Date.now() - existing.startedAt > SIDECAR_SUCCESS_TTL_MS)) {
+  const staleSuccess = Boolean(
+    existing?.done && existing.subtitleUrl && Date.now() - existing.startedAt > SIDECAR_SUCCESS_TTL_MS,
+  )
+  const retry = isSidecarRetryReady(existing)
+  if (existing && !staleSuccess && !retry) {
     return existing
   }
-  const entry: SidecarStream = { promise: Promise.resolve(), done: false, startedAt: Date.now() }
+  const attempts = retry && existing ? existing.attempts + 1 : 1
+  const entry: SidecarStream = { promise: Promise.resolve(), done: false, startedAt: Date.now(), attempts }
+  const hash = magnetInfoHash(uri)
+  const meta = hash ? nyaaReleaseMeta.get(hash) : undefined
+  subsLog(retry ? 'nyaa.sidecar.retry' : 'nyaa.sidecar.start', {
+    hash: shortHash(hash),
+    title: meta?.title,
+    seeders: meta?.seeders,
+    attempt: attempts,
+    maxAttempts: NYAA_SUB_SIDECAR_MAX_ATTEMPTS,
+    sinceFailMs: retry && existing?.failedAt ? Date.now() - existing.failedAt : undefined,
+  })
   entry.promise = torrentStream(uri, { keepOthers: true, subtitleOnly: true })
     .then((result) => {
       const subtitleUrl = result.ok ? (result.subtitleUrl ?? result.playlist?.[0]?.subtitleUrl) : undefined
+      const ms = Date.now() - entry.startedAt
       if (subtitleUrl) {
         entry.subtitleUrl = subtitleUrl
         entry.subtitleKind = result.subtitleKind ?? result.playlist?.[0]?.subtitleKind
-        const hash = magnetInfoHash(uri)
-        if (hash) sidecarHashBySubtitleUrl.set(subtitleUrlKey(subtitleUrl), hash)
+        if (hash) {
+          sidecarHashBySubtitleUrl.set(subtitleUrlKey(subtitleUrl), hash)
+          // A late success from a release we had given up on is still good.
+          deadSubtitleHashes.delete(hash)
+        }
+        subsLog('nyaa.sidecar.ready', {
+          hash: shortHash(hash),
+          ms,
+          kind: entry.subtitleKind,
+          late: Boolean(entry.stalled),
+        })
+      } else {
+        entry.failedAt = Date.now()
+        entry.permanent = isPermanentSidecarFailure(result)
+        logSidecarFailure(entry, hash, ms, result.ok ? 'no subtitle URL in torrent' : result.error)
       }
     })
-    .catch(() => {
-      /* failed start: entry.done without subtitleUrl, never retried */
+    .catch((err: unknown) => {
+      // Thrown start (IPC / bridge error): retryable, like a timeout.
+      entry.failedAt = Date.now()
+      entry.permanent = false
+      logSidecarFailure(
+        entry,
+        hash,
+        Date.now() - entry.startedAt,
+        err instanceof Error ? err.message : String(err),
+      )
     })
     .finally(() => {
       entry.done = true
@@ -874,7 +1030,16 @@ async function sidecarCandidateUris(
       season: options.season,
       episode: options.episode,
     })
-    if (!nyaa.ok) return null
+    if (!nyaa.ok) {
+      subsLog('nyaa.search', {
+        show: options.showTitle,
+        season: options.season,
+        episode: options.episode,
+        ok: false,
+        error: nyaa.error,
+      })
+      return null
+    }
     cached = {
       at: Date.now(),
       candidates: [
@@ -883,15 +1048,53 @@ async function sidecarCandidateUris(
       ],
     }
     sidecarCandidatesByEpisode.set(key, cached)
+    const preview = rankNyaaSubtitleCandidates(cached.candidates, { season: options.season })
+    subsLog('nyaa.search', {
+      show: options.showTitle,
+      season: options.season,
+      episode: options.episode,
+      ok: true,
+      query: nyaa.query,
+      chosen: nyaa.choice.title,
+      chosenSeeders: nyaa.choice.seeders,
+      candidates: preview
+        .slice(0, NYAA_SUB_SIDECAR_MAX_RELEASES)
+        .map((c) => `${c.seeders}s ${c.title || shortHash(magnetInfoHash(c.uri))}`),
+      dropped: cached.candidates.length - preview.length,
+    })
     if (Date.now() - started > budgetMs) {
       return []
     }
   }
-  // Re-rank every time: releases marked unusable since the last call drop out.
-  const ranked = rankNyaaSubtitleCandidates(cached.candidates)
+  // Re-rank every time: releases marked unusable / given up since the last call drop out.
+  const ranked = rankNyaaSubtitleCandidates(cached.candidates, { season: options.season })
     .map((c) => c.uri)
     .slice(0, NYAA_SUB_SIDECAR_MAX_RELEASES)
   return ranked
+}
+
+/**
+ * Give up on sidecar releases that have produced no subtitle URL for NYAA_SUB_SIDECAR_STALL_MS
+ * (no metadata / 0 bytes from a dead swarm). The torrent start is not cancelled (it may share
+ * a hash with the playing torrent); its late success is still used, but it no longer counts
+ * as pending and is not re-armed, so the next candidate starts.
+ */
+function markStalledSidecars(uris: string[]): void {
+  const now = Date.now()
+  for (const uri of uris) {
+    const s = sidecarStreams.get(uri)
+    if (!s || s.done || s.stalled) continue
+    if (now - s.startedAt < NYAA_SUB_SIDECAR_STALL_MS) continue
+    s.stalled = true
+    const hash = magnetInfoHash(uri)
+    if (hash) deadSubtitleHashes.set(hash, now)
+    subsLog('nyaa.sidecar.stalled', {
+      hash: shortHash(hash),
+      title: hash ? nyaaReleaseMeta.get(hash)?.title : undefined,
+      ms: now - s.startedAt,
+      reason: 'no subtitle within 45s (no metadata / no data) — moving to next release',
+    })
+  }
 }
 
 /**
@@ -906,15 +1109,32 @@ export function resetNyaaSubtitleSidecarFailures(options: {
 }): void {
   const cached = sidecarCandidatesByEpisode.get(sidecarEpisodeKey(options))
   if (!cached) return
+  let rearmed = 0
+  let undead = 0
   for (const c of cached.candidates) {
     const hash = magnetInfoHash(c.uri)
-    if (hash) unusableSubtitleHashes.delete(hash)
+    if (hash) {
+      unusableSubtitleHashes.delete(hash)
+      // Manual retry always re-arms, even a release given up on in the last 15 min.
+      if (deadSubtitleHashes.delete(hash)) undead++
+    }
     const s = sidecarStreams.get(c.uri)
     if (s?.done) {
+      // Dropping the entry also resets failedAt / attempts / permanent.
       if (s.subtitleUrl) sidecarHashBySubtitleUrl.delete(subtitleUrlKey(s.subtitleUrl))
       sidecarStreams.delete(c.uri)
+      rearmed++
     }
   }
+  sidecarEpisodeLastLog.delete(sidecarEpisodeKey(options))
+  subsLog('nyaa.sidecar.rearm', {
+    show: options.showTitle,
+    season: options.season,
+    episode: options.episode,
+    rearmed,
+    undead,
+    reason: 'manual Retry Subs',
+  })
 }
 
 /**
@@ -930,13 +1150,25 @@ export function isNyaaSubtitleSidecarPending(options: {
   if (!isTorrentPlaybackAvailable()) return false
   const cached = sidecarCandidatesByEpisode.get(sidecarEpisodeKey(options))
   if (!cached) return false
-  const uris = rankNyaaSubtitleCandidates(cached.candidates)
+  const allUris = cached.candidates.map((c) => c.uri)
+  markStalledSidecars(allUris)
+  const uris = rankNyaaSubtitleCandidates(cached.candidates, { season: options.season })
     .map((c) => c.uri)
     .slice(0, NYAA_SUB_SIDECAR_MAX_RELEASES)
-  return uris.some((uri) => {
+  // Untried, starting, succeeded, or failed-but-retryable (cool-down / attempts left).
+  // Bounded: retries stop after NYAA_SUB_SIDECAR_MAX_ATTEMPTS and the player's own window.
+  const pending = uris.some((uri) => {
     const s = sidecarStreams.get(uri)
-    return !s || !s.done || Boolean(s.subtitleUrl)
+    return !s || (!s.done && !s.stalled) || Boolean(s.subtitleUrl) || isSidecarRetryPending(s)
   })
+  // A given-up (stalled) release that is still starting may yet deliver: keep listening
+  // until main / Android settles it (their own timeouts bound this).
+  const stillRunning = allUris.some((uri) => {
+    const s = sidecarStreams.get(uri)
+    return Boolean(s && !s.done)
+  })
+  const lateSuccess = allUris.some((uri) => Boolean(sidecarStreams.get(uri)?.subtitleUrl))
+  return pending || stillRunning || lateSuccess
 }
 
 /**
@@ -959,8 +1191,20 @@ export async function resolveNyaaSubtitleSidecar(options: {
   const budgetMs = Math.max(1000, options.budgetMs ?? NYAA_SUB_SIDECAR_BUDGET_MS)
   // Episode pick first, then by seeders (Multi-Subs/SoftSub break ties); skip
   // English-dub-only packs (Signs-only subs) and releases already found unusable.
-  const uris = await sidecarCandidateUris(options, started, budgetMs)
-  if (!uris || uris.length === 0) return null
+  const listed = await sidecarCandidateUris(options, started, budgetMs)
+  // Late successes from given-up releases (dropped from the ranking) still count.
+  const cachedAll = sidecarCandidatesByEpisode.get(sidecarEpisodeKey(options))?.candidates || []
+  for (const c of cachedAll) {
+    const s = sidecarStreams.get(c.uri)
+    if (s?.done && s.subtitleUrl && Date.now() - s.startedAt <= SIDECAR_SUCCESS_TTL_MS) {
+      return { subtitleUrl: s.subtitleUrl, subtitleKind: s.subtitleKind }
+    }
+  }
+  if (!listed || listed.length === 0) {
+    if (listed) logSidecarEpisodeOnce(options, 'nyaa.sidecar.exhausted', 'no usable release left')
+    return null
+  }
+  let uris = listed
 
   for (const uri of uris) {
     const known = sidecarStreams.get(uri)
@@ -982,11 +1226,27 @@ export async function resolveNyaaSubtitleSidecar(options: {
     }
     const left = budgetMs - (Date.now() - started)
     if (left < 1000) return null
-    const pending = uris.map((u) => sidecarStreams.get(u)).filter((e): e is SidecarStream => Boolean(e && !e.done))
-    // Failed releases (done without a URL) are never restarted.
+    // Stalled releases stop counting as pending and drop out of the ranking → next one starts.
+    markStalledSidecars(uris)
+    if (uris.some((u) => sidecarStreams.get(u)?.stalled)) {
+      uris = (await sidecarCandidateUris(options, started, budgetMs)) || []
+      if (uris.length === 0) {
+        logSidecarEpisodeOnce(
+          options,
+          'nyaa.sidecar.exhausted',
+          'every release stalled, failed or had no subtitles',
+        )
+        return null
+      }
+    }
+    const pending = uris
+      .map((u) => sidecarStreams.get(u))
+      .filter((e): e is SidecarStream => Boolean(e && !e.done && !e.stalled))
+    // Failed releases are restarted only after the cool-down and while attempts remain.
     const untried = uris.filter((u) => {
       const s = sidecarStreams.get(u)
-      return !s || Boolean(s.done && s.subtitleUrl) // stale success: startSidecarStream restarts it
+      // stale success / due retry: startSidecarStream restarts it
+      return !s || Boolean(s.done && s.subtitleUrl) || isSidecarRetryReady(s)
     })
     const newestStart = pending.reduce((max, e) => Math.max(max, e.startedAt), 0)
     const sinceNewest = newestStart ? Date.now() - newestStart : Infinity
@@ -998,10 +1258,32 @@ export async function resolveNyaaSubtitleSidecar(options: {
       startSidecarStream(untried[0]!)
       continue
     }
-    if (pending.length === 0) return null // every candidate settled without subs
+    if (pending.length === 0) {
+      const cooling = uris.filter((u) => isSidecarRetryPending(sidecarStreams.get(u)))
+      if (cooling.length > 0) {
+        // Failed starts waiting out their cool-down: the player keeps polling (bounded by
+        // its retry window); a later call restarts them via startSidecarStream.
+        logSidecarEpisodeOnce(
+          options,
+          'nyaa.sidecar.waiting',
+          `${cooling.length} failed release(s) retry after ${NYAA_SUB_SIDECAR_RETRY_AFTER_MS / 60_000} min cool-down`,
+        )
+        return null
+      }
+      logSidecarEpisodeOnce(
+        options,
+        'nyaa.sidecar.exhausted',
+        'every candidate settled without subtitles (failed starts used all attempts or are permanent)',
+      )
+      return null
+    }
     const canStartMore = untried.length > 0 && pending.length < maxParallel
+    // Wake up when the oldest pending release reaches the stall limit so the next one starts.
+    const oldestStart = pending.reduce((min, e) => Math.min(min, e.startedAt), Infinity)
+    const untilStall = Math.max(250, NYAA_SUB_SIDECAR_STALL_MS - (Date.now() - oldestStart))
     const waitMs = Math.min(
       left,
+      untilStall,
       canStartMore ? Math.max(250, NYAA_SUB_SIDECAR_STAGGER_MS - sinceNewest) : NYAA_SUB_SIDECAR_TIMEOUT_MS,
     )
     let timer = 0
