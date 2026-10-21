@@ -17,7 +17,12 @@ import {
   type TorrentResult,
 } from './torrents'
 import { getConnectionDownlinkMbps, resolveRequestedQuality } from './viewingQuality'
-import { isDesktopTorrentAvailable, isTorrentPlaybackAvailable, torrentStream } from './torrentBridge'
+import {
+  isDesktopTorrentAvailable,
+  isTorrentPlaybackAvailable,
+  torrentStop,
+  torrentStream,
+} from './torrentBridge'
 import { isNativeHttpPlatform, nativeFetchText } from './nativeHttp'
 import {
   nyaaReleaseEpisodeKey,
@@ -151,7 +156,7 @@ function scrapeNyaaSearchResults(html: string): TorrentResult[] {
       seeders,
       sourceLabel: 'Nyaa',
     })
-    rememberNyaaRelease(hash, title, seeders)
+    rememberNyaaRelease(hash, title, seeders, sizeBytes)
   }
 
   return [...byHash.values()].sort(
@@ -742,10 +747,10 @@ export function prefersSoftsubRelease(title: string): number {
 }
 
 /** Scraped title/seeders per info-hash so alternates can be ranked by their own names. */
-const nyaaReleaseMeta = new Map<string, { title: string; seeders: number }>()
-function rememberNyaaRelease(hash: string, title: string, seeders: number) {
+const nyaaReleaseMeta = new Map<string, { title: string; seeders: number; sizeBytes?: number }>()
+function rememberNyaaRelease(hash: string, title: string, seeders: number, sizeBytes = 0) {
   if (!hash || !title) return
-  nyaaReleaseMeta.set(hash, { title, seeders })
+  nyaaReleaseMeta.set(hash, { title, seeders, sizeBytes: sizeBytes > 0 ? sizeBytes : undefined })
   if (nyaaReleaseMeta.size > 2000) {
     const first = nyaaReleaseMeta.keys().next().value
     if (first) nyaaReleaseMeta.delete(first)
@@ -801,8 +806,24 @@ function seedTier(seeders: number | null): number {
   return seeders > 0 ? 2 : 0
 }
 
+/** Single-episode file above this is "heavy" for a subtitle-only download. */
+const SUBTITLE_SIDECAR_HEAVY_BYTES = 1.5e9
+/** A lighter release needs at least this many seeders to be preferred over a heavy one. */
+const SUBTITLE_SIDECAR_LIGHT_MIN_SEEDERS = 3
+
 /**
- * Order sidecar candidates: the episode search's own pick (candidates[0]) first, then
+ * 2160p / 4K / UHD (or a very large file): same subtitles, but a subtitle-only download
+ * reads the file in order, so a 2-3x bigger file fills cues 2-3x slower (S1E5 2160p
+ * fell behind the playhead at ~0.6x real time).
+ */
+export function isHeavySubtitleRelease(title: string, sizeBytes?: number): boolean {
+  if (/\b(2160p|4k|uhd)\b/i.test(title || '')) return true
+  return typeof sizeBytes === 'number' && sizeBytes > SUBTITLE_SIDECAR_HEAVY_BYTES
+}
+
+/**
+ * Order sidecar candidates: lighter releases (not 2160p / huge) with a few seeders first,
+ * then the episode search's own pick (candidates[0]), then
  * the rest by seeders; the softsub signal only breaks seeder ties. Dub-only releases
  * and releases already found to have no usable track are dropped.
  */
@@ -818,7 +839,10 @@ export function rankNyaaSubtitleCandidates(
       const title = meta?.title || c.title || ''
       const known = meta?.seeders ?? c.seeders
       const seeders = typeof known === 'number' && Number.isFinite(known) ? known : null
-      return { uri: c.uri, hash, title, seeders, score: prefersSoftsubRelease(title) }
+      const light = !isHeavySubtitleRelease(title, meta?.sizeBytes)
+      // Light tier only with real seeders: a 1-seeder 1080p is no faster than a seeded 4K.
+      const lightTier = light && (seeders ?? 0) >= SUBTITLE_SIDECAR_LIGHT_MIN_SEEDERS ? 1 : 0
+      return { uri: c.uri, hash, title, seeders, lightTier, score: prefersSoftsubRelease(title) }
     })
     .filter((c, i, arr) => Boolean(c.uri) && arr.findIndex((x) => x.uri === c.uri) === i)
     .filter((c) => !(c.hash && unusableSubtitleHashes.has(c.hash)))
@@ -830,6 +854,8 @@ export function rankNyaaSubtitleCandidates(
       (a, b) =>
         // 0-seeder releases go last, even when they were the episode pick.
         seedTier(b.seeders) - seedTier(a.seeders) ||
+        // Subtitle-only: a seeded 1080p beats the 2160p episode pick (same subs, less data).
+        b.lightTier - a.lightTier ||
         Number(b.uri === primaryUri) - Number(a.uri === primaryUri) ||
         (b.seeders ?? 0) - (a.seeders ?? 0) ||
         b.score - a.score,
@@ -858,6 +884,8 @@ type SidecarStream = {
   permanent?: boolean
   /** Starts so far for this magnet (1 = first try). Reset by manual Retry Subs. */
   attempts: number
+  /** Another release's subs were attached while this one was starting: stop it on settle. */
+  discard?: boolean
 }
 /** A failed (not permanent) start may be tried again after this long… */
 export const NYAA_SUB_SIDECAR_RETRY_AFTER_MS = 3 * 60 * 1000
@@ -983,6 +1011,17 @@ function startSidecarStream(uri: string): SidecarStream {
     .then((result) => {
       const subtitleUrl = result.ok ? (result.subtitleUrl ?? result.playlist?.[0]?.subtitleUrl) : undefined
       const ms = Date.now() - entry.startedAt
+      if (subtitleUrl && entry.discard) {
+        // The player already reads another release: don't keep a second swarm running.
+        if (sidecarStreams.get(uri) === entry) sidecarStreams.delete(uri)
+        if (hash) void torrentStop(hash).catch(() => {})
+        subsLog('nyaa.sidecar.discarded', {
+          hash: shortHash(hash),
+          ms: Date.now() - entry.startedAt,
+          reason: 'another release is already attached',
+        })
+        return
+      }
       if (subtitleUrl) {
         entry.subtitleUrl = subtitleUrl
         entry.subtitleKind = result.subtitleKind ?? result.playlist?.[0]?.subtitleKind
@@ -1146,6 +1185,54 @@ export function resetNyaaSubtitleSidecarFailures(options: {
     undead,
     reason: 'manual Retry Subs',
   })
+}
+
+/**
+ * The player attached one release's subtitles: stop this episode's other sidecar torrents
+ * so they don't compete with it for bandwidth (desktop runs two releases at once). Ones
+ * still starting are stopped when they settle. `protectHashes` (the playing torrent) are
+ * never touched. Returns the hashes stopped now.
+ */
+export function releaseOtherNyaaSubtitleSidecars(
+  options: { showTitle: string; season: number; episode: number },
+  keepSubtitleUrl: string,
+  protectHashes: string[] = [],
+): string[] {
+  const cached = sidecarCandidatesByEpisode.get(sidecarEpisodeKey(options))
+  if (!cached) return []
+  const keepKey = subtitleUrlKey(keepSubtitleUrl)
+  const protect = new Set(protectHashes.map((h) => h.toLowerCase()).filter(Boolean))
+  const stopped: string[] = []
+  let deferred = 0
+  for (const c of cached.candidates) {
+    const s = sidecarStreams.get(c.uri)
+    if (!s) continue
+    if (s.subtitleUrl && subtitleUrlKey(s.subtitleUrl) === keepKey) continue
+    const hash = (magnetInfoHash(c.uri) || '').toLowerCase()
+    if (!hash || protect.has(hash)) continue
+    if (!s.done) {
+      s.discard = true
+      deferred++
+      continue
+    }
+    // Failed starts have nothing running (their retry state stays as it was).
+    if (!s.subtitleUrl) continue
+    sidecarHashBySubtitleUrl.delete(subtitleUrlKey(s.subtitleUrl))
+    sidecarStreams.delete(c.uri)
+    void torrentStop(hash).catch(() => {})
+    stopped.push(hash)
+  }
+  if (stopped.length || deferred) {
+    subsLog('nyaa.sidecar.release-others', {
+      show: options.showTitle,
+      season: options.season,
+      episode: options.episode,
+      stopped: stopped.map((h) => shortHash(h)),
+      deferred,
+      reason: 'subs attached from another release',
+    })
+  }
+  return stopped
 }
 
 /**

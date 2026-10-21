@@ -9087,7 +9087,10 @@ function abortSubtitleExtractors(exceptKey = null) {
     if (!subtitleCache.has(key)) {
       subtitleJobs.delete(key)
     } else {
-      job.done = false
+      // done + retryable: the player keeps polling (extractDone needs !retryable) and
+      // its next poll restarts this extract. done=false left the job orphaned (no
+      // extractor, never restarted), so a sidecar's subs froze at the first few cues.
+      job.done = true
       job.retryable = true
     }
   }
@@ -9095,6 +9098,64 @@ function abortSubtitleExtractors(exceptKey = null) {
 
 /** Don't steal torrent pieces from remux until the opening is buffered. */
 const SUBTITLE_EXTRACT_MIN_BYTES = 12 * 1024 * 1024
+
+/** cacheKey -> latest player position (s, subtitle clock) sent with a /subs-cache poll (?at=). */
+const subtitleWantAt = new Map()
+/** cacheKey -> [{ from, to }] stretches of the title (s) that extract runs have covered. */
+const subtitleRanges = new Map()
+/** Extract frontier this far behind the player means cues will never reach it: jump. */
+const SUBTITLE_JUMP_BEHIND_S = 30
+/** A jumped extract starts this far past the player so cues stay ahead on ~1x swarms. */
+const SUBTITLE_JUMP_LEAD_S = 8
+/** Lead cap when the swarm is slower than real time (lead grows as the rate drops). */
+const SUBTITLE_JUMP_MAX_LEAD_S = 40
+/** Player this far before a run's start (beyond the lead) is a real seek back. */
+const SUBTITLE_SEEK_BACK_MARGIN_S = 15
+/** Minimum time between any two extract restarts for one title. */
+const SUBTITLE_JUMP_MIN_GAP_MS = 10_000
+/** A new run gets this long to produce cues before it can be judged behind. */
+const SUBTITLE_RUN_GRACE_MS = 20_000
+
+/** Lead for the next run from the replaced run's speed (title s per wall s). */
+function subtitleJumpLead(rate) {
+  if (!Number.isFinite(rate) || rate >= 1) return SUBTITLE_JUMP_LEAD_S
+  const lead = SUBTITLE_JUMP_LEAD_S + (1 - Math.max(0, rate)) * 40
+  return Math.min(SUBTITLE_JUMP_MAX_LEAD_S, Math.round(lead))
+}
+
+/** Extract run that already holds cues past this position, or null. */
+function subtitleCoveredAt(cacheKey, at) {
+  const ranges = subtitleRanges.get(cacheKey) || []
+  return ranges.find((r) => r.from <= at + 1 && r.to >= at + 2) || null
+}
+
+/** Covered stretches leave a hole between 0 and their furthest point (after a jump). */
+function subtitleRangesHaveGap(cacheKey) {
+  const ranges = [...(subtitleRanges.get(cacheKey) || [])].sort((a, b) => a.from - b.from)
+  let cursor = 0
+  for (const r of ranges) {
+    if (r.from > cursor + 10) return true
+    cursor = Math.max(cursor, r.to)
+  }
+  return false
+}
+
+/**
+ * Where a (re)started embedded extract should begin. Progressive extract reads the file
+ * in order at swarm speed, so starting at 0:00 while the viewer is mid-episode (resume,
+ * or a sidecar for a non-torrent stream) produced cues that never caught up.
+ */
+function initialSubtitleStartAt(cacheKey, cues, file) {
+  if (torrentFileMostlyComplete(file)) return 0
+  const lastEnd = cues.reduce((max, cue) => Math.max(max, cue.end || 0), 0)
+  const want = subtitleWantAt.get(cacheKey)
+  if (Number.isFinite(want) && want > SUBTITLE_JUMP_BEHIND_S) {
+    const covered = subtitleCoveredAt(cacheKey, want)
+    if (covered) return Math.max(0, covered.to - 1)
+    if (lastEnd < want - SUBTITLE_JUMP_BEHIND_S) return Math.floor(want + SUBTITLE_JUMP_LEAD_S)
+  }
+  return lastEnd > 1 ? Math.max(0, lastEnd - 1) : 0
+}
 const subtitleExtractDeferred = new Map()
 
 /** Companion .srt/.ass files are tiny — never gate them on the 12MB video buffer. */
@@ -9374,6 +9435,13 @@ function startProgressiveSubtitleExtract(file, cacheKey) {
     killActive()
     const startAt = Math.max(0, Number(options.startAt) || 0)
     const beforeCount = cues.length
+    const run = { from: startAt, to: startAt }
+    const ranges = subtitleRanges.get(cacheKey) || []
+    ranges.push(run)
+    if (ranges.length > 40) ranges.splice(0, ranges.length - 40)
+    subtitleRanges.set(cacheKey, ranges)
+    job.run = run
+    job.runStartedAt = Date.now()
     console.log('[torrent subs] extracting track', {
       index: track.index,
       language: track.language || 'und',
@@ -9395,8 +9463,10 @@ function startProgressiveSubtitleExtract(file, cacheKey) {
       '20000000',
     ]
     // Skip cues we already have — critical when resuming after a sparse-file stall.
+    // -copyts keeps cue times on the title clock; without it input -ss rebased them to 0
+    // (resumed / jumped cues landed minutes early, or were dropped as "overlap").
     if (startAt >= 1) {
-      args.push('-ss', startAt.toFixed(3))
+      args.push('-ss', startAt.toFixed(3), '-copyts')
     }
     args.push(
       '-i',
@@ -9430,17 +9500,21 @@ function startProgressiveSubtitleExtract(file, cacheKey) {
       for (const line of lines) {
         const cue = parseAssDialogueLine(line)
         if (!cue) continue
-        // Ignore overlap from -ss restarts.
-        if (startAt > 0 && cue.end <= startAt + 0.05) continue
+        // Overlap from -ss restarts is dropped by dedupeSubtitleCues (same title clock).
+        if (cue.end > run.to) run.to = cue.end
         cues.push(cue)
         sawCue = true
         grew = true
       }
       if (grew) {
         publishSubtitleCues(cacheKey, cues, job)
-        if (job.cueCount > lastLoggedCount) {
+        // Progress line every 25 cues (one per cue flooded the dev console).
+        if (
+          job.cueCount - lastLoggedCount >= 25 ||
+          (lastLoggedCount === beforeCount && job.cueCount > beforeCount)
+        ) {
           lastLoggedCount = job.cueCount
-          console.log('[torrent subs] cues', job.cueCount)
+          console.log('[torrent subs] cues', job.cueCount, { upTo: Math.round(run.to) })
         }
       }
     })
@@ -9451,6 +9525,8 @@ function startProgressiveSubtitleExtract(file, cacheKey) {
     })
 
     ffmpeg.once('error', (err) => {
+      // A jump to the playhead replaced this run: its exit is not the job's.
+      if (activeFfmpeg && activeFfmpeg !== ffmpeg) return
       console.warn('[torrent subs] ffmpeg error:', err?.message || err)
       if (!sawCue && cues.length === 0) {
         markRetryable(err?.message || 'Subtitle extract failed')
@@ -9462,6 +9538,7 @@ function startProgressiveSubtitleExtract(file, cacheKey) {
     })
 
     ffmpeg.once('close', (code) => {
+      if (activeFfmpeg && activeFfmpeg !== ffmpeg) return
       if (subtitleExtractors.get(cacheKey)?.kill !== killActive) return
       if (!sawCue && cues.length === 0) {
         const downloaded = Number(file.downloaded) || 0
@@ -9507,8 +9584,10 @@ function startProgressiveSubtitleExtract(file, cacheKey) {
       if (!selectedTrack) return
 
       if (torrentFileMostlyComplete(file)) {
-        // Finished downloading — one clean disk pass from the last cue.
-        extractTrack(selectedTrack, { startAt: Math.max(0, lastEnd - 1) })
+        // Finished downloading — one clean disk pass from the last cue (from 0:00 when
+        // a jump to the playhead skipped a stretch, so the gap is filled too).
+        const from = subtitleRangesHaveGap(cacheKey) ? 0 : Math.max(0, lastEnd - 1)
+        extractTrack(selectedTrack, { startAt: from })
         return
       }
 
@@ -9524,6 +9603,53 @@ function startProgressiveSubtitleExtract(file, cacheKey) {
       extractTrack(selectedTrack, { startAt: Math.max(0, lastEnd - 1) })
     }
     setTimeout(tryResume, 5000)
+  }
+
+  /** Player is past the extract frontier (or seeked back before it): restart near it. */
+  job.seekTo = (at) => {
+    if (!selectedTrack || !Number.isFinite(at) || at < 0) return false
+    if (torrentFileMostlyComplete(file)) return false
+    const run = job.run
+    // Already extracted here (any earlier run or this one): nothing to do.
+    if (subtitleCoveredAt(cacheKey, at)) return false
+    const now = Date.now()
+    // Never restart more often than this, whatever the reason (a jump starts the run
+    // ahead of the player, and every poll in that lead used to read as a "seek back").
+    if (now - (job.lastJumpAt || 0) < SUBTITLE_JUMP_MIN_GAP_MS) return false
+    const ageMs = now - (job.runStartedAt || 0)
+    // The run started `runLead` s ahead of the player on purpose: only a position before
+    // that lead plus a margin is a real seek back.
+    const runLead = Number.isFinite(job.runLead) ? job.runLead : SUBTITLE_JUMP_LEAD_S
+    const seekBack = Boolean(run && at < run.from - runLead - SUBTITLE_SEEK_BACK_MARGIN_S)
+    // Behind only once the run had time to produce cues.
+    const behind = Boolean(
+      run && ageMs >= SUBTITLE_RUN_GRACE_MS && run.to < at - SUBTITLE_JUMP_BEHIND_S,
+    )
+    if (!seekBack && !behind) return false
+    const rate = run && ageMs > 5000 ? (run.to - run.from) / (ageMs / 1000) : NaN
+    const lead = seekBack ? SUBTITLE_JUMP_LEAD_S : subtitleJumpLead(rate)
+    const target = Math.max(0, Math.floor(at + lead))
+    job.lastJumpAt = now
+    job.runLead = lead
+    const hash = String(cacheKey || '').split(':')[0].slice(0, 8)
+    const detail = {
+      hash,
+      from: Math.round(run?.from || 0),
+      frontier: Math.round(run?.to || 0),
+      at: Math.round(at),
+      target,
+      rate: Number.isFinite(rate) ? Math.round(rate * 100) / 100 : undefined,
+    }
+    console.log('[torrent subs] jump to playhead', detail)
+    writeSubtitlesLog('main', 'torrent.extract.jump', {
+      ...detail,
+      reason: seekBack ? 'seeked before extract run' : 'extract behind playhead',
+    })
+    subtitleExtractors.set(cacheKey, { kill: killActive })
+    job.done = false
+    job.retryable = false
+    extractTrack(selectedTrack, { startAt: target })
+    return true
   }
 
   void (async () => {
@@ -9585,7 +9711,7 @@ function startProgressiveSubtitleExtract(file, cacheKey) {
 
     const bestText = pickBestTextSubtitleTrack(tracks)
     if (bestText) {
-      extractTrack(bestText)
+      extractTrack(bestText, { startAt: initialSubtitleStartAt(cacheKey, cues, file) })
       return
     }
 
@@ -9974,11 +10100,15 @@ async function handleSubtitleRequest(req, res, source, cacheKey) {
 
 async function handleCachedSubtitleRequest(req, res, cacheKey) {
   let force = false
+  let wantAt = NaN
   try {
-    force = new URL(req.url || '/', 'http://127.0.0.1').searchParams.get('force') === '1'
+    const params = new URL(req.url || '/', 'http://127.0.0.1').searchParams
+    force = params.get('force') === '1'
+    wantAt = Number.parseFloat(params.get('at') || '')
   } catch {
     force = false
   }
+  if (Number.isFinite(wantAt) && wantAt >= 0) subtitleWantAt.set(cacheKey, wantAt)
   const sourceFile = subtitleSources.get(cacheKey)
   const existing = subtitleJobs.get(cacheKey)
   const sidecar = sourceFile && SUBTITLE_FILE_RE.test(sourceFile.name || '')
@@ -10005,6 +10135,16 @@ async function handleCachedSubtitleRequest(req, res, cacheKey) {
     }
   } else if (sourceFile && !existing) {
     scheduleSubtitleExtractWhenReady(sourceFile, cacheKey)
+  }
+
+  // Extract running but far from where the viewer is: move it to the playhead.
+  const liveJob = subtitleJobs.get(cacheKey)
+  if (Number.isFinite(wantAt) && liveJob && !liveJob.done && typeof liveJob.seekTo === 'function') {
+    try {
+      liveJob.seekTo(wantAt)
+    } catch (err) {
+      console.warn('[torrent subs] jump failed', err?.message || err)
+    }
   }
 
   // Give the new episode's extractor a moment to publish the first cues.
@@ -11006,7 +11146,9 @@ async function torrentStreamHandler(_event, input, options) {
     // Embedded softsubs: let remux claim the swarm first. Companion .srt/.ass
     // files are tiny — start almost immediately (the old 12MB gate blocked them forever).
     const primarySubKey = `${torrent.infoHash}:${file.path || file.name}`
-    if (playlist[0]?.subtitleUrl) {
+    // Subtitle-only sidecars extract when the player polls their URL. Auto-starting every
+    // sidecar let the second release (never shown) abort the one the player was reading.
+    if (playlist[0]?.subtitleUrl && !options?.subtitleOnly) {
       const sidecar = playlist[0].subtitleKind === 'file'
       setTimeout(() => {
         const sourceFile = subtitleSources.get(primarySubKey)

@@ -41,6 +41,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * libtorrent4j session + sequential download of the chosen video file,
@@ -54,6 +55,19 @@ public final class TorrentEngine {
   /** Backoff between subtitle extract retries after read errors. */
   private static final long[] SUB_RETRY_BACKOFF_MS = {15_000L, 30_000L, 60_000L, 120_000L};
   private static final long SUB_REKICK_COOLDOWN_MS = 60_000L;
+  /** Extract frontier this far behind the player means cues will never reach it: jump. */
+  private static final double SUB_JUMP_BEHIND_S = 30;
+  /** A jumped extract starts this far past the player so cues stay ahead on ~1x swarms. */
+  private static final double SUB_JUMP_LEAD_S = 8;
+  /** Lead cap when the swarm is slower than real time (lead grows as the rate drops). */
+  private static final double SUB_JUMP_MAX_LEAD_S = 40;
+  /** Player this far before a run's start (beyond its lead) is a real seek back. */
+  private static final double SUB_SEEK_BACK_MARGIN_S = 15;
+  /** Minimum time between any two extract restarts for one torrent. */
+  private static final long SUB_JUMP_MIN_GAP_MS = 10_000L;
+  /** A new run gets this long to produce cues before it can be judged behind. */
+  private static final long SUB_RUN_GRACE_MS = 20_000L;
+  private static final int SUB_MAX_JUMPS = 40;
   /** Unfinished downloads are removed after this long. Finished ones go immediately. */
   private static final long PARTIAL_TTL_MS = 3L * 60L * 60L * 1000L;
   /**
@@ -776,6 +790,128 @@ public final class TorrentEngine {
     volatile long subtitleGaveUpAt;
     /** Sidecar torrent used only for softsubs (no remux competes for the opening pieces). */
     volatile boolean subtitleOnly;
+    /** Running subtitle ffmpeg session id (0 = none), for jump-to-playhead cancels. */
+    final AtomicLong subtitleSessionId = new AtomicLong(0);
+    /** Player position (s) from the latest /subs.vtt?at= poll, or -1. */
+    volatile double subtitleWantAt = -1;
+    /** Title position the running extract started at, and its last cue end so far. */
+    volatile double subtitleRunFrom = 0;
+    volatile double subtitleFrontier = 0;
+    volatile long subtitleRunStartedAt = 0;
+    /** Where the next run starts after a jump cancel (-1 = no jump requested). */
+    volatile double subtitleJumpTarget = -1;
+    /** How far ahead of the player the current run was started (s). */
+    volatile double subtitleRunLead = SUB_JUMP_LEAD_S;
+    volatile long subtitleLastJumpAt = 0;
+    /** Cue blocks (no header) from runs before the current one. */
+    volatile String subtitlePrevCues = "";
+    /** Covered stretches {from, to} from earlier runs. */
+    final List<double[]> subtitleRanges = java.util.Collections.synchronizedList(new ArrayList<>());
+
+    String earlierSubtitleCues() {
+      String p = subtitlePrevCues;
+      return p != null ? p : "";
+    }
+
+    void noteSubtitleFrontier(double end) {
+      if (end > subtitleFrontier) subtitleFrontier = end;
+    }
+
+    private boolean subtitleRangesCover(double at) {
+      synchronized (subtitleRanges) {
+        for (double[] r : subtitleRanges) {
+          if (r[0] <= at + 1 && r[1] >= at + 2) return true;
+        }
+      }
+      // The running extract has already passed this point.
+      return subtitleExtracting.get() && subtitleRunFrom <= at + 1 && subtitleFrontier >= at + 2;
+    }
+
+    /**
+     * /subs.vtt poll with the player position. Progressive extract reads the file in order
+     * at swarm speed, so a viewer resumed mid-episode (or watching a non-torrent stream with
+     * this sidecar) never got cues: cancel the run and restart it just past the player.
+     */
+    void noteSubtitlePlayhead(double at) {
+      if (!(at >= 0)) return;
+      subtitleWantAt = at;
+      if (!subtitleExtracting.get() || subtitleJumpTarget >= 0) return;
+      long id = subtitleSessionId.get();
+      if (id == 0) return;
+      // Already extracted here (earlier run or this one): nothing to do.
+      if (subtitleRangesCover(at)) return;
+      long now = System.currentTimeMillis();
+      // Never restart more often than this (a jumped run starts ahead of the player, and
+      // every poll inside that lead used to read as a "seek back" and restart it again).
+      if (now - subtitleLastJumpAt < SUB_JUMP_MIN_GAP_MS) return;
+      double from = subtitleRunFrom;
+      double front = Math.max(subtitleFrontier, from);
+      long ageMs = now - subtitleRunStartedAt;
+      boolean seekBack = at < from - subtitleRunLead - SUB_SEEK_BACK_MARGIN_S;
+      boolean behind = ageMs >= SUB_RUN_GRACE_MS && front < at - SUB_JUMP_BEHIND_S;
+      if (!seekBack && !behind) return;
+      if (length > 0 && downloadedBytes() >= (long) (length * 0.97)) return;
+      double rate = ageMs > 5000 ? (front - from) / (ageMs / 1000.0) : Double.NaN;
+      double lead = SUB_JUMP_LEAD_S;
+      if (!seekBack && !Double.isNaN(rate) && rate < 1) {
+        lead = Math.min(SUB_JUMP_MAX_LEAD_S, Math.round(SUB_JUMP_LEAD_S + (1 - Math.max(0, rate)) * 40));
+      }
+      double target = Math.floor(at + lead);
+      subtitleLastJumpAt = now;
+      subtitleRunLead = lead;
+      subtitleJumpTarget = target;
+      Log.i(SUBS_TAG, "torrent.extract.jump hash=" + infoHash.substring(0, Math.min(8, infoHash.length()))
+        + " from=" + Math.round(from) + " frontier=" + Math.round(front) + " at=" + Math.round(at)
+        + " target=" + Math.round(target) + " rate=" + (Double.isNaN(rate) ? "?" : String.format(Locale.US, "%.2f", rate))
+        + " reason=" + (seekBack ? "seeked before extract run" : "extract behind playhead"));
+      try {
+        com.arthenica.ffmpegkit.FFmpegKit.cancel(id);
+      } catch (Throwable t) {
+        subtitleJumpTarget = -1;
+        Log.w(TAG, "subtitle jump cancel failed", t);
+      }
+    }
+
+    /** Keep the finished/cancelled run's cues and remember the stretch it covered. */
+    private void stashSubtitleRun(File out) {
+      String body = TorrentSubtitleExtractor.completeCueBody(out);
+      if (body.isEmpty()) return;
+      double end = TorrentSubtitleExtractor.lastCueEndSeconds(body);
+      noteSubtitleFrontier(end);
+      subtitleRanges.add(new double[] {subtitleRunFrom, Math.max(subtitleRunFrom, end)});
+      subtitlePrevCues = earlierSubtitleCues() + body;
+    }
+
+    /** Where a (re)started run begins: just past the player, or where coverage ends. */
+    private double subtitleStartFor(double fallback) {
+      double want = subtitleWantAt;
+      if (want > SUB_JUMP_BEHIND_S && !subtitleRangesCover(want)
+        && Math.max(fallback, 0) < want - SUB_JUMP_BEHIND_S) {
+        return Math.floor(want + SUB_JUMP_LEAD_S);
+      }
+      return Math.max(0, fallback);
+    }
+
+    /** Final VTT = earlier runs' cues + the last run (which reached the end). */
+    private void mergeEarlierSubtitleCues(File out) {
+      String prev = earlierSubtitleCues();
+      if (prev.isEmpty()) return;
+      try {
+        String last = TorrentSubtitleExtractor.completeCueBody(out);
+        File tmp = new File(out.getParentFile(), out.getName() + ".merge");
+        try (FileOutputStream os = new FileOutputStream(tmp)) {
+          os.write(("WEBVTT\n\n" + prev + last).getBytes(StandardCharsets.UTF_8));
+        }
+        if (!tmp.renameTo(out)) {
+          //noinspection ResultOfMethodCallIgnored
+          out.delete();
+          //noinspection ResultOfMethodCallIgnored
+          tmp.renameTo(out);
+        }
+      } catch (Throwable t) {
+        Log.w(TAG, "subtitle merge failed", t);
+      }
+    }
 
     ActiveTorrent(String infoHash, String name, TorrentHandle handle, int fileIndex, File videoFile, long length) {
       this.infoHash = infoHash;
@@ -819,18 +955,41 @@ public final class TorrentEngine {
           if (!subtitleOnly) Thread.sleep(6_000);
           // Read errors / truncated streams (slow swarm) are retried with backoff; only a
           // probe that really sees no usable dialogue track marks the release as missing.
+          double startAt = subtitleStartFor(0);
+          int jumps = 0;
           for (int attempt = 0; attempt <= SUB_RETRY_BACKOFF_MS.length; attempt++) {
             // Removed / replaced slot (same hash re-added) or given up: stop this worker.
             if (!isCurrentSlot() || subtitleMissing.get()) return;
             subtitlePartial = out;
+            subtitleRunFrom = startAt;
+            subtitleFrontier = startAt;
+            subtitleRunStartedAt = System.currentTimeMillis();
+            subtitleJumpTarget = -1;
             subtitleExtracting.set(true);
             TorrentSubtitleExtractor.Result result;
             try {
-              result = TorrentSubtitleExtractor.extractBestEnglish(appContext, rawUrl, out);
+              result = TorrentSubtitleExtractor.extractBestEnglish(
+                appContext, rawUrl, out, startAt, subtitleSessionId);
             } finally {
               subtitleExtracting.set(false);
             }
+            if (result == TorrentSubtitleExtractor.Result.CANCELLED) {
+              stashSubtitleRun(out);
+              double target = subtitleJumpTarget;
+              subtitleJumpTarget = -1;
+              if (target >= 0 && jumps < SUB_MAX_JUMPS && isCurrentSlot()) {
+                // Jump to the player: not a failure, so it doesn't use up a retry.
+                jumps++;
+                startAt = target;
+                attempt--;
+                continue;
+              }
+              subtitlePartial = null;
+              subtitleExtractStarted.set(false);
+              return;
+            }
             if (result == TorrentSubtitleExtractor.Result.OK) {
+              mergeEarlierSubtitleCues(out);
               subtitleVtt = out;
               subtitlePartial = null;
               subtitleMissing.set(false);
@@ -843,6 +1002,10 @@ public final class TorrentEngine {
               subtitleMissing.set(true);
               return;
             }
+            // Read error (slow swarm): keep this run's cues and resume after them next time
+            // instead of starting over from 0:00 (or jump to the player if it is far ahead).
+            stashSubtitleRun(out);
+            startAt = subtitleStartFor(Math.max(startAt, subtitleFrontier - 1));
             if (attempt >= SUB_RETRY_BACKOFF_MS.length) break;
             long waitMs = SUB_RETRY_BACKOFF_MS[attempt];
             Log.i(TAG, "subtitle extract retry " + (attempt + 1) + " in " + waitMs + "ms for " + infoHash);

@@ -43,6 +43,10 @@ export default defineConfig({
         '**/release/**',
         '**/release-pack/**',
         '**/dist/**',
+        // Worker sources / wrangler output are not part of the app bundle; atomic-replace
+        // temp files must not trip the watcher either (dev server exit 1 at 11:50 on 2026-10-20).
+        '**/workers/**',
+        '**/*.jt-tmp',
       ],
     },
   },

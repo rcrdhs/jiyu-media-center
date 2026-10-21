@@ -105,6 +105,15 @@ final class TorrentHttpServer extends NanoHTTPD {
     if (torrent == null) {
       return newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "torrent not active");
     }
+    // Player position (s): lets the extract start / move near it instead of 0:00.
+    String atParam = firstParam(session, "at");
+    if (atParam != null) {
+      try {
+        torrent.noteSubtitlePlayhead(Double.parseDouble(atParam));
+      } catch (NumberFormatException ignored) {
+        /* bad value: ignore */
+      }
+    }
     torrent.kickSubtitleExtract(baseUrl());
     File vtt = torrent.readySubtitleVtt();
     if (vtt != null) {
@@ -126,8 +135,16 @@ final class TorrentHttpServer extends NanoHTTPD {
     }
     // Progressive: serve the cues ffmpeg has flushed so far (done=0, player keeps polling).
     File partial = torrent.partialSubtitleVtt();
-    if (partial != null) {
-      String text = readCompleteCues(partial);
+    String prev = torrent.earlierSubtitleCues();
+    if (partial != null || !prev.isEmpty()) {
+      String text = partial != null ? readCompleteCues(partial) : null;
+      if (text != null) {
+        torrent.noteSubtitleFrontier(TorrentSubtitleExtractor.lastCueEndSeconds(text));
+      }
+      // Cues from runs before a jump to the playhead + the running one.
+      if (!prev.isEmpty()) {
+        text = "WEBVTT\n\n" + prev + TorrentSubtitleExtractor.stripVttHeader(text);
+      }
       if (text != null && text.contains("-->")) {
         Response res = newFixedLengthResponse(Response.Status.OK, "text/vtt; charset=utf-8", text);
         res.addHeader("Cache-Control", "no-store");

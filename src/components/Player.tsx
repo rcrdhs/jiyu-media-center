@@ -118,6 +118,7 @@ import {
   isNyaaSubtitleSidecarPending,
   markNyaaSubtitleSourceUnusable,
   onNyaaSubtitleSidecarSettled,
+  releaseOtherNyaaSubtitleSidecars,
   resetNyaaSubtitleSidecarFailures,
   resolveNyaaSubtitleSidecar,
   shouldTryNyaaForItem,
@@ -1949,7 +1950,14 @@ export function Player({
 
           if (!ok) {
             try {
-              const response = await fetch(`${subtitleUrl}${sep}t=${Date.now()}${force}`)
+              // Local torrent extract: send the position so desktop / Android can start
+              // (or move) the extract near it instead of crawling up from 0:00.
+              const video = videoRef.current
+              const at =
+                localExtract && video
+                  ? `&at=${Math.max(0, Math.floor(absolutePlayhead(video) - subtitleDelayRef.current))}`
+                  : ''
+              const response = await fetch(`${subtitleUrl}${sep}t=${Date.now()}${force}${at}`)
               httpStatus = response.status
               if (response.ok) {
                 text = await response.text()
@@ -2348,6 +2356,13 @@ export function Player({
           subs.subtitleKind,
           localExtractUrl ? 'Loading subtitles…' : 'Subtitles ready',
         )
+        // Only this release's subs are read: stop the episode's other sidecar swarms.
+        // Never the playing torrent (its hash or one inside the playing URL).
+        const protectHashes = [
+          String(item.torrentInfoHash || '').toLowerCase(),
+          ...(String(item.url || '').toLowerCase().match(/[a-f0-9]{40}/g) || []),
+        ].filter(Boolean)
+        releaseOtherNyaaSubtitleSidecars(sidecarOpts, subs.subtitleUrl, protectHashes)
       } catch {
         if (cancelled || movySubsSidecarRef.current !== sidecarKey) return
         giveUp(true)
