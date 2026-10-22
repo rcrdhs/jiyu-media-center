@@ -73,12 +73,25 @@ export function NativeStreamPage() {
       if (b) void media3SetBounds(b)
     }
 
+    const openEmbedFallback = () => {
+      const embed = String(state.referrer || '').trim()
+      if (!embed) return false
+      void media3Hide({ stop: true })
+      navigate(`/web?url=${encodeURIComponent(embed)}`, {
+        replace: true,
+        state: { from, playerMode: 'embed', pipOnBack: true },
+      })
+      return true
+    }
+
     void (async () => {
       const handle = await media3OnPlayback((ev) => {
         if (cancelled) return
         if (ev.state === 'playing') setStatus('Playing')
         else if (ev.state === 'buffering' || ev.state === 'loading') setStatus('Buffering…')
         else if (ev.state === 'error') {
+          // Auto-open the Gecko embed — a failed Media3 surface stays black.
+          if (openEmbedFallback()) return
           setStatus('Error')
           setError(ev.detail || 'Playback failed')
         } else if (ev.state === 'ended') setStatus('Ended')
@@ -99,6 +112,7 @@ export function NativeStreamPage() {
       })
       if (cancelled) return
       if (!result.ok) {
+        if (openEmbedFallback()) return
         setError(result.error || 'Could not start Media3')
         return
       }

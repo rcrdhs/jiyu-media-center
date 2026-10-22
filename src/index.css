@@ -4976,16 +4976,16 @@ html.is-android .web-browser-page.is-embed-player.is-watching .web-volume-contro
 
 html.is-android .web-browser-page.is-embed-player.is-watching .web-player-tile,
 html.is-android .web-browser-page.is-embed-player.is-watching .web-frame {
-  flex: 1 1 auto;
-  min-height: 0;
+  flex: 1 1 0;
+  /* Keep a real stage so Gecko bounds aren't 0×0 (black Nationwide / sports). */
+  min-height: 12rem;
   height: auto;
   background: #000;
 }
 
 html.is-android .web-browser-page.is-embed-player.is-watching .web-player-tile {
-  /* Flex fills leftover height under the compact chrome — don't force a
-     viewport-sized tile that races Gecko over the control strip. */
-  min-height: 0;
+  /* Flex fills leftover height under the compact chrome. */
+  min-height: max(12rem, 40vh);
 }
 
 .player-controls {

@@ -85,14 +85,14 @@ import { isAndroidMedia3Host, media3Hide } from '../lib/androidMedia3'
 import type { StreamItem, StreamPlaylistItem, TorrentStreamResult } from '../types'
 
 function clearWebSurfacesForWatch() {
-  void window.signalDesktop?.browserMultiHideAll?.({ blank: true })
+  // Pause/hide only — blanking here raced /web navigate and left a black stage
+  // (Nationwide YouTube + football embeds). The clear event parks React mode.
+  void window.signalDesktop?.browserMultiHideAll?.({ blank: false })
   void window.signalDesktop?.browserAdDockClose?.()
-  void window.signalDesktop?.browserHide?.({ blank: true })
+  void window.signalDesktop?.browserHide?.({ blank: false, pause: true })
   if (isAndroidInAppBrowser()) {
-    void androidBrowserMultiHideAll({ blank: true })
-    // Hide only — no blank and no pause. Pausing then reopening Sports Replay
-    // left Gecko's empty white compositor on screen until the embed painted.
-    void androidBrowserHide({ blank: false, pause: false })
+    void androidBrowserMultiHideAll({ blank: false })
+    void androidBrowserHide({ blank: false, pause: true })
   }
   window.dispatchEvent(new Event('jiyu:clear-web-surfaces'))
 }
@@ -765,9 +765,10 @@ export function WatchPage() {
       }
 
       // Local YouTube channels (Nationwide / CVM / TVJ): resolve @handle/live →
-      // watch?v= so the browser skips YouTube's heavy channel SPA (~20s).
-      // Prefer watch URL over /embed/ (embeds blanked the WebContentsView shell).
-      // pipOnBack + playerMode embed arm leave→PiP (isEmbedPlayerHost(/watch)).
+      // a concrete video URL so the browser skips YouTube's heavy channel SPA.
+      // Desktop: prefer watch URL (embeds blanked the WebContentsView shell).
+      // Android Gecko: prefer /embed/ with site Referer — watch SPA often paints black.
+      // pipOnBack + playerMode embed arm leave→PiP (isEmbedPlayerHost).
       if (
         isYouTubeUrl(item!.url) &&
         (item!.tags?.includes('local') || item!.id?.startsWith('local-'))
@@ -778,7 +779,9 @@ export function WatchPage() {
           setError(resolved.error || 'This channel is not live right now')
           return
         }
-        const playUrl = resolved.watchUrl || toAutoplayUrl(item!.url)
+        const playUrl = isAndroidInAppBrowser()
+          ? resolved.embedUrl || resolved.watchUrl || toAutoplayUrl(item!.url)
+          : resolved.watchUrl || toAutoplayUrl(item!.url)
         const webItem = {
           ...item!,
           url: playUrl,

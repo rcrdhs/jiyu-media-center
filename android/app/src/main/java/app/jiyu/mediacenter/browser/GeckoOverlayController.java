@@ -1403,6 +1403,16 @@ final class GeckoOverlayController {
     if (host.equals("rivestream.ru") || host.endsWith(".rivestream.ru")) {
       return "https://rivestream.ru/";
     }
+    // YouTube Error 153 / blank embed: needs an https embedder identity (not youtube.com).
+    if (
+      host.equals("youtube.com")
+      || host.endsWith(".youtube.com")
+      || host.equals("youtube-nocookie.com")
+      || host.endsWith(".youtube-nocookie.com")
+      || host.equals("youtu.be")
+    ) {
+      return "https://jiyu.app/";
+    }
     return null;
   }
 

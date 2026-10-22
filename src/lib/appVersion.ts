@@ -12,6 +12,11 @@ export const APP_VERSION_LABEL = `v${APP_VERSION}`
 /** Short milestone log — newest first — so progress is visible in-app. */
 export const APP_RELEASES: ReadonlyArray<{ version: string; summary: string }> = [
   {
+    version: '0.3.83',
+    summary:
+      'Live YouTube channels (like Nationwide) and football match embeds no longer open to a black screen: the player no longer blanks the page while it is opening, Android plays local YouTube channels through the YouTube embed, and if the built-in Android player fails it opens the embed automatically instead of staying black; embed tiles on Android keep their size',
+  },
+  {
     version: '0.3.82',
     summary:
       'Anime subtitles from Nyaa now show up when you resume or skip partway through an episode: subtitles are read starting near where you are watching, a second release no longer cuts off the first release\'s subtitles, lines keep their correct timing, and subtitles no longer keep restarting around the intro; when only the subtitles are needed, a smaller well-seeded 1080p release is preferred so they arrive sooner; Android gets the same fixes',

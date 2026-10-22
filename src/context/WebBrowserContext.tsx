@@ -176,6 +176,24 @@ export function boundsFromElement(el: HTMLElement): BrowserBounds {
   return { x, y, width, height }
 }
 
+/** True when the HTML tile is large enough to host the native overlay. */
+function isUsableOverlayBounds(bounds: BrowserBounds): boolean {
+  return bounds.width >= 32 && bounds.height >= 32
+}
+
+/**
+ * Page-mode overlay bounds from the React tile. If the tile has not laid out yet
+ * (common on Android embed flex — 0×0 black stage), fall back to the visible
+ * viewport under chrome so Gecko/Electron is never parked at 1–2px.
+ */
+function pageOverlayBounds(frame: HTMLElement | null): BrowserBounds {
+  if (frame) {
+    const bounds = boundsFromElement(frame)
+    if (isUsableOverlayBounds(bounds)) return bounds
+  }
+  return fullscreenBounds({ fullBleed: false })
+}
+
 /** Shared geometry for native stage + HTML chrome so they stay pixel-aligned. */
 export function getPipLayout() {
   const vw = window.innerWidth
@@ -551,8 +569,13 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
   const showAt = useCallback(
     async (bounds: BrowserBounds) => {
       if (!desktop) return
-      if (electron) await window.signalDesktop?.browserShow?.(bounds)
-      else if (android) await androidBrowserShow(bounds)
+      // Never apply a collapsed rect — that leaves a black stage with an
+      // off-screen sports / YouTube surface (Nationwide + football).
+      const next = isUsableOverlayBounds(bounds)
+        ? bounds
+        : fullscreenBounds({ fullBleed: false })
+      if (electron) await window.signalDesktop?.browserShow?.(next)
+      else if (android) await androidBrowserShow(next)
     },
     [android, desktop, electron],
   )
@@ -561,8 +584,7 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
     if (!desktop || modeRef.current !== 'page' || fullscreen) return
     const frame = frameRef.current
     if (!frame) return
-    const bounds = boundsFromElement(frame)
-    if (bounds.width < 8 || bounds.height < 8) return
+    const bounds = pageOverlayBounds(frame)
     if (electron) await window.signalDesktop?.browserSetBounds?.(bounds)
     else if (android) await androidBrowserSetBounds(bounds)
   }, [android, desktop, electron, fullscreen])
@@ -628,9 +650,7 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
           }
           return
         }
-        const bounds = boundsFromElement(frame)
-        if (bounds.width < 8 || bounds.height < 8) return
-        void showAt(bounds)
+        void showAt(pageOverlayBounds(frame))
       }
       place()
       requestAnimationFrame(() => {
@@ -707,15 +727,17 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
       setMode('page')
       modeRef.current = 'page'
       setFullscreen(false)
-      if (frameRef.current) {
-        await showAt(boundsFromElement(frameRef.current))
-      }
+      // Cancel a pending detachFrame hide from Strict Mode / prior /web unmount
+      // so it cannot blank the surface after we navigate.
+      detachGeneration.current += 1
+      suppressLastChancePipRef.current = false
+      await showAt(pageOverlayBounds(frameRef.current))
       const result = await hostNavigate(target)
       // After Media3 unwrap, frame may mount a tick later — re-apply bounds so
       // Gecko is not left at the probe's 2×2 parking size.
       const placeAgain = () => {
-        if (frameRef.current && modeRef.current === 'page') {
-          void showAt(boundsFromElement(frameRef.current))
+        if (modeRef.current === 'page') {
+          void showAt(pageOverlayBounds(frameRef.current))
         }
       }
       placeAgain()
@@ -943,14 +965,28 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
     }
   }, [clearAutoplayTimers, hostHide])
 
-  // WatchPage / new stream: wipe leftover PiP so the next embed opens full-frame.
+  // WatchPage / new stream: park leftover PiP/audio so the next embed opens full-frame.
+  // Do NOT blank the session here — blanking raced navigate() and left Nationwide /
+  // football on a permanent black Gecko/Electron stage.
   useEffect(() => {
     const onClear = () => {
-      closeBrowser()
+      clearAutoplayTimers()
+      detachGeneration.current += 1
+      frameRef.current = null
+      pipOnLeaveRef.current = false
+      suppressLastChancePipRef.current = false
+      setMode('off')
+      modeRef.current = 'off'
+      setFullscreen(false)
+      setStatus(null)
+      void hostHide({ blank: false, pause: true })
+      if (getFullscreenOwner() === 'web') {
+        void exitOsFullscreen({ force: true })
+      }
     }
     window.addEventListener('jiyu:clear-web-surfaces', onClear)
     return () => window.removeEventListener('jiyu:clear-web-surfaces', onClear)
-  }, [closeBrowser])
+  }, [clearAutoplayTimers, hostHide])
 
   const parkForMultiview = useCallback(() => {
     clearAutoplayTimers()
