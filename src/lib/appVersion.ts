@@ -12,6 +12,11 @@ export const APP_VERSION_LABEL = `v${APP_VERSION}`
 /** Short milestone log — newest first — so progress is visible in-app. */
 export const APP_RELEASES: ReadonlyArray<{ version: string; summary: string }> = [
   {
+    version: '0.3.84',
+    summary:
+      'Chinese anime from Bilibili and iQIYI now play: Jiyu looks up shows by their Chinese title with stricter matching, plays Bilibili episodes (international and mainland, including fan uploads) in its own player, and opens iQIYI episodes in the in-app browser; Bilibili shows get English subtitles from the episode\'s own track, with Chinese subtitles translated to English and the usual subtitle search as a fallback; you can optionally sign in to Bilibili in Settings, and the login stays on that device; football replays open the full match first, with a picker for Highlights and each half, skip download-only hosts, and switch to another player when one is down; Nationwide and football streams open faster, especially on Android, and \'Unwrapping stream\' stays up until the video is actually playing',
+  },
+  {
     version: '0.3.83',
     summary:
       'Live YouTube channels (like Nationwide) and football match embeds no longer open to a black screen: the player no longer blanks the page while it is opening, Android plays local YouTube channels through the YouTube embed, and if the built-in Android player fails it opens the embed automatically instead of staying black; embed tiles on Android keep their size',

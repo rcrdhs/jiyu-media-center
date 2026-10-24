@@ -40,7 +40,7 @@ type NativeTorrentStreamer = {
     runtimeSec?: number
   }) => Promise<{ ok: boolean; error?: string }>
   /** Subtitle-step diagnostics → logcat (tag JiyuSubs). Missing on APKs before 0.3.80. */
-  log?: (options: { message: string }) => Promise<void>
+  log?: (options: { message: string; tag?: string }) => Promise<void>
 }
 
 const NativeTorrent = registerPlugin<NativeTorrentStreamer>('TorrentStreamer')
@@ -164,10 +164,11 @@ export async function torrentEnsureDownloading(
 let nativeLogUnavailable = false
 
 /** Android: write one diagnostics line to logcat via the TorrentStreamer plugin (tag JiyuSubs). */
-export function nativeSubtitleLog(message: string): void {
+/** Logcat line (tag JiyuSubs, or JiyuBili when `tag` is passed and the APK supports it). */
+export function nativeSubtitleLog(message: string, tag?: 'JiyuBili'): void {
   if (nativeLogUnavailable || !isAndroidTorrentAvailable()) return
   try {
-    const call = NativeTorrent.log?.({ message })
+    const call = NativeTorrent.log?.(tag ? { message, tag } : { message })
     if (call && typeof call.catch === 'function') {
       call.catch(() => {
         // Older APK without the method: stop trying, console.info still shows in WebView logs.

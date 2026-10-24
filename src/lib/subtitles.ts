@@ -24,8 +24,84 @@ function parseTimestamp(value: string): number {
   return Number.parseFloat(parts[0] || '0')
 }
 
-/** Parse a WebVTT (or simple SRT-like) document into cues. */
+/**
+ * Bilibili subtitle JSON (bilibili.tv `.json` tracks and bilibili.com CC / AI tracks):
+ * `{ body: [{ from, to, content }] }` with times in seconds. Returns null when `raw` is not
+ * that shape so callers fall through to the text parsers.
+ */
+export function parseBilibiliJsonCues(raw: string): SubtitleCue[] | null {
+  const text = String(raw || '').replace(/^\uFEFF/, '').trim()
+  if (!text.startsWith('{') || !text.includes('"body"')) return null
+  let data: unknown
+  try {
+    data = JSON.parse(text)
+  } catch {
+    return null
+  }
+  const body = (data as { body?: unknown })?.body
+  if (!Array.isArray(body)) return null
+  const cues: SubtitleCue[] = []
+  for (const row of body as Array<{ from?: unknown; to?: unknown; content?: unknown }>) {
+    const start = Number(row?.from)
+    const end = Number(row?.to)
+    const cueText = String(row?.content ?? '')
+      .replace(/\r/g, '')
+      .replace(/<\/?[^>]+>/g, '')
+      .trim()
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || !cueText) continue
+    if (isJunkSubtitleText(cueText)) continue
+    cues.push({ start, end, text: cueText })
+  }
+  cues.sort((a, b) => a.start - b.start || a.end - b.end)
+  return cues
+}
+
+/** ASS / SSA `[Events]` Dialogue lines → cues (styling tags dropped, \N → newline). */
+export function parseAssCues(raw: string): SubtitleCue[] | null {
+  const text = String(raw || '').replace(/^\uFEFF/, '').replace(/\r/g, '')
+  if (!/^\s*\[Script Info\]/im.test(text) && !/^Dialogue:/m.test(text)) return null
+  let fields = ['layer', 'start', 'end', 'style', 'name', 'marginl', 'marginr', 'marginv', 'effect', 'text']
+  const cues: SubtitleCue[] = []
+  const assTime = (v: string) => {
+    const m = /^(\d+):(\d{1,2}):(\d{1,2}(?:\.\d+)?)$/.exec(v.trim())
+    return m ? Number(m[1]) * 3600 + Number(m[2]) * 60 + Number.parseFloat(m[3]) : NaN
+  }
+  for (const line of text.split('\n')) {
+    const fmt = /^Format:\s*(.+)$/i.exec(line)
+    if (fmt && /\btext\b/i.test(fmt[1])) {
+      fields = fmt[1].split(',').map((f) => f.trim().toLowerCase())
+      continue
+    }
+    const dlg = /^Dialogue:\s*(.*)$/i.exec(line)
+    if (!dlg) continue
+    const parts = dlg[1].split(',')
+    if (parts.length < fields.length) continue
+    const head = parts.slice(0, fields.length - 1)
+    const body = parts.slice(fields.length - 1).join(',')
+    const start = assTime(head[fields.indexOf('start')] || '')
+    const end = assTime(head[fields.indexOf('end')] || '')
+    const cueText = body
+      .replace(/\{[^}]*\}/g, '')
+      .replace(/\\[Nn]/g, '\n')
+      .replace(/\\h/g, ' ')
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .join('\n')
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || !cueText) continue
+    if (isJunkSubtitleText(cueText)) continue
+    cues.push({ start, end, text: cueText })
+  }
+  cues.sort((a, b) => a.start - b.start || a.end - b.end)
+  return cues
+}
+
+/** Parse a WebVTT / SRT document (or Bilibili JSON / ASS track) into cues. */
 export function parseSubtitleCues(raw: string): SubtitleCue[] {
+  const json = parseBilibiliJsonCues(raw)
+  if (json) return json
+  const ass = parseAssCues(raw)
+  if (ass && ass.length > 0) return ass
   const text = raw.replace(/^\uFEFF/, '').replace(/\r/g, '')
   const body = text.replace(/^WEBVTT[^\n]*\n+/i, '')
   const blocks = body.split(/\n\s*\n/)

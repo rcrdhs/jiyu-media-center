@@ -23,6 +23,8 @@ import {
   toggleWatchlist,
 } from '../lib/watchlist'
 import { CardPreview } from './CardPreview'
+import { prefetchYouTubeLive } from '../lib/youtubeLive'
+import { androidBrowserPrewarm } from '../lib/androidBrowser'
 import type { StreamHealthState, StreamItem } from '../types'
 
 interface MediaCardProps {
@@ -152,7 +154,19 @@ export function MediaCard({ item }: MediaCardProps) {
     status !== 'offline' &&
     status !== 'timeout'
 
+  /** Hover / touch / focus: resolve the live id + start Gecko before the tap lands. */
+  function warmPlayback() {
+    const live =
+      item.category === 'sports' ||
+      Boolean(item.tags?.includes('live')) ||
+      (isYouTubeUrl(item.url) && Boolean(item.tags?.includes('local') || item.id?.startsWith('local-')))
+    if (!live) return
+    if (isYouTubeUrl(item.url)) prefetchYouTubeLive(item.url)
+    void androidBrowserPrewarm()
+  }
+
   function onEnter() {
+    warmPlayback()
     if (!canPreview || previewDone || previewing) return
     hoverTimer.current = window.setTimeout(() => setPreviewing(true), PREVIEW_HOVER_DELAY_MS)
   }
@@ -184,6 +198,8 @@ export function MediaCard({ item }: MediaCardProps) {
       data-item-id={item.id}
       onMouseEnter={onEnter}
       onMouseLeave={onLeave}
+      onTouchStart={warmPlayback}
+      onFocus={warmPlayback}
     >
       <Link
         to={

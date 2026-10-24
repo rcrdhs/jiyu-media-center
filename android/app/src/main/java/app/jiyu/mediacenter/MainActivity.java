@@ -17,6 +17,7 @@ import androidx.core.view.WindowInsetsControllerCompat;
 
 import com.getcapacitor.BridgeActivity;
 
+import app.jiyu.mediacenter.bili.BiliSessionPlugin;
 import app.jiyu.mediacenter.browser.InAppBrowserPlugin;
 import app.jiyu.mediacenter.media3.Media3PlayerPlugin;
 import app.jiyu.mediacenter.torrent.TorrentStreamerPlugin;
@@ -41,6 +42,7 @@ public class MainActivity extends BridgeActivity {
     registerPlugin(AppUpdatePlugin.class);
     registerPlugin(CatalogSyncPlugin.class);
     registerPlugin(CastPlugin.class);
+    registerPlugin(BiliSessionPlugin.class);
     super.onCreate(savedInstanceState);
     applyDarkSystemBars();
     // Splash / Capacitor can flip icon appearance after first paint — re-assert.
@@ -63,6 +65,14 @@ public class MainActivity extends BridgeActivity {
       new OnBackPressedCallback(true) {
         @Override
         public void handleOnBackPressed() {
+          // Bilibili sign-in sheet: Back steps the login page back, then closes it.
+          try {
+            BiliSessionPlugin bili =
+              (BiliSessionPlugin) getBridge().getPlugin("BiliSession").getInstance();
+            if (bili != null && bili.cancelIfVisible()) {
+              return;
+            }
+          } catch (Throwable ignored) {}
           try {
             AppChromePlugin chrome =
               (AppChromePlugin) getBridge().getPlugin("AppChrome").getInstance();

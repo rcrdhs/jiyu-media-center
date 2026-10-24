@@ -85,6 +85,17 @@ contextBridge.exposeInMainWorld('signalDesktop', {
   fetchJsonPost: (url, body, referer) => ipcRenderer.invoke('page:fetchJsonPost', url, body, referer),
   fetchJsonGet: (url, referer) => ipcRenderer.invoke('page:fetchJsonGet', url, referer),
   logSubtitleEvent: (line) => ipcRenderer.send('subs:log', String(line || '')),
+  logBilibiliEvent: (line) => ipcRenderer.send('bili:log', String(line || '')),
+  biliFetch: (options) => ipcRenderer.invoke('bili:fetch', options || {}),
+  biliTvSessionStatus: () => ipcRenderer.invoke('bili:tvSessionStatus'),
+  biliTvSignIn: () => ipcRenderer.invoke('bili:tvSignIn'),
+  biliTvSignInCancel: () => ipcRenderer.invoke('bili:tvSignInCancel'),
+  biliTvSignOut: () => ipcRenderer.invoke('bili:tvSignOut'),
+  onBiliTvSession: (callback) => {
+    const listener = (_event, payload) => callback(payload)
+    ipcRenderer.on('bili:tvSession', listener)
+    return () => ipcRenderer.removeListener('bili:tvSession', listener)
+  },
   resolveWyzieSubtitle: (options) => ipcRenderer.invoke('wyzie:resolveSubtitle', options || {}),
   resolveOpenSubtitlesSubtitle: (options) =>
     ipcRenderer.invoke('opensubtitles:resolveSubtitle', options || {}),

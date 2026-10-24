@@ -1265,15 +1265,15 @@ final class GeckoOverlayController {
           noteMediaCandidate(u);
         }
         p.pollCount += 1;
-        // Nudge play so Clappr starts fetching segments.
-        if (p.pollCount == 2 || p.pollCount == 5) {
+        // Nudge play so Clappr starts fetching segments (early: first poll).
+        if (p.pollCount == 1 || p.pollCount == 3 || p.pollCount == 6) {
           evaluateJavascript(
             "(() => {try{document.querySelectorAll('video').forEach(v=>{try{v.muted=true;v.play();}catch(e){}});"
               + "return 'kick';}catch(e){return 'x';}})()",
             null
           );
         }
-        main.postDelayed(() -> scheduleMediaProbePoll(attempt + 1), 700);
+        main.postDelayed(() -> scheduleMediaProbePoll(attempt + 1), 400);
       }
     );
   }

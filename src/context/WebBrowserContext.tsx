@@ -58,6 +58,52 @@ const PIP_HEIGHT = 180
 const PIP_CHROME = 44
 const PIP_MARGIN = 12
 
+/** Live streams: keep "Unwrapping stream…" over the page until a video is really playing. */
+const UNWRAP_COVER_TICK_MS = 300
+const UNWRAP_COVER_MAX_MS = 20_000
+const UNWRAP_COVER_MIN_MS = 800
+
+/** Live embeds (sports / replays / YouTube live like Nationwide) get the unwrap cover. */
+function wantsUnwrapCover(url: string): boolean {
+  const u = String(url || '')
+  if (!/^https?:\/\//i.test(u)) return false
+  if (isSportsOrReplayEmbedUrl(u)) return true
+  return /^https?:\/\/(www\.|m\.)?youtube(-nocookie)?\.com\/(embed\/|watch\?|live\/)/i.test(u)
+}
+
+/**
+ * Runs in every frame. Any frame with a real playing <video> reports playing (and the top
+ * frame drops its cover). The top frame otherwise keeps a black pointer-events:none cover
+ * so native taps / center clicks still reach the player underneath.
+ * Results avoid words the Android bridge ranks above "playing" (installed/ready/placed).
+ */
+const UNWRAP_COVER_TICK_SCRIPT = `(function(){try{
+var d=document,ID='__jiyu_unwrap_cover';
+var vids=d.getElementsByTagName('video'),live=false;
+for(var i=0;i<vids.length;i++){var v=vids[i];var r=v.getBoundingClientRect();
+if(!v.paused&&!v.ended&&v.readyState>=2&&v.currentTime>0.05&&r.width>=120&&r.height>=68){live=true;break;}}
+if(live){window.__jiyuUnwrapDone=true;var c0=d.getElementById(ID);if(c0&&c0.parentNode)c0.parentNode.removeChild(c0);return 'jiyu-live-playing';}
+if(window.top!==window||window.__jiyuUnwrapDone)return 'jiyu-live-idle';
+if(!d.getElementById(ID)){var root=d.body||d.documentElement;if(!root)return 'jiyu-live-idle';
+var c=d.createElement('div');c.id=ID;
+c.setAttribute('style','position:fixed;inset:0;top:0;left:0;right:0;bottom:0;z-index:2147483647;background:#000;pointer-events:none;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;color:#fff;font:600 16px/1.3 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;letter-spacing:.2px');
+var st=d.createElement('style');st.textContent='@keyframes __jiyuUnwrapSpin{to{transform:rotate(360deg)}}';
+var sp=d.createElement('div');sp.setAttribute('style','width:34px;height:34px;border-radius:50%;border:3px solid rgba(255,255,255,.18);border-top-color:#fff;animation:__jiyuUnwrapSpin .8s linear infinite');
+var t=d.createElement('div');t.textContent='Unwrapping stream\\u2026';
+c.appendChild(st);c.appendChild(sp);c.appendChild(t);root.appendChild(c);}
+return 'jiyu-live-idle';}catch(e){return 'jiyu-live-idle';}})()`
+
+const UNWRAP_COVER_REMOVE_SCRIPT = `(function(){try{window.__jiyuUnwrapDone=true;var c=document.getElementById('__jiyu_unwrap_cover');if(c&&c.parentNode)c.parentNode.removeChild(c);}catch(e){}return 'noop';})()`
+
+function execResultSaysPlaying(res: unknown): boolean {
+  if (!res || typeof res !== 'object') return false
+  const r = res as { result?: unknown; frameResults?: Array<{ result?: unknown }> }
+  if (String(r.result ?? '').includes('jiyu-live-playing')) return true
+  return Array.isArray(r.frameResults)
+    ? r.frameResults.some((f) => String(f?.result ?? '').includes('jiyu-live-playing'))
+    : false
+}
+
 function readSafeBottom(): number {
   if (typeof document === 'undefined') return 0
   const probe = document.createElement('div')
@@ -374,6 +420,65 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
   navUrlForNudgeRef.current = nav.url || address
   /** Last real player URL — ads can replace nav.url and must not drop PiP. */
   const lastEmbedUrlRef = useRef('')
+  /** Generation token for the "Unwrapping stream…" cover loop (bumped to cancel). */
+  const unwrapGenRef = useRef(0)
+  const unwrapTickRef = useRef<() => void>(() => {})
+
+  const execInGuest = useCallback(
+    async (script: string): Promise<unknown> => {
+      try {
+        if (electron) return await window.signalDesktop?.browserExecute?.(script)
+        if (android) return await androidBrowserExecute(script)
+      } catch {
+        /* ignore */
+      }
+      return null
+    },
+    [android, electron],
+  )
+
+  const stopUnwrapCover = useCallback(
+    (removeFromPage = true) => {
+      unwrapGenRef.current += 1
+      unwrapTickRef.current = () => {}
+      if (removeFromPage) void execInGuest(UNWRAP_COVER_REMOVE_SCRIPT)
+    },
+    [execInGuest],
+  )
+
+  /** Keep "Unwrapping stream…" up until a <video> is really playing (≈20s cap). */
+  const startUnwrapCover = useCallback(() => {
+    const gen = ++unwrapGenRef.current
+    const startedAt = Date.now()
+    let busy = false
+    let timer = 0
+    const tick = () => {
+      if (gen !== unwrapGenRef.current || busy) return
+      if (modeRef.current === 'off') {
+        stopUnwrapCover(false)
+        return
+      }
+      if (Date.now() - startedAt > UNWRAP_COVER_MAX_MS) {
+        stopUnwrapCover(true)
+        return
+      }
+      busy = true
+      window.clearTimeout(timer)
+      void execInGuest(UNWRAP_COVER_TICK_SCRIPT).then((res) => {
+        busy = false
+        if (gen !== unwrapGenRef.current) return
+        // Ignore "playing" in the first moments: the previous document can still be
+        // alive until navigate commits.
+        if (execResultSaysPlaying(res) && Date.now() - startedAt >= UNWRAP_COVER_MIN_MS) {
+          stopUnwrapCover(true)
+          return
+        }
+        timer = window.setTimeout(tick, UNWRAP_COVER_TICK_MS)
+      })
+    }
+    // First tick runs after navigate (openUrl) or on the next nav event, never on the old page.
+    unwrapTickRef.current = tick
+  }, [execInGuest, stopUnwrapCover])
 
   const nudgePlayback = useCallback((urlOverride?: string) => {
     if (!desktop) return
@@ -488,16 +593,22 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
       if (android) {
         // Match Electron sports poll window — slow Clappr/JW mounts miss early kicks.
         sportsKick(false)
-        autoplayTimers.current.push(window.setTimeout(() => sportsKick(false), 700))
-        autoplayTimers.current.push(window.setTimeout(() => sportsKick(false), 1600))
-        autoplayTimers.current.push(window.setTimeout(() => sportsKick(false), 3200))
-        autoplayTimers.current.push(window.setTimeout(() => sportsKick(true), 5200))
-        autoplayTimers.current.push(window.setTimeout(() => sportsKick(false), 8500))
-        // Page load is not the play button. Wait ~3s, then keep looking until it is on screen.
+        for (const [ms, aggressive] of [
+          [500, false],
+          [1100, false],
+          [1800, false],
+          [2600, true],
+          [4200, true],
+          [7000, false],
+        ] as const) {
+          autoplayTimers.current.push(window.setTimeout(() => sportsKick(aggressive), ms))
+        }
+        // Native tap waits for page stop itself, then watches (400ms) until the paused
+        // play control is on screen and taps it once. No fixed 3s wait.
         autoplayTimers.current.push(
           window.setTimeout(() => {
             void androidBrowserTapPlay()
-          }, 3000),
+          }, 600),
         )
       }
       autoplayTimers.current.push(window.setTimeout(runAds, 400))
@@ -731,6 +842,13 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
       // so it cannot blank the surface after we navigate.
       detachGeneration.current += 1
       suppressLastChancePipRef.current = false
+      const unwrap = wantsUnwrapCover(target)
+      // The cover lives in the guest page (web-status is a red inline error row).
+      if (unwrap) {
+        startUnwrapCover()
+      } else {
+        stopUnwrapCover(false)
+      }
       await showAt(pageOverlayBounds(frameRef.current))
       const result = await hostNavigate(target)
       // After Media3 unwrap, frame may mount a tick later — re-apply bounds so
@@ -748,6 +866,7 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
       window.setTimeout(placeAgain, 120)
       window.setTimeout(placeAgain, 400)
       if (result && !result.ok) {
+        stopUnwrapCover(true)
         setStatus(result.error || 'Failed to open')
         setNav((current) => ({ ...current, loading: false, title: 'Failed' }))
         return
@@ -762,13 +881,20 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
         external: false,
       }))
       setStatus(null)
+      unwrapTickRef.current()
       // Embeds: wait for did-stop-loading (onBrowserNav + main-process sports kick).
       // Immediate center-clicks often land before <video> exists, then later clicks pause LIVE.
       if (!isEmbedPlayerHost(live)) {
         nudgePlayback(live)
+      } else if (android) {
+        // Ad-heavy sports pages can take many seconds to report page stop. Start the
+        // (play-state-checked) kicks early; the stop-event nudge still runs after the gate.
+        window.setTimeout(() => {
+          if (modeRef.current === 'page') nudgePlayback(live)
+        }, 1200)
       }
     },
-    [desktop, hostNavigate, nudgePlayback, showAt],
+    [android, desktop, hostNavigate, nudgePlayback, showAt, startUnwrapCover, stopUnwrapCover],
   )
 
   const openInPip = useCallback(
@@ -950,6 +1076,7 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
 
   const closeBrowser = useCallback(() => {
     clearAutoplayTimers()
+    stopUnwrapCover(false)
     suppressLastChancePipRef.current = true
     detachGeneration.current += 1
     frameRef.current = null
@@ -963,7 +1090,7 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
     if (getFullscreenOwner() === 'web') {
       void exitOsFullscreen({ force: true })
     }
-  }, [clearAutoplayTimers, hostHide])
+  }, [clearAutoplayTimers, hostHide, stopUnwrapCover])
 
   // WatchPage / new stream: park leftover PiP/audio so the next embed opens full-frame.
   // Do NOT blank the session here — blanking raced navigate() and left Nationwide /
@@ -971,6 +1098,7 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const onClear = () => {
       clearAutoplayTimers()
+      stopUnwrapCover(false)
       detachGeneration.current += 1
       frameRef.current = null
       pipOnLeaveRef.current = false
@@ -986,10 +1114,11 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
     }
     window.addEventListener('jiyu:clear-web-surfaces', onClear)
     return () => window.removeEventListener('jiyu:clear-web-surfaces', onClear)
-  }, [clearAutoplayTimers, hostHide])
+  }, [clearAutoplayTimers, hostHide, stopUnwrapCover])
 
   const parkForMultiview = useCallback(() => {
     clearAutoplayTimers()
+    stopUnwrapCover(false)
     detachGeneration.current += 1
     frameRef.current = null
     pipOnLeaveRef.current = false
@@ -1000,7 +1129,7 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
     void hostHide({ blank: true, pause: true })
     void exitOsFullscreen({ onlyIfOwner: 'web', force: false })
     void exitOsFullscreen({ onlyIfOwner: 'native', force: false })
-  }, [clearAutoplayTimers, hostHide])
+  }, [clearAutoplayTimers, hostHide, stopUnwrapCover])
 
   const exitFullscreen = useCallback(() => {
     if (!desktop) return
@@ -1085,6 +1214,7 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
           setAddress(next.url)
           if (isEmbedPlayerHost(next.url)) lastEmbedUrlRef.current = next.url
         }
+        unwrapTickRef.current()
         if (!next.loading) {
           setStatus(null)
           const playbackUrl = cinetaroPlaybackUrl(next.url || '')
@@ -1121,6 +1251,7 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
             lastEmbedUrlRef.current = next.url
           }
         }
+        unwrapTickRef.current()
         if (!next.loading) {
           setStatus(null)
           const playbackUrl = cinetaroPlaybackUrl(next.url || '')

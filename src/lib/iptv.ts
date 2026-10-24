@@ -129,6 +129,8 @@ export function isHlsUrl(url: string): boolean {
   return (
     /\.m3u8(\?|$)/i.test(url) ||
     /\/cdn-m3u8(?:\?|$)/i.test(url) ||
+    // Bilibili DASH → HLS playlists built in-app (src/lib/biliDashHls.ts).
+    /^blob:[^#]*#jiyu\.m3u8$/i.test(url) ||
     /[?&]output=hls\b/i.test(url) ||
     /totallyacdn\.|cdn\.hls\.lol|stream\.hls\.lol|transcode\.cfd/i.test(url)
   )

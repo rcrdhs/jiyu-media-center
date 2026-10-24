@@ -361,7 +361,14 @@ export async function ensureEpisodeSoftSubtitles(options: {
     const animeId = await resolveAnimeTmdbTvId(options.title, tmdbId)
     if (animeId) tmdbId = animeId
   }
-  if (tmdbId && (!originalLanguage || originalLanguage === 'xx')) {
+  // "anime" without language metadata is only guessed as Japanese — donghua (Chinese) and
+  // Korean animation share the category, so let TMDB decide when we have an id.
+  const guessedAnimeJa =
+    originalLanguage === 'ja' &&
+    options.item?.category === 'anime' &&
+    !normalizeLanguageCode(options.item?.originalLanguage) &&
+    !normalizeLanguageCode(options.item?.language)
+  if (tmdbId && (!originalLanguage || originalLanguage === 'xx' || guessedAnimeJa)) {
     const lang = await fetchTmdbTvOriginalLanguage(tmdbId)
     if (lang) originalLanguage = normalizeLanguageCode(lang) || originalLanguage
   }

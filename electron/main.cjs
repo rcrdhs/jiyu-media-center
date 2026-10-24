@@ -1,4 +1,4 @@
-const { app, BrowserWindow, WebContentsView, ipcMain, dialog, shell, session, powerMonitor, net } =
+const { app, BrowserWindow, WebContentsView, ipcMain, dialog, shell, session, powerMonitor, net, safeStorage } =
   require('electron')
 const path = require('path')
 const fs = require('fs')
@@ -160,6 +160,59 @@ function writeSubtitlesLog(source, event, data) {
     }
     fs.appendFileSync(subtitlesLogFile, line, 'utf8')
     subtitlesLogBytes += Buffer.byteLength(line)
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Bilibili / iQIYI donghua lookup diagnostics (src/lib/biliLog.ts) →
+ * <userData>/logs/bilibili.log, rolled to .old past ~1 MB. Same scrubbing as subtitles.log.
+ */
+let bilibiliLogFile = null
+let bilibiliLogBytes = 0
+let bilibiliLogInitTried = false
+
+/**
+ * Bilibili account cookies must never reach a log: blank SESSDATA / bili_jct / DedeUserID…
+ * values and any Cookie header text.
+ */
+function scrubBiliSecrets(text) {
+  return String(text || '')
+    .replace(/\b(SESSDATA|bili_jct|DedeUserID(?:__ckMd5)?|sid|buvid[34]?|b_nut|access_key|csrf|mid)(\s*[=:]\s*"?)[^;\s"',&}]+/gi, '$1$2…')
+    .replace(/("?(?:set-)?cookie"?\s*[:=]\s*)("[^"]*"|[^\n,}]*)/gi, '$1…')
+}
+
+function writeBilibiliLog(text) {
+  if (!bilibiliLogInitTried) {
+    bilibiliLogInitTried = true
+    try {
+      const dir = path.join(app.getPath('userData'), 'logs')
+      fs.mkdirSync(dir, { recursive: true })
+      bilibiliLogFile = path.join(dir, 'bilibili.log')
+      try {
+        bilibiliLogBytes = fs.statSync(bilibiliLogFile).size
+      } catch {
+        bilibiliLogBytes = 0
+      }
+    } catch {
+      bilibiliLogFile = null
+    }
+  }
+  if (!bilibiliLogFile) return
+  const body = scrubBiliSecrets(scrubSubtitlesLogText(String(text || ''))).slice(0, 2000)
+  const line = `[${new Date().toISOString()}] [renderer] ${body}\n`
+  try {
+    if (bilibiliLogBytes > SUBTITLES_LOG_MAX_BYTES) {
+      try {
+        fs.renameSync(bilibiliLogFile, `${bilibiliLogFile}.old`)
+      } catch {
+        /* locked — keep appending */
+      }
+      bilibiliLogBytes = 0
+    }
+    fs.appendFileSync(bilibiliLogFile, line, 'utf8')
+    bilibiliLogBytes += Buffer.byteLength(line)
   } catch {
     /* ignore */
   }
@@ -435,7 +488,41 @@ function isBilibiliTvPlaybackUrl(url) {
   if (!u) return false
   if (/bilibili\.tv|biliintl\.com|bstarstatic\.com|upos-bstar/i.test(u)) return true
   if (/akamaized\.net\/iupxcodeboss/i.test(u)) return true
+  // bilibili.tv backup CDN (upos-sz-mirrorcosbstar1.bilivideo.com …) — 403 without the tv Referer.
+  if (/^https?:\/\/[^/]*bstar[^/]*\.bilivideo\.(?:com|cn)\//i.test(u)) return true
   return false
+}
+
+/** Bilibili mainland (bilibili.com) DASH CDN — wants Referer https://www.bilibili.com/. */
+function isBilibiliCnPlaybackUrl(url) {
+  const u = String(url || '')
+  if (!u) return false
+  // bilibili.tv backups live on upos-*bstar*.bilivideo.com — those take the tv Referer.
+  if (/^https?:\/\/[^/]*bstar[^/]*\//i.test(u)) return false
+  if (/^https?:\/\/[^/]*(?:bilivideo\.(?:com|cn)|hdslb\.com|mcdn\.bilivideo)/i.test(u)) return true
+  if (/^https?:\/\/upos-(?!bstar)[^/]+\//i.test(u)) return true
+  if (/akamaized\.net\/upgcxcode\//i.test(u)) return true
+  return false
+}
+
+/** Hosts the renderer may reach through bili:fetch (donghua lookups only). */
+function isBiliFetchAllowedUrl(url) {
+  try {
+    const u = new URL(String(url || ''))
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') return false
+    const h = u.hostname.toLowerCase()
+    return (
+      /(?:^|\.)bilibili\.(?:com|tv)$/.test(h) ||
+      /(?:^|\.)biliapi\.(?:com|net)$/.test(h) ||
+      /(?:^|\.)bilivideo\.(?:com|cn)$/.test(h) ||
+      /(?:^|\.)hdslb\.com$/.test(h) ||
+      /\.akamaized\.net$/.test(h) ||
+      /(?:^|\.)iqiyi\.com$/.test(h) ||
+      /(?:^|\.)iq\.com$/.test(h)
+    )
+  } catch {
+    return false
+  }
 }
 
 function isIptvMediaUrl(url) {
@@ -5257,11 +5344,23 @@ function scheduleWebBrowserSportsAutoplay(contents, options = {}) {
   let started = false
   // Live + replay: same poll window. Some live embeds mount <video> as late as
   // replays; the old live-only [900, 2800] left slower streams paused.
-  const intervals = [700, 1600, 3000, 5200, 8500]
+  // Denser early polls: most players mount within ~1-2s of dom-ready, and the
+  // renderer's "Unwrapping stream…" cover stays up until this kick lands.
+  const intervals = [300, 700, 1200, 2000, 3200, 5200, 8500]
+  let running = false
   const run = async () => {
     if (!webBrowserView || webBrowserView.webContents.isDestroyed()) return
     if (!webBrowserVisible) return
-    if (started) return
+    if (started || running) return
+    running = true
+    try {
+      await runOnce()
+    } finally {
+      running = false
+    }
+  }
+  const runOnce = async () => {
+    if (!webBrowserView || webBrowserView.webContents.isDestroyed()) return
     const keepMuted = Number.isFinite(webBrowserVolume) && webBrowserVolume <= 0.001
     try {
       // Kick muted first so Chromium autoplay allows play(); unmute after start.
@@ -5742,6 +5841,10 @@ app.whenReady().then(() => {
       if (!referer && isBilibiliTvPlaybackUrl(url)) {
         referer = 'https://www.bilibili.tv/'
       }
+      // Bilibili mainland DASH CDN (donghua) — always the bilibili.com origin.
+      if (isBilibiliCnPlaybackUrl(url)) {
+        referer = 'https://www.bilibili.com/'
+      }
     } catch {
       /* ignore bad URLs */
     }
@@ -5781,6 +5884,7 @@ app.whenReady().then(() => {
       !isIptvMediaUrl(url) &&
       !isMovyStylePlaybackUrl(url) &&
       !isBilibiliTvPlaybackUrl(url) &&
+      !isBilibiliCnPlaybackUrl(url) &&
       !movyStream
     ) {
       callback({})
@@ -7503,6 +7607,252 @@ async function resolveWyzieInMain(options = {}) {
 /** Renderer subtitle-step lines (src/lib/subsLog.ts) → subtitles.log. */
 ipcMain.on('subs:log', (_event, line) => {
   writeSubtitlesLog('renderer', String(line || '').slice(0, 2000))
+})
+
+/** Renderer donghua lookup lines (src/lib/biliLog.ts) → bilibili.log. */
+ipcMain.on('bili:log', (_event, line) => {
+  writeBilibiliLog(String(line || '').slice(0, 2000))
+})
+
+/**
+ * Optional bilibili.tv account (Settings → Bilibili). The user signs in inside the in-app
+ * browser (persist:jiyu-web); once a SESSDATA cookie for bilibili.tv appears while capture is
+ * armed, the bilibili.tv cookies are copied to <userData>/bili-tv-session.bin (Electron
+ * safeStorage when available). The cookie never leaves main: `bili:fetch` adds it only for
+ * `tvSession` requests to the playurl / subtitle APIs on api.bilibili.tv. Never logged.
+ */
+const BILI_TV_COOKIE_URLS = ['https://www.bilibili.tv/', 'https://api.bilibili.tv/']
+const BILI_TV_SESSION_PATHS = new Set(['/intl/gateway/web/playurl', '/intl/gateway/web/v2/subtitle'])
+const BILI_TV_CAPTURE_MS = 20 * 60 * 1000
+/** @type {{ cookie: string, savedAt: number, encrypted: boolean } | null | undefined} */
+let biliTvSession
+let biliTvCaptureUntil = 0
+let biliTvCookieWatch = false
+
+function biliTvSessionFile() {
+  return path.join(app.getPath('userData'), 'bili-tv-session.bin')
+}
+
+function biliTvCanEncrypt() {
+  try {
+    return Boolean(safeStorage && safeStorage.isEncryptionAvailable())
+  } catch {
+    return false
+  }
+}
+
+function loadBiliTvSession() {
+  if (biliTvSession !== undefined) return biliTvSession
+  biliTvSession = null
+  try {
+    const buf = fs.readFileSync(biliTvSessionFile())
+    const tag = buf.subarray(0, 4).toString('latin1')
+    const body = buf.subarray(4)
+    let json = ''
+    if (tag === 'JYE1') json = safeStorage.decryptString(body)
+    else if (tag === 'JYP1') json = body.toString('utf8')
+    const parsed = json ? JSON.parse(json) : null
+    if (parsed && typeof parsed.cookie === 'string' && /(?:^|;\s*)SESSDATA=/.test(parsed.cookie)) {
+      biliTvSession = { cookie: parsed.cookie, savedAt: Number(parsed.savedAt) || 0, encrypted: tag === 'JYE1' }
+    }
+  } catch {
+    biliTvSession = null
+  }
+  return biliTvSession
+}
+
+function saveBiliTvSession(cookie) {
+  const json = JSON.stringify({ cookie, savedAt: Date.now() })
+  const encrypted = biliTvCanEncrypt()
+  const body = encrypted ? safeStorage.encryptString(json) : Buffer.from(json, 'utf8')
+  const file = biliTvSessionFile()
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.writeFileSync(file, Buffer.concat([Buffer.from(encrypted ? 'JYE1' : 'JYP1', 'latin1'), body]), { mode: 0o600 })
+  biliTvSession = { cookie, savedAt: Date.now(), encrypted }
+}
+
+function biliTvSessionStatus() {
+  const s = loadBiliTvSession()
+  return {
+    signedIn: Boolean(s),
+    encrypted: s ? s.encrypted : biliTvCanEncrypt(),
+    savedAt: s ? s.savedAt : 0,
+    capturing: Date.now() < biliTvCaptureUntil,
+  }
+}
+
+function notifyBiliTvSession() {
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('bili:tvSession', biliTvSessionStatus())
+    }
+  } catch {
+    /* window gone */
+  }
+}
+
+/** Copy bilibili.tv cookies from the in-app browser jar; true when a SESSDATA was stored. */
+async function captureBiliTvCookies(reason) {
+  const jar = webSession().cookies
+  const byName = new Map()
+  for (const url of BILI_TV_COOKIE_URLS) {
+    try {
+      for (const c of await jar.get({ url })) {
+        if (c && c.name && typeof c.value === 'string' && /^[\x21-\x7e]*$/.test(c.value)) byName.set(c.name, c.value)
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  if (!byName.get('SESSDATA')) return false
+  const cookie = [...byName.entries()].map(([k, v]) => `${k}=${v}`).join('; ')
+  const prev = loadBiliTvSession()
+  if (prev && prev.cookie === cookie) return true
+  try {
+    saveBiliTvSession(cookie)
+  } catch (err) {
+    writeBilibiliLog(`session.save.fail ${err instanceof Error ? err.message : String(err)}`)
+    return false
+  }
+  biliTvCaptureUntil = 0
+  writeBilibiliLog(`session.captured reason=${reason} cookies=${byName.size} encrypted=${biliTvSession ? biliTvSession.encrypted : false}`)
+  notifyBiliTvSession()
+  return true
+}
+
+function ensureBiliTvCookieWatch() {
+  if (biliTvCookieWatch) return
+  biliTvCookieWatch = true
+  try {
+    webSession().cookies.on('changed', (_event, cookie, _cause, removed) => {
+      if (removed || !cookie || cookie.name !== 'SESSDATA') return
+      if (!/(?:^|\.)bilibili\.tv$/i.test(String(cookie.domain || '').replace(/^\./, ''))) return
+      // Only after the user tapped Sign in, or to refresh an existing sign-in.
+      if (Date.now() >= biliTvCaptureUntil && !loadBiliTvSession()) return
+      setTimeout(() => void captureBiliTvCookies('changed'), 600)
+    })
+  } catch {
+    biliTvCookieWatch = false
+  }
+}
+
+function isBiliTvSessionUrl(url) {
+  try {
+    const u = new URL(String(url || ''))
+    return u.protocol === 'https:' && u.hostname.toLowerCase() === 'api.bilibili.tv' && BILI_TV_SESSION_PATHS.has(u.pathname)
+  } catch {
+    return false
+  }
+}
+
+ipcMain.handle('bili:tvSessionStatus', () => {
+  if (loadBiliTvSession()) ensureBiliTvCookieWatch()
+  return biliTvSessionStatus()
+})
+
+ipcMain.handle('bili:tvSignIn', async () => {
+  ensureBiliTvCookieWatch()
+  biliTvCaptureUntil = Date.now() + BILI_TV_CAPTURE_MS
+  // Already signed in inside the in-app browser → capture right away.
+  await captureBiliTvCookies('existing').catch(() => false)
+  return { ...biliTvSessionStatus(), loginUrl: 'https://www.bilibili.tv/en/' }
+})
+
+ipcMain.handle('bili:tvSignInCancel', () => {
+  biliTvCaptureUntil = 0
+  return biliTvSessionStatus()
+})
+
+ipcMain.handle('bili:tvSignOut', async () => {
+  biliTvCaptureUntil = 0
+  biliTvSession = null
+  try {
+    fs.rmSync(biliTvSessionFile(), { force: true })
+  } catch {
+    /* ignore */
+  }
+  // Also sign the in-app browser out of bilibili.tv.
+  try {
+    const jar = webSession().cookies
+    for (const c of await jar.get({})) {
+      const domain = String(c.domain || '').replace(/^\./, '').toLowerCase()
+      if (domain !== 'bilibili.tv' && !domain.endsWith('.bilibili.tv')) continue
+      const url = `http${c.secure ? 's' : ''}://${domain}${c.path || '/'}`
+      await jar.remove(url, c.name).catch(() => {})
+    }
+    await jar.flushStore().catch(() => {})
+  } catch {
+    /* ignore */
+  }
+  writeBilibiliLog('session.signedOut')
+  notifyBiliTvSession()
+  return biliTvSessionStatus()
+})
+
+/**
+ * Donghua lookups (src/lib/biliHttp.ts): GET with renderer-chosen headers (Referer,
+ * Cookie buvid, Range) for Bilibili / iQIYI hosts only. `binary` → base64 body
+ * (DASH init + sidx byte ranges, capped at 4 MB).
+ */
+ipcMain.handle('bili:fetch', async (_event, options) => {
+  const url = typeof options?.url === 'string' ? options.url.trim() : ''
+  if (!isBiliFetchAllowedUrl(url)) {
+    return { ok: false, status: 0, content: '', error: 'Host not allowed' }
+  }
+  const timeoutMs = Math.min(60_000, Math.max(3_000, Number(options?.timeoutMs) || 15_000))
+  const headers = { 'User-Agent': BROWSER_UA, Accept: '*/*' }
+  const extra = options?.headers && typeof options.headers === 'object' ? options.headers : {}
+  for (const [k, v] of Object.entries(extra)) {
+    if (typeof v !== 'string') continue
+    if (!/^(?:user-agent|accept|accept-language|referer|origin|cookie|range)$/i.test(k)) continue
+    headers[k] = v
+  }
+  // Signed-in bilibili.tv: account cookie on playurl / subtitle API calls only.
+  let withSession = false
+  if (options?.tvSession === true && isBiliTvSessionUrl(url)) {
+    const s = loadBiliTvSession()
+    if (s) {
+      for (const k of Object.keys(headers)) if (k.toLowerCase() === 'cookie') delete headers[k]
+      headers.Cookie = s.cookie
+      withSession = true
+    }
+  }
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const init = {
+      method: 'GET',
+      redirect: 'follow',
+      signal: controller.signal,
+      headers: withDesktopChromeClientHints(headers),
+    }
+    let response
+    if (net && typeof net.fetch === 'function') {
+      try {
+        response = await net.fetch(url, init)
+      } catch (netErr) {
+        response = await fetch(url, init)
+        void netErr
+      }
+    } else {
+      response = await fetch(url, init)
+    }
+    const ok = response.ok
+    const status = response.status
+    if (options?.binary) {
+      const buf = Buffer.from(await response.arrayBuffer())
+      if (buf.length > 4 * 1024 * 1024) {
+        return { ok: false, status, content: '', error: 'Response too large' }
+      }
+      return { ok, status, content: '', base64: buf.toString('base64'), error: ok ? '' : `HTTP ${status}` }
+    }
+    const content = await response.text()
+    return { ok, status, content, error: ok ? '' : `HTTP ${status}`, withSession }
+  } catch (err) {
+    return { ok: false, status: 0, content: '', error: err instanceof Error ? err.message : String(err) }
+  } finally {
+    clearTimeout(timer)
+  }
 })
 
 /**

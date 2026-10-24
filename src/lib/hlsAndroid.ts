@@ -106,7 +106,8 @@ export function createAndroidSafeHlsLoader(
     ) {
       // Always use CapacitorHttp on Android — XHR cannot set Referer, and some
       // CDNs (Movy) / IPTV hosts also need a real desktop UA from OkHttp.
-      if (isAndroidCapacitor()) {
+      // In-app blob:/data: playlists (Bilibili DASH → HLS) are local — WebView XHR only.
+      if (isAndroidCapacitor() && !/^(?:blob|data):/i.test(context.url || '')) {
         void this.loadNative(context, config, callbacks)
         return
       }

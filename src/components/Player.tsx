@@ -85,10 +85,9 @@ import {
   shouldPreferRivestreamJapaneseAudio,
 } from '../lib/rivestream'
 import { resolveMovyPlay, MOVY_PLAY_REFERER, probeMovyHlsUrl } from '../lib/movy'
-import {
-  BILIBILI_TV_PLAY_REFERER,
-  resolveBilibiliPlay,
-} from '../lib/bilibiliTv'
+import { BILIBILI_TV_PLAY_REFERER } from '../lib/bilibiliTv'
+import { resolveDonghuaPlay } from '../lib/donghuaResolve'
+import { biliSubtitleHeaders, isBiliSubtitleUrl } from '../lib/biliSubs'
 import {
   ATLANTIC_PLAY_REFERER,
   isMovyStreamUrl,
@@ -1928,11 +1927,14 @@ export function Player({
               }
               const remote = await nativeFetchText(subtitleUrl!, {
                 quiet: true,
-                headers: {
-                  Accept: 'text/vtt,text/plain,application/x-subrip,*/*',
-                  Referer: referer,
-                  Origin: origin,
-                },
+                headers: isBiliSubtitleUrl(subtitleUrl)
+                  ? // Bilibili CDNs reject their own origin as Referer (hotlink rule).
+                    biliSubtitleHeaders(subtitleUrl!)
+                  : {
+                      Accept: 'text/vtt,text/plain,application/x-subrip,*/*',
+                      Referer: referer,
+                      Origin: origin,
+                    },
               })
               if (remote.ok && remote.content) {
                 text = remote.content
@@ -2397,7 +2399,8 @@ export function Player({
 
   useEffect(() => {
     // Per-episode sync — anime gets a default +delay so softsubs aren't ahead of audio.
-    const delay = initialSubtitleDelayForCategory(item.category)
+    // Bilibili's own tracks are timed to the Bilibili video, so they start at 0.
+    const delay = isBiliSubtitleUrl(subtitleUrl) ? 0 : initialSubtitleDelayForCategory(item.category)
     subtitleDelayRef.current = delay
     setSubtitleDelaySec(delay)
   }, [subtitleUrl, playlistIndex, item.category])
@@ -2666,14 +2669,14 @@ export function Player({
     const clamped = Math.max(-15, Math.min(15, next))
     subtitleDelayRef.current = clamped
     setSubtitleDelaySec(clamped)
-    if (item.category === 'anime') writeAnimeSubtitleDelay(clamped)
+    if (item.category === 'anime' && !isBiliSubtitleUrl(subtitleUrl)) writeAnimeSubtitleDelay(clamped)
     bumpChrome()
   }
 
   function resetSubtitleDelay() {
     subtitleDelayRef.current = 0
     setSubtitleDelaySec(0)
-    if (item.category === 'anime') writeAnimeSubtitleDelay(0)
+    if (item.category === 'anime' && !isBiliSubtitleUrl(subtitleUrl)) writeAnimeSubtitleDelay(0)
     bumpChrome()
   }
 
@@ -2704,7 +2707,7 @@ export function Player({
       }
       subtitleDelayRef.current = result.delaySec
       setSubtitleDelaySec(result.delaySec)
-      if (item.category === 'anime') writeAnimeSubtitleDelay(result.delaySec)
+      if (item.category === 'anime' && !isBiliSubtitleUrl(subtitleUrl)) writeAnimeSubtitleDelay(result.delaySec)
       if (!subsEnabled) setSubsEnabled(true)
       flash(
         result.delaySec === 0
@@ -3309,27 +3312,33 @@ export function Player({
             if (atlanticOk) {
               /* playlist updated */
             } else {
-              // Movy/Atlantic miss — try bilibili.tv OGV (embed or HLS).
+              // Movy/Atlantic miss — donghua chain: bilibili.tv → bilibili.com (official,
+              // fan upload) → iQIYI (src/lib/donghuaResolve.ts), then Nyaa below.
               let biliOk = false
               try {
-                setStatus('Checking Bilibili…')
+                setStatus('Searching Bilibili…')
                 const bili = await withTimeout(
-                  resolveBilibiliPlay({
+                  resolveDonghuaPlay({
                     title: showName,
+                    altTitles: showName !== item.title ? [item.title] : [],
                     season,
                     episode,
                     episodeCountHint: playlist.length || undefined,
-                    seasonId: item.bilibiliSeasonId,
+                    tmdbId: tmdbId || undefined,
+                    cached: item.bilibiliSeasonId,
+                    onStatus: (text) => {
+                      if (episodeFailGenRef.current === failGen) setStatus(text)
+                    },
                   }),
-                  22_000,
+                  45_000,
                   'Bilibili lookup timed out.',
                 )
                 if (episodeFailGenRef.current !== failGen) return
+                if (bili.cache && bili.cache !== item.bilibiliSeasonId) {
+                  void upsertTorrentItems([{ ...item, bilibiliSeasonId: bili.cache }])
+                }
                 if (bili.ok) {
-                  if (bili.seasonId && bili.seasonId !== item.bilibiliSeasonId) {
-                    void upsertTorrentItems([{ ...item, bilibiliSeasonId: bili.seasonId }])
-                  }
-                  if (bili.mode === 'embed' || bili.mode === 'dash') {
+                  if (bili.mode === 'embed') {
                     biliOk = true
                     navigate(`/web?url=${encodeURIComponent(bili.url)}`, {
                       replace: true,
@@ -3351,6 +3360,10 @@ export function Player({
                       referrer: bili.referer || BILIBILI_TV_PLAY_REFERER,
                     })
                   }
+                  // Bilibili's own track (English, or Chinese → translator) wins over whatever
+                  // the sidecar chain found meanwhile; none → keep the row's / chain's subs.
+                  const biliSubs = bili.subtitle
+                  if (biliSubs) flash(`Subtitles: ${biliSubs.label}`)
                   setLocalPlaylist((prev) => {
                     const base = prev ?? item.playlist ?? []
                     return base.map((row, i) =>
@@ -3359,6 +3372,14 @@ export function Player({
                             ...row,
                             url: bili.url,
                             episodeKey: row.episodeKey || episodeKey || undefined,
+                            ...(biliSubs
+                              ? {
+                                  subtitleUrl: biliSubs.subtitleUrl,
+                                  subtitleKind: 'file' as const,
+                                  subtitleLanguage: biliSubs.language,
+                                  subtitleNeedsTranslation: biliSubs.needsTranslation,
+                                }
+                              : {}),
                           }
                         : row,
                     )

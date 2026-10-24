@@ -28,6 +28,7 @@ import {
 import { ProgressSyncSettings } from '../components/ProgressSyncSettings'
 import { HideKeywordsSettings } from '../components/HideKeywordsSettings'
 import { SubtitleTranslateSettings } from '../components/SubtitleTranslateSettings'
+import { BilibiliAccountSettings } from '../components/BilibiliAccountSettings'
 import {
   getViewingQuality,
   setViewingQuality,
@@ -426,6 +427,7 @@ export function LibraryPage() {
             <ProgressSyncSettings />
             <HideKeywordsSettings />
             <SubtitleTranslateSettings />
+            <BilibiliAccountSettings />
             <label className="check-toggle">
               <input
                 type="checkbox"

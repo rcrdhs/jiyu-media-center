@@ -115,6 +115,7 @@ public class TorrentStreamerPlugin extends Plugin {
 
   /**
    * Subtitle-step diagnostics from JS (src/lib/subsLog.ts) → logcat, tag JiyuSubs.
+   * Optional tag "JiyuBili" for src/lib/biliLog.ts.
    * Lines are already scrubbed of keys / URLs on the JS side; capped here as well.
    */
   @PluginMethod
@@ -122,7 +123,9 @@ public class TorrentStreamerPlugin extends Plugin {
     String message = call.getString("message", "");
     if (message == null) message = "";
     if (message.length() > 2000) message = message.substring(0, 2000) + "…";
-    Log.i(TorrentEngine.SUBS_TAG, message);
+    // Bilibili / iQIYI donghua lookup lines (src/lib/biliLog.ts) use their own tag.
+    String tag = call.getString("tag", "");
+    Log.i("JiyuBili".equals(tag) ? "JiyuBili" : TorrentEngine.SUBS_TAG, message);
     call.resolve();
   }
 

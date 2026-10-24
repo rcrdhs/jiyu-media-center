@@ -47,7 +47,8 @@ export function NativeStreamPage() {
   const location = useLocation()
   const state = (location.state || {}) as NativeStreamState
   const stageRef = useRef<HTMLDivElement>(null)
-  const [status, setStatus] = useState('Loading…')
+  // Stay on "Unwrapping stream…" until Media3 reports real playback (not just play() ok).
+  const [status, setStatus] = useState('Unwrapping stream\u2026')
   const [error, setError] = useState<string | null>(null)
   const [volume, setVolume] = useState(1)
   const mediaUrl = String(state.mediaUrl || '').trim()
@@ -66,6 +67,7 @@ export function NativeStreamPage() {
     }
 
     let cancelled = false
+    let played = false
     let remove: { remove: () => Promise<void> } | null = null
 
     const syncBounds = () => {
@@ -87,8 +89,12 @@ export function NativeStreamPage() {
     void (async () => {
       const handle = await media3OnPlayback((ev) => {
         if (cancelled) return
-        if (ev.state === 'playing') setStatus('Playing')
-        else if (ev.state === 'buffering' || ev.state === 'loading') setStatus('Buffering…')
+        if (ev.state === 'playing') {
+          played = true
+          setStatus('Playing')
+        } else if (ev.state === 'buffering' || ev.state === 'loading') {
+          setStatus(played ? 'Buffering\u2026' : 'Unwrapping stream\u2026')
+        }
         else if (ev.state === 'error') {
           // Auto-open the Gecko embed — a failed Media3 surface stays black.
           if (openEmbedFallback()) return
@@ -116,7 +122,6 @@ export function NativeStreamPage() {
         setError(result.error || 'Could not start Media3')
         return
       }
-      setStatus('Playing')
       void media3SetVolume(Math.round(volume * 100))
     })()
 

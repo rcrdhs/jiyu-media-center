@@ -65,7 +65,7 @@ import {
   shouldOpenInWebBrowser,
   toAutoplayUrl,
 } from '../lib/webBrowser'
-import { resolveYouTubeLivePlay } from '../lib/youtubeLive'
+import { prefetchYouTubeLive, resolveYouTubeLivePlay } from '../lib/youtubeLive'
 import { isVimeoLiveEventUrl, resolveVimeoLiveHls } from '../lib/vimeoLive'
 import {
   isTorrentPlaybackAvailable,
@@ -75,6 +75,7 @@ import { maskUserFacingMessage } from '../lib/sourceMask'
 import {
   androidBrowserHide,
   androidBrowserMultiHideAll,
+  androidBrowserPrewarm,
   isAndroidInAppBrowser,
 } from '../lib/androidBrowser'
 import {
@@ -83,6 +84,26 @@ import {
 } from '../lib/androidStreamResolve'
 import { isAndroidMedia3Host, media3Hide } from '../lib/androidMedia3'
 import type { StreamItem, StreamPlaylistItem, TorrentStreamResult } from '../types'
+
+/** Live channels / sports embeds: show "Unwrapping stream…" from tap to first frame. */
+function isLiveUnwrapItem(item: StreamItem): boolean {
+  if (isStreamedCatalogItem(item)) return true
+  if (isYouTubeUrl(item.url) && (item.tags?.includes('local') || item.id?.startsWith('local-'))) {
+    return true
+  }
+  if (!shouldOpenInWebBrowser(item)) return false
+  return Boolean(
+    item.category === 'sports' ||
+      item.tags?.includes('247-series') ||
+      item.tags?.includes('kids-live') ||
+      item.tags?.includes('ppv.st') ||
+      item.tags?.includes('live'),
+  )
+}
+
+const UNWRAP_STATUS = 'Unwrapping stream\u2026'
+/** Gecko media sniff budget before falling back to the embed (was 12 s). */
+const ANDROID_UNWRAP_TIMEOUT_MS = 8_000
 
 function clearWebSurfacesForWatch() {
   // Pause/hide only — blanking here raced /web navigate and left a black stage
@@ -238,6 +259,7 @@ export function WatchPage() {
     return undefined
   }, [raw, items, continued])
   const [error, setErrorRaw] = useState<string | null>(null)
+  const [loadStatus, setLoadStatus] = useState<string | null>(null)
   const setError = (value: string | null) =>
     setErrorRaw(value == null ? null : maskUserFacingMessage(value))
   const returnTo =
@@ -276,6 +298,15 @@ export function WatchPage() {
 
     async function start() {
       setError(null)
+      setLoadStatus(null)
+
+      // Live: warm everything in parallel with the resolve below — Gecko cold
+      // start (Android) and the YouTube live id (deduped with the branch await).
+      if (isLiveUnwrapItem(item!)) {
+        setLoadStatus(UNWRAP_STATUS)
+        void androidBrowserPrewarm()
+        if (isYouTubeUrl(item!.url)) prefetchYouTubeLive(item!.url)
+      }
 
       // PiP Expand → /watch/<id> for a title the native player already owns.
       // Cinetaro series now play via Movy/Bilibili HLS (0.3.70), so the Cinetaro
@@ -546,9 +577,9 @@ export function WatchPage() {
           isAndroidMedia3Host() &&
           canAndroidResolveEmbedMedia()
         ) {
-          setError('Unwrapping stream…')
+          setLoadStatus(UNWRAP_STATUS)
           // Gecko sniffs the media URL while we stay on the loading screen.
-          const unwrapped = await androidResolveEmbedMedia(resolved.url, 12_000)
+          const unwrapped = await androidResolveEmbedMedia(resolved.url, ANDROID_UNWRAP_TIMEOUT_MS)
           if (cancelled) return
           if (unwrapped.ok && unwrapped.mediaUrl) {
             setError(null)
@@ -668,9 +699,11 @@ export function WatchPage() {
               title: item!.title,
               poster: item!.poster,
               category: item!.category,
-              playlistIndex: 0,
+              // Part picker on /web: default is the full match, Highlights last.
+              playlistIndex: resolved.replayParts?.index ?? 0,
               detailUrl: item!.detailUrl || item!.url,
               playUrl: resolved.url,
+              replayParts: resolved.replayParts,
               transport: item!.transport,
               sourceKind: item!.sourceKind,
               source: item!.source,
@@ -747,9 +780,11 @@ export function WatchPage() {
               title: item!.title,
               poster: item!.poster,
               category: item!.category,
-              playlistIndex: 0,
+              // Part picker on /web: default is the full match, Highlights last.
+              playlistIndex: resolved.replayParts?.index ?? 0,
               detailUrl: item!.detailUrl || item!.url,
               playUrl: resolved.url,
+              replayParts: resolved.replayParts,
               transport: item!.transport,
               sourceKind: item!.sourceKind,
               source: item!.source,
@@ -854,8 +889,8 @@ export function WatchPage() {
           isAndroidMedia3Host() &&
           canAndroidResolveEmbedMedia()
         ) {
-          setError('Unwrapping stream…')
-          const unwrapped = await androidResolveEmbedMedia(item!.url, 12_000)
+          setLoadStatus(UNWRAP_STATUS)
+          const unwrapped = await androidResolveEmbedMedia(item!.url, ANDROID_UNWRAP_TIMEOUT_MS)
           if (cancelled) return
           if (unwrapped.ok && unwrapped.mediaUrl) {
             setError(null)
@@ -1412,7 +1447,7 @@ export function WatchPage() {
       ) : streamReady ? null : (
         <PlaybackLoadingScreen
           title={cleanShowDisplayTitle(display.title) || display.title}
-          status={webEmbedPending ? 'Opening player…' : 'Fetching sources…'}
+          status={loadStatus || (webEmbedPending ? 'Opening player…' : 'Fetching sources…')}
           variant="page"
         />
       )}

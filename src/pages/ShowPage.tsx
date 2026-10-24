@@ -39,10 +39,8 @@ import {
   shouldPreferRivestreamJapaneseAudio,
 } from '../lib/rivestream'
 import { resolveMovyPlay } from '../lib/movy'
-import {
-  BILIBILI_TV_PLAY_REFERER,
-  resolveBilibiliPlay,
-} from '../lib/bilibiliTv'
+import { BILIBILI_TV_PLAY_REFERER } from '../lib/bilibiliTv'
+import { resolveDonghuaPlay } from '../lib/donghuaResolve'
 import { ensureEpisodeSoftSubtitles } from '../lib/softSubs'
 import {
   NYAA_SEARCH_SOURCE_ID,
@@ -484,36 +482,44 @@ export function ShowPage() {
       return true
     }
 
+    /** Donghua chain: bilibili.tv → bilibili.com (official, fan upload) → iQIYI (src/lib/donghuaResolve.ts). */
     const tryPlayBilibiliNative = async (
       season: number,
       episode: number,
+      knownTmdbId?: string,
     ): Promise<boolean> => {
-      setPrepareStatus('Checking Bilibili…')
+      setPrepareStatus('Searching Bilibili…')
       const showName = cleanShowDisplayTitle(item.title) || item.title
-      let bili: Awaited<ReturnType<typeof resolveBilibiliPlay>>
+      let bili: Awaited<ReturnType<typeof resolveDonghuaPlay>>
       try {
         bili = await withTimeout(
-          resolveBilibiliPlay({
+          resolveDonghuaPlay({
             title: showName,
+            altTitles: showName !== item.title ? [item.title] : [],
             season,
             episode,
             episodeCountHint: episodes.length || undefined,
-            seasonId: item.bilibiliSeasonId,
+            tmdbId: String(knownTmdbId || rivestreamTmdbIdFromItem(item) || '').trim() || undefined,
+            cached: item.bilibiliSeasonId,
+            onStatus: (text) => {
+              if (stillCurrent()) setPrepareStatus(text)
+            },
           }),
-          22_000,
+          45_000,
           'Bilibili lookup timed out.',
         )
       } catch {
         return false
       }
+      if (bili.cache && bili.cache !== item.bilibiliSeasonId) {
+        void upsertTorrentItems([{ ...item, bilibiliSeasonId: bili.cache }])
+      }
       if (!bili.ok) return false
       if (!stillCurrent()) return false
-      if (bili.seasonId && bili.seasonId !== item.bilibiliSeasonId) {
-        void upsertTorrentItems([{ ...item, bilibiliSeasonId: bili.seasonId }])
-      }
-      // Official play page — Premium / DASH / empty playurl (plan v1).
-      if (bili.mode === 'embed' || bili.mode === 'dash') {
-        setPrepareStatus(bili.premium ? 'Opening Bilibili (Premium)…' : 'Opening Bilibili…')
+      // Official play page — bilibili.tv (free / Premium) or iQIYI International.
+      if (bili.mode === 'embed') {
+        const site = bili.provider === 'iQIYI' ? 'iQIYI' : 'Bilibili'
+        setPrepareStatus(bili.premium ? `Opening ${site} (VIP / Premium)…` : `Opening ${site}…`)
         navigate(`/web?url=${encodeURIComponent(bili.url)}`, {
           state: {
             from: `/show/${item.id}`,
@@ -555,19 +561,35 @@ export function ShowPage() {
           referrer: bili.referer || BILIBILI_TV_PLAY_REFERER,
         })
       }
+      // Episode's own Bilibili subtitle (English, or Chinese → in-app translation). Without
+      // one the row has no subtitleUrl and the Player runs its Wyzie / OpenSubtitles chain.
+      const subs = bili.subtitle
       const playlist: StreamPlaylistItem[] = episodes.map((ep, i) =>
         i === index
           ? {
               title: ep.title,
               url: bili.url,
               episodeKey: ep.key,
+              ...(subs
+                ? {
+                    subtitleUrl: subs.subtitleUrl,
+                    subtitleKind: 'file' as const,
+                    subtitleLanguage: subs.language,
+                    subtitleNeedsTranslation: subs.needsTranslation,
+                  }
+                : {}),
             }
           : { title: ep.title, url: '', episodeKey: ep.key },
       )
+      const tmdbForSubs = String(knownTmdbId || rivestreamTmdbIdFromItem(item) || '').trim()
+      setPrepareStatus(`Opening ${bili.provider}…`)
       play(
         {
           ...item,
-          bilibiliSeasonId: bili.seasonId,
+          ...(tmdbForSubs && !item.rivestreamTmdbId ? { rivestreamTmdbId: tmdbForSubs } : {}),
+          // Mainland streams are Chinese audio: lets the subtitle chain / translator use zh.
+          ...(bili.provider !== 'bilibili.tv' && !item.originalLanguage ? { originalLanguage: 'zh' } : {}),
+          bilibiliSeasonId: bili.cache || item.bilibiliSeasonId,
           title: `${showName} · ${chosen.key}`,
           description: chosen.title || item.description,
           url: bili.url,
@@ -712,7 +734,7 @@ export function ShowPage() {
           }
           const movyOk = await tryPlayMovyNative(season, episode, tmdbId)
           if (movyOk) return
-          const biliOk = await tryPlayBilibiliNative(season, episode)
+          const biliOk = await tryPlayBilibiliNative(season, episode, tmdbId)
           if (biliOk) return
           if (shouldTryNyaaForItem(item)) {
             const played = await tryPlayFromNyaa(season, episode)
@@ -876,7 +898,7 @@ export function ShowPage() {
           }
           const movyOk = await tryPlayMovyNative(season, episode, tmdbId)
           if (movyOk) return
-          const biliOk = await tryPlayBilibiliNative(season, episode)
+          const biliOk = await tryPlayBilibiliNative(season, episode, tmdbId)
           if (biliOk) return
         }
         setPrepareStatus('Opening player…')

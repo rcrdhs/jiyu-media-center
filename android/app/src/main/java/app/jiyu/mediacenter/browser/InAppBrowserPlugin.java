@@ -114,6 +114,30 @@ public class InAppBrowserPlugin extends Plugin {
     });
   }
 
+  /**
+   * Cold-start GeckoRuntime + session + bridge while the UI is still resolving
+   * (YouTube live id / sports embed). Keeps the view GONE — no visual change.
+   * First /web open otherwise pays the full runtime start on tap.
+   */
+  @PluginMethod
+  public void prewarm(PluginCall call) {
+    main.post(() -> {
+      try {
+        if (!geckoMultiActive && (gecko == null || gecko.getView() == null)) {
+          ensureOverlay();
+        }
+        JSObject out = ok();
+        out.put("warm", gecko != null && gecko.getView() != null);
+        call.resolve(out);
+      } catch (Throwable t) {
+        JSObject err = new JSObject();
+        err.put("ok", false);
+        err.put("error", t.getMessage() != null ? t.getMessage() : "Prewarm failed");
+        call.resolve(err);
+      }
+    });
+  }
+
   @PluginMethod
   public void hide(PluginCall call) {
     boolean blank = Boolean.TRUE.equals(call.getBoolean("blank", false));

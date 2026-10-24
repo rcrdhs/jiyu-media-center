@@ -8,6 +8,7 @@
  */
 
 import type { StreamItem, StreamPlaylistItem } from '../types'
+import type { ReplayPartsInfo } from './fullmatchShows'
 import { sportsMatchPoster } from './sportsMatchPoster'
 
 /** Preferred frontend origin (workers mirror). */
@@ -379,7 +380,7 @@ export async function fetchLivextvReplayCatalog(): Promise<
 
 export type LivextvReplayPlayResult =
   | { ok: true; mode: 'hls'; url: string; referer: string }
-  | { ok: true; mode: 'embed'; url: string }
+  | { ok: true; mode: 'embed'; url: string; replayParts?: ReplayPartsInfo }
   | { ok: false; error: string }
 
 async function fetchReplayHtml(
@@ -613,7 +614,12 @@ export async function resolveLivextvReplayPlay(
         await import('./fullmatchShows')
       const fms = await resolveFullmatchShowsPlayForTitle(item.title, item.releasedAt)
       if (fms.ok) {
-        return { ok: true, mode: 'embed', url: toMinimalReplayEmbedUrl(fms.url) }
+        return {
+          ok: true,
+          mode: 'embed',
+          url: toMinimalReplayEmbedUrl(fms.url),
+          replayParts: fms.replayParts,
+        }
       }
     } catch {
       /* ignore */

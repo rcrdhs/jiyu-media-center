@@ -156,15 +156,37 @@ async function innertubePost<T = unknown>(
       return null
     }
   }
+  const ytHeaders = {
+    'Content-Type': 'application/json',
+    'User-Agent': 'com.google.android.youtube/20.10.38 (Linux; U; Android 14)',
+    'X-Youtube-Client-Name': '3',
+    'X-Youtube-Client-Version': '20.10.38',
+  }
+  // Android WebView fetch sends Origin: https://localhost → YouTube answers the
+  // CORS preflight with 403 (measured ~0.4–0.8 s wasted, then the 1.3 MB HTML
+  // fallback). CapacitorHttp sends no Origin and gets 200 in ~100–300 ms.
+  try {
+    const { Capacitor } = await import('@capacitor/core')
+    if (Capacitor.isNativePlatform()) {
+      const { nativeFetchJsonPost } = await import('./nativeHttp')
+      const res = await nativeFetchJsonPost<unknown>(url, payload, { headers: ytHeaders })
+      if (!res.ok || res.data == null) return null
+      if (typeof res.data === 'string') {
+        try {
+          return JSON.parse(res.data) as T
+        } catch {
+          return null
+        }
+      }
+      return res.data as T
+    }
+  } catch {
+    /* fall through to WebView fetch */
+  }
   try {
     const res = await fetch(url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'User-Agent': 'com.google.android.youtube/20.10.38 (Linux; U; Android 14)',
-        'X-Youtube-Client-Name': '3',
-        'X-Youtube-Client-Version': '20.10.38',
-      },
+      headers: ytHeaders,
       body: JSON.stringify(payload),
     })
     if (!res.ok) return null
@@ -177,6 +199,7 @@ async function innertubePost<T = unknown>(
 type ResolveUrlResponse = {
   endpoint?: {
     watchEndpoint?: { videoId?: string }
+    browseEndpoint?: { browseId?: string }
     urlEndpoint?: { url?: string }
   }
 }
@@ -193,12 +216,16 @@ type PlayerResponse = {
 }
 
 /** Resolve @handle/live → current video id via Innertube (survives HTML bot walls). */
-async function resolveLiveVideoIdViaInnertube(liveUrl: string): Promise<string | null> {
+async function resolveLiveVideoIdViaInnertube(
+  liveUrl: string,
+): Promise<string | 'channel' | null> {
   const data = await innertubePost<ResolveUrlResponse>('navigation/resolve_url', {
     url: liveUrl,
   })
   const id = data?.endpoint?.watchEndpoint?.videoId
   if (id && /^[a-zA-Z0-9_-]{11}$/.test(id)) return id
+  // /live that maps back to the channel page = not on-air (no 1.3 MB HTML fallback).
+  if (data?.endpoint?.browseEndpoint?.browseId) return 'channel'
   return null
 }
 
@@ -221,7 +248,22 @@ export async function isYouTubeLiveNow(liveUrl: string): Promise<boolean> {
 }
 
 const resolveCache = new Map<string, { at: number; result: YouTubeLivePlayResult }>()
+const resolveInflight = new Map<string, Promise<YouTubeLivePlayResult>>()
 const RESOLVE_CACHE_TTL_MS = 90_000
+/** Offline answers expire fast so a channel that just went live opens on retry. */
+const RESOLVE_OFFLINE_TTL_MS = 20_000
+
+/**
+ * Warm the live resolve (card hover / visible / tap) so Watch opens with the
+ * video id already cached. Safe to call repeatedly — deduped + cached.
+ */
+export function prefetchYouTubeLive(liveUrl: string): void {
+  const key = String(liveUrl || '').trim()
+  if (!key || !/youtube\.com\/(?:@[^/]+|channel\/[^/]+|c\/[^/]+|user\/[^/]+)\/live/i.test(key)) {
+    return
+  }
+  void resolveYouTubeLivePlay(key).catch(() => undefined)
+}
 
 /**
  * Resolve a channel `/live` URL into a playable watch/embed when on-air.
@@ -231,8 +273,24 @@ const RESOLVE_CACHE_TTL_MS = 90_000
 export async function resolveYouTubeLivePlay(liveUrl: string): Promise<YouTubeLivePlayResult> {
   const key = String(liveUrl || '').trim()
   const hit = key ? resolveCache.get(key) : undefined
-  if (hit && Date.now() - hit.at < RESOLVE_CACHE_TTL_MS) return hit.result
+  if (hit) {
+    const ttl = hit.result.ok ? RESOLVE_CACHE_TTL_MS : RESOLVE_OFFLINE_TTL_MS
+    if (Date.now() - hit.at < ttl) return hit.result
+  }
+  const pending = key ? resolveInflight.get(key) : undefined
+  if (pending) return pending
+  const run = resolveYouTubeLivePlayUncached(liveUrl, key)
+  if (key) {
+    resolveInflight.set(key, run)
+    void run.finally(() => resolveInflight.delete(key))
+  }
+  return run
+}
 
+async function resolveYouTubeLivePlayUncached(
+  liveUrl: string,
+  key: string,
+): Promise<YouTubeLivePlayResult> {
   const store = (result: YouTubeLivePlayResult) => {
     if (key) resolveCache.set(key, { at: Date.now(), result })
     return result
@@ -241,6 +299,9 @@ export async function resolveYouTubeLivePlay(liveUrl: string): Promise<YouTubeLi
   try {
     // 1) Innertube resolve_url → videoId → player isLive (most reliable).
     const innertubeId = await resolveLiveVideoIdViaInnertube(liveUrl)
+    if (innertubeId === 'channel') {
+      return store({ ok: false, error: 'This channel is not live on YouTube right now' })
+    }
     if (innertubeId) {
       const state = await playerSaysLive(innertubeId)
       if (state === 'live' || state === 'unknown') {

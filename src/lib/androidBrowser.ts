@@ -8,6 +8,8 @@ import type { BrowserBounds, BrowserNavState } from '../types'
 type InAppBrowserPlugin = {
   show: (bounds: BrowserBounds) => Promise<{ ok: boolean; error?: string }>
   hide: (options?: { blank?: boolean; pause?: boolean }) => Promise<{ ok: boolean }>
+  /** Added 0.3.84+: cold-start GeckoRuntime while hidden. Older APKs reject. */
+  prewarm?: () => Promise<{ ok: boolean; warm?: boolean; error?: string }>
   setBounds: (bounds: BrowserBounds) => Promise<{ ok: boolean }>
   navigate: (options: { url: string }) => Promise<{
     ok: boolean
@@ -90,6 +92,31 @@ export function isInAppBrowserAvailable(): boolean {
 
 export async function androidBrowserShow(bounds: BrowserBounds) {
   return NativeBrowser.show(bounds)
+}
+
+let prewarmOnce: Promise<boolean> | null = null
+
+/**
+ * Start GeckoView runtime/session early (tap time) so /web does not pay the
+ * cold start. No-op off Android and on APKs without the native method.
+ */
+export function androidBrowserPrewarm(): Promise<boolean> {
+  if (!isAndroidInAppBrowser()) return Promise.resolve(false)
+  if (prewarmOnce) return prewarmOnce
+  prewarmOnce = (async () => {
+    try {
+      const fn = NativeBrowser.prewarm
+      if (typeof fn !== 'function') return false
+      const res = await fn()
+      return Boolean(res?.ok && res.warm !== false)
+    } catch {
+      return false
+    }
+  })()
+  void prewarmOnce.then((warm) => {
+    if (!warm) prewarmOnce = null
+  })
+  return prewarmOnce
 }
 
 export async function androidBrowserHide(options?: { blank?: boolean; pause?: boolean }) {

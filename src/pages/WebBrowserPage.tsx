@@ -4,6 +4,7 @@ import { usePlayback } from '../context/PlaybackContext'
 import { useWebBrowser } from '../context/WebBrowserContext'
 import { recordWebEmbedContinue } from '../lib/continueWatching'
 import { isZenoxUrl, zenoxWatchUrl } from '../lib/zenox'
+import { resolveFullmatchShowsPlay, type ReplayPartsInfo } from '../lib/fullmatchShows'
 import {
   buildSearchUrl,
   isBlankBrowserUrl,
@@ -47,6 +48,8 @@ type ContinueWatchState = {
   season?: number
   episode?: number
   playlistLength?: number
+  /** Football replays: Full match / 1st half / 2nd half / Highlights picker. */
+  replayParts?: ReplayPartsInfo
 }
 
 type WebLocationState = {
@@ -143,6 +146,7 @@ export function WebBrowserPage() {
     url: '',
   })
   const [castAvailable, setCastAvailable] = useState(false)
+  const [replayPartBusy, setReplayPartBusy] = useState(false)
   const chromeHideTimer = useRef(0)
   const volumeFlashTimer = useRef(0)
   const paramUrl = searchParams.get('url')
@@ -439,6 +443,48 @@ export function WebBrowserPage() {
     }
   })()
 
+  const replayParts = continueWatch?.replayParts
+  const replayPartChoices =
+    embedPlayer && replayParts && replayParts.parts.length > 1 ? replayParts.parts : null
+
+  /** Switch replay part in place (same Playmate-down -> Playmogo fallback as WatchPage). */
+  async function pickReplayPart(index: number) {
+    const info = continueWatch?.replayParts
+    if (!continueWatch || !info || replayPartBusy || index === info.index) return
+    setReplayPartBusy(true)
+    try {
+      const resolved = await resolveFullmatchShowsPlay(
+        { id: continueWatch.id, url: '', playlist: info.playlist },
+        index,
+      )
+      if (!resolved.ok) {
+        setVolumeFlash('Could not open that part')
+        window.clearTimeout(volumeFlashTimer.current)
+        volumeFlashTimer.current = window.setTimeout(() => setVolumeFlash(null), 1600)
+        return
+      }
+      const nextParts = resolved.replayParts || { ...info, index }
+      const nextState: WebLocationState = {
+        from: returnTo,
+        playerMode: 'embed',
+        pipOnBack: routeState?.pipOnBack ?? true,
+        continueWatch: {
+          ...continueWatch,
+          playlistIndex: nextParts.index,
+          playUrl: resolved.url,
+          replayParts: nextParts,
+        },
+      }
+      navigate(`/web?url=${encodeURIComponent(resolved.url)}`, {
+        replace: true,
+        state: nextState,
+      })
+      void openUrl(resolved.url)
+    } finally {
+      setReplayPartBusy(false)
+    }
+  }
+
   function startWebMultiview() {
     const playUrl = toAutoplayUrl(nav.url || address || paramUrl || '')
     if (!playUrl) return
@@ -671,6 +717,28 @@ export function WebBrowserPage() {
             ) : null}
             <strong className="web-chrome-title">{displayTitle}</strong>
             {!embedPlayer && host ? <span className="web-chrome-host">{host}</span> : null}
+            {replayPartChoices ? (
+              <label className="web-replay-part" title="Choose which part of the match to watch">
+                <span className="sr-only">Replay part</span>
+                <select
+                  value={replayParts!.index}
+                  disabled={!desktop || replayPartBusy}
+                  onFocus={() => {
+                    // Desktop auto-hide must not pull the bar away mid-pick.
+                    window.clearTimeout(chromeHideTimer.current)
+                    setChromeVisible(true)
+                  }}
+                  onBlur={revealChrome}
+                  onChange={(e) => void pickReplayPart(Number(e.target.value))}
+                >
+                  {replayPartChoices.map((part) => (
+                    <option key={part.index} value={part.index}>
+                      {part.title}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
           </div>
 
           <div className="web-chrome-actions">

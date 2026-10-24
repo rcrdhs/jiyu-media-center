@@ -390,6 +390,30 @@ declare global {
       fetchJsonGet?: (url: string, referer?: string) => Promise<PlaylistFetchResult>
       /** Subtitle-step diagnostics → <userData>/logs/subtitles.log (main, ~1 MB roll). */
       logSubtitleEvent?: (line: string) => void
+      /** Donghua (Bilibili / iQIYI) lookup diagnostics → <userData>/logs/bilibili.log. */
+      logBilibiliEvent?: (line: string) => void
+      /** Bilibili / iQIYI GET from main with Referer / Cookie / Range (allowlisted hosts). */
+      biliFetch?: (options: {
+        url: string
+        headers?: Record<string, string>
+        timeoutMs?: number
+        binary?: boolean
+        /** Signed-in bilibili.tv: main adds the account Cookie (playurl / subtitle APIs only). */
+        tvSession?: boolean
+      }) => Promise<{
+        ok: boolean
+        status: number
+        content: string
+        base64?: string
+        error: string
+        withSession?: boolean
+      }>
+      /** Optional bilibili.tv account — the cookie stays in main (never sent to the renderer). */
+      biliTvSessionStatus?: () => Promise<BiliTvSessionStatus>
+      biliTvSignIn?: () => Promise<BiliTvSessionStatus & { loginUrl: string }>
+      biliTvSignInCancel?: () => Promise<BiliTvSessionStatus>
+      biliTvSignOut?: () => Promise<BiliTvSessionStatus>
+      onBiliTvSession?: (callback: (status: BiliTvSessionStatus) => void) => () => void
       /** Softsubs via Wyzie — key stays in Electron main .env; no key → jiyu-wyzie Worker. */
       resolveWyzieSubtitle?: (options: {
         tmdbId: string | number
@@ -454,4 +478,14 @@ declare global {
       ) => Promise<{ ok: boolean; error?: string }>
     }
   }
+}
+
+/** bilibili.tv sign-in state (no cookie values). */
+export type BiliTvSessionStatus = {
+  signedIn: boolean
+  /** Stored with OS encryption (Electron safeStorage / Android Keystore). */
+  encrypted: boolean
+  savedAt: number
+  /** Desktop: waiting for the user to finish signing in inside the in-app browser. */
+  capturing?: boolean
 }
