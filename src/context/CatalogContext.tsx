@@ -56,6 +56,7 @@ import {
   indexTmdbTvTitles,
 } from '../lib/tmdbTv'
 import { ZENOX_SOURCE_ID } from '../lib/zenox'
+import { filterKnownPlayable, PLAYABILITY_CHANGED } from '../lib/playability'
 import {
   TORRENT_SCRAPER_VERSION,
   syncAllTorrentSources,
@@ -181,7 +182,12 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const bump = () => setTorrentSourceRevision((n) => n + 1)
     window.addEventListener(TORRENT_SOURCES_CHANGED, bump)
-    return () => window.removeEventListener(TORRENT_SOURCES_CHANGED, bump)
+    // Titles found to have no source drop off the Kids / Series shelves.
+    window.addEventListener(PLAYABILITY_CHANGED, bump)
+    return () => {
+      window.removeEventListener(TORRENT_SOURCES_CHANGED, bump)
+      window.removeEventListener(PLAYABILITY_CHANGED, bump)
+    }
   }, [])
 
   useEffect(() => {
@@ -389,7 +395,7 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
     let base = items.filter((item) => item.category === 'series')
     // Card network chips: M2Box rows borrow a same-title TMDB row's id.
     indexTmdbTvTitles(base)
-    base = filterShelfVisibleItems(base)
+    base = filterKnownPlayable(filterShelfVisibleItems(base))
     return base.filter(isSeriesWebCatalogItem)
   }, [items, torrentSourceRevision, hideKeywordsTick])
 
@@ -403,6 +409,7 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
       }
       let base = items.filter((item) => item.category === id)
       base = filterShelfVisibleItems(base)
+      if (id === 'kids') base = filterKnownPlayable(base)
       if (!englishOnly || !shouldApplyEnglishFilter(id)) return base
       // Match titles / leagues aren't "English streams" — don't hide LiveXTV Replay.
       return base.filter(

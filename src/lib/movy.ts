@@ -861,3 +861,67 @@ async function fetchHlsDurationSec(url: string): Promise<number> {
   for (const m of res.text.matchAll(/#EXTINF:([\d.]+)/g)) total += Number(m[1]) || 0
   return total
 }
+
+export type MovyAvailability = 'ok' | 'none' | 'error'
+
+/**
+ * Cheap "does any backend list this episode?" check for catalog playability.
+ * Asks every Movy city for sources (no HLS probe / duration vote), then the
+ * Atlantic + Streamo fallbacks. Returns 'error' when Movy itself is unreachable
+ * (seed failed) so a blocked network never marks a title dead.
+ */
+export async function checkMovyTvAvailability(opts: {
+  tmdbId: string
+  title: string
+  season?: number
+  episode?: number
+}): Promise<MovyAvailability> {
+  const tmdbId = String(opts.tmdbId || '').trim()
+  const title = String(opts.title || '').trim()
+  if (!tmdbId || !title) return 'none'
+  const resolveOpts: MovyResolveOptions = {
+    tmdbId,
+    title,
+    mediaType: 'tv',
+    season: Math.max(1, opts.season || 1),
+    episode: Math.max(1, opts.episode || 1),
+  }
+  let seed: string
+  try {
+    seed = await fetchMovySeed(tmdbId)
+  } catch {
+    return 'error'
+  }
+  const anyCity = await new Promise<boolean>((resolve) => {
+    let pending = MOVY_TV_PROVIDERS.length
+    let done = false
+    for (const provider of MOVY_TV_PROVIDERS) {
+      void withTimeoutOr(fetchProviderSources(provider, resolveOpts, seed), MOVY_SOURCES_TIMEOUT_MS, null)
+        .catch(() => null)
+        .then((decoded) => {
+          if (done) return
+          if (decoded?.sources.some((s) => s.url)) {
+            done = true
+            resolve(true)
+            return
+          }
+          pending -= 1
+          if (pending <= 0) resolve(false)
+        })
+    }
+  })
+  if (anyCity) return 'ok'
+  const [atlantic, streamo] = await Promise.all([
+    withTimeoutOr(
+      resolveAtlanticPlay({ tmdbId, mediaType: 'tv', season: resolveOpts.season, episode: resolveOpts.episode, title }).catch(() => null),
+      12_000,
+      null,
+    ),
+    withTimeoutOr(
+      resolveStreamoPlay({ tmdbId, mediaType: 'tv', season: resolveOpts.season, episode: resolveOpts.episode }).catch(() => null),
+      15_000,
+      null,
+    ),
+  ])
+  return atlantic?.ok || streamo?.ok ? 'ok' : 'none'
+}

@@ -24,6 +24,11 @@ import {
 } from '../lib/libraryGrowth'
 import { catalogNewTitleItems } from '../lib/newTitlesList'
 import {
+  filterKnownPlayable,
+  PLAYABILITY_CHANGED,
+  queuePlayabilityChecks,
+} from '../lib/playability'
+import {
   getWatchlist,
   resolveWatchlistItems,
   subscribeWatchlist,
@@ -87,12 +92,30 @@ export function HomePage() {
     return () => window.clearTimeout(timer)
   }, [ready, items.length, items])
 
-  const newTodayItems = useMemo(() => {
+  const [playabilityTick, setPlayabilityTick] = useState(0)
+  useEffect(() => {
+    const bump = () => setPlayabilityTick((n) => n + 1)
+    window.addEventListener(PLAYABILITY_CHANGED, bump)
+    return () => window.removeEventListener(PLAYABILITY_CHANGED, bump)
+  }, [])
+
+  const newTodayAll = useMemo(() => {
     // Only titles first added to a shelf today — never pad with older releases.
     const n = Math.max(0, catalogGrowth.newToday)
     if (n <= 0) return []
     return catalogNewTitleItems(items, 'today', n)
   }, [items, catalogGrowth.newToday])
+
+  // Check TMDB-routed kids/series rows in the background; hide ones with no source.
+  useEffect(() => {
+    if (newTodayAll.length > 0) queuePlayabilityChecks(newTodayAll)
+  }, [newTodayAll])
+
+  const newTodayItems = useMemo(() => {
+    void playabilityTick
+    return filterKnownPlayable(newTodayAll)
+  }, [newTodayAll, playabilityTick])
+  const addedTodayCount = newTodayItems.length
 
   const savedItems = useMemo(() => resolveWatchlistItems(items), [items, savedCount])
 
@@ -155,13 +178,13 @@ export function HomePage() {
             <div className="hero-frame">
               <span>Total titles</span>
               <strong>{catalogGrowth.today.toLocaleString()}</strong>
-              {catalogGrowth.newToday > 0 ? (
+              {addedTodayCount > 0 ? (
                 <button
                   type="button"
                   className="growth-hit"
                   onClick={() => openHomePanel('added')}
                 >
-                  Added today {catalogGrowth.newToday.toLocaleString()}
+                  Added today {addedTodayCount.toLocaleString()}
                 </button>
               ) : (
                 <em>Added today 0</em>

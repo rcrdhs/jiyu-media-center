@@ -482,6 +482,13 @@ function isMovyStylePlaybackUrl(url) {
   return false
 }
 
+const MOVY_API_REFERER = 'https://www.movy.sx/'
+
+/** api.wecollege.net/seed and /<city>/sources — JSON API, not HLS media. */
+function isMovyApiUrl(url) {
+  return /^https?:\/\/api\.wecollege\.net\/(?:seed\b|[a-z0-9_-]+\/sources\b)/i.test(String(url || ''))
+}
+
 /** Bilibili.tv intl CDN / API media — need site Referer like Movy CDNs. */
 function isBilibiliTvPlaybackUrl(url) {
   const u = String(url || '')
@@ -6087,6 +6094,12 @@ app.whenReady().then(() => {
       // Bilibili mainland DASH CDN (donghua) — always the bilibili.com origin.
       if (isBilibiliCnPlaybackUrl(url)) {
         referer = 'https://www.bilibili.com/'
+      }
+      // Movy API (seed + city sources): Cloudflare 403s any non-movy Referer. The
+      // carry above used to stamp the last playback's Referer (M2Box, Bilibili…)
+      // on these, so every Movy lookup failed until the next Movy play.
+      if (isMovyApiUrl(url)) {
+        referer = MOVY_API_REFERER
       }
     } catch {
       /* ignore bad URLs */

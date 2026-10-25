@@ -4,6 +4,7 @@ import { PlaybackLoadingScreen } from '../components/PlaybackLoadingScreen'
 import { resolvePlayableItem } from '../data/catalog'
 import { useCatalog } from '../context/CatalogContext'
 import { usePlayback } from '../context/PlaybackContext'
+import { notePlayable, notePlaybackActivity } from '../lib/playability'
 import { getContinueEntry, mergeRuntimeSeconds, recordWebEmbedContinue } from '../lib/continueWatching'
 import { isWeakPosterUrl, resolveCatalogPoster } from '../lib/posterFallback'
 import { hasRealDebridToken } from '../lib/debridSettings'
@@ -435,6 +436,7 @@ export function ShowPage() {
       episode: number,
       knownTmdbId?: string,
     ): Promise<boolean> => {
+      notePlaybackActivity()
       setPrepareStatus('Opening stream…')
       // Prefer the id ShowPage already resolved — re-running resolveAnimeTmdbTvId
       // only re-fetches genres and can flicker status back to "Looking up show…".
@@ -469,6 +471,7 @@ export function ShowPage() {
         return false
       }
       if (!movy.ok) return false
+      notePlayable(item)
       if (movy.backend === 'atlantic') setPrepareStatus('Opening alternate stream…')
       let subtitleUrl = movy.subtitleUrl
       let subtitleKind = movy.subtitleKind
