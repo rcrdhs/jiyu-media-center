@@ -8,6 +8,94 @@ package app.jiyu.mediacenter.browser;
 final class BrowserAdBlock {
   private BrowserAdBlock() {}
 
+  /** Shared list (electron/ad-block-list.json, copied by scripts/sync-ad-block-list.cjs). */
+  static final String LIST_ASSET = "jiyu-gecko-bridge/ad-block-list.json";
+  private static volatile java.util.Set<String> sListHosts = java.util.Collections.emptySet();
+  private static volatile java.util.List<java.util.regex.Pattern> sListPatterns =
+    java.util.Collections.emptyList();
+  private static volatile boolean sListLoaded = false;
+
+  static synchronized void init(android.content.Context context) {
+    if (sListLoaded || context == null) return;
+    sListLoaded = true;
+    try (java.io.InputStream in = context.getAssets().open(LIST_ASSET)) {
+      java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+      byte[] buf = new byte[4096];
+      int n;
+      while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+      org.json.JSONObject json =
+        new org.json.JSONObject(new String(out.toByteArray(), java.nio.charset.StandardCharsets.UTF_8));
+      java.util.Set<String> hosts = new java.util.HashSet<>();
+      org.json.JSONArray h = json.optJSONArray("hosts");
+      if (h != null) {
+        for (int i = 0; i < h.length(); i++) {
+          String v = h.optString(i, "").trim().toLowerCase();
+          if (!v.isEmpty()) hosts.add(v);
+        }
+      }
+      java.util.List<java.util.regex.Pattern> patterns = new java.util.ArrayList<>();
+      org.json.JSONArray p = json.optJSONArray("urlPatterns");
+      if (p != null) {
+        for (int i = 0; i < p.length(); i++) {
+          try {
+            patterns.add(java.util.regex.Pattern.compile(p.optString(i, ""), java.util.regex.Pattern.CASE_INSENSITIVE));
+          } catch (Throwable ignored) {}
+        }
+      }
+      sListHosts = hosts;
+      sListPatterns = patterns;
+      android.util.Log.i("JiyuGecko", "adblock shared list " + hosts.size() + " hosts " + patterns.size() + " patterns");
+    } catch (Throwable t) {
+      android.util.Log.w("JiyuGecko", "adblock shared list load failed: " + t);
+    }
+  }
+
+  /** Host suffix or URL pattern match against the shared list. */
+  static boolean isListedAdUrl(String url) {
+    if (url == null || url.isEmpty()) return false;
+    String host = hostOf(url);
+    if (!host.isEmpty()) {
+      java.util.Set<String> hosts = sListHosts;
+      String h = host;
+      while (!h.isEmpty()) {
+        if (hosts.contains(h)) return true;
+        int dot = h.indexOf('.');
+        if (dot < 0) break;
+        h = h.substring(dot + 1);
+      }
+    }
+    for (java.util.regex.Pattern p : sListPatterns) {
+      if (p.matcher(url).find()) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Schemes a stream page may never open: intent:, market:, app deep links, etc.
+   * (Gecko would otherwise hand them to Android and launch the store / another app.)
+   */
+  static boolean isExternalAppScheme(String url) {
+    if (url == null || url.isEmpty()) return false;
+    int colon = url.indexOf(':');
+    if (colon <= 0) return false;
+    String scheme = url.substring(0, colon).toLowerCase();
+    switch (scheme) {
+      case "http":
+      case "https":
+      case "about":
+      case "data":
+      case "blob":
+      case "javascript":
+      case "moz-extension":
+      case "resource":
+      case "chrome":
+      case "file":
+        return false;
+      default:
+        return true;
+    }
+  }
+
   static boolean shouldBlockNavigation(String url) {
     return isBlockedDownloadUrl(url)
       || isAdHijackUrl(url)
@@ -49,6 +137,7 @@ final class BrowserAdBlock {
 
   static boolean isAdHijackUrl(String url) {
     if (url == null || url.isEmpty()) return false;
+    if (isListedAdUrl(url)) return true;
     String raw = url;
     if (raw.matches(
       "(?i).*(PWNgames|utm_source=PWN|OperaSetup|opera_gx|get/opera|promo\\.worldofwarships|"

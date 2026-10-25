@@ -13,7 +13,7 @@
   "scripts": {
     "dev": "vite",
     "dev:desktop": "concurrently -k --success first \"vite\" \"wait-on http://localhost:5173 && electron .\"",
-    "build": "tsc -b && vite build",
+    "build": "node scripts/sync-ad-block-list.cjs && tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
     "pack:win": "npm run build && electron-builder --win nsis portable",

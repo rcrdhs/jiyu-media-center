@@ -1104,6 +1104,86 @@ const BROWSER_AD_BLOCK_URLS = [
   '*://*.download.opera.com/*',
 ]
 
+/**
+ * Shared ad / popunder / adware list (electron/ad-block-list.json). The same file is
+ * copied into the Android GeckoView bridge by scripts/sync-ad-block-list.cjs.
+ */
+const SHARED_AD_BLOCK = (() => {
+  let list = { hosts: [], urlPatterns: [] }
+  try {
+    list = require('./ad-block-list.json')
+  } catch (err) {
+    console.log('[adblock] shared list missing', err instanceof Error ? err.message : err)
+  }
+  const hosts = new Set(
+    (Array.isArray(list.hosts) ? list.hosts : [])
+      .map((h) => String(h || '').trim().toLowerCase().replace(/^www\./, ''))
+      .filter(Boolean),
+  )
+  const patterns = []
+  for (const p of Array.isArray(list.urlPatterns) ? list.urlPatterns : []) {
+    try {
+      patterns.push(new RegExp(String(p), 'i'))
+    } catch {
+      /* ignore bad pattern */
+    }
+  }
+  return { hosts, patterns }
+})()
+
+function isListedAdHost(host) {
+  let h = String(host || '').toLowerCase().replace(/^www\./, '')
+  while (h) {
+    if (SHARED_AD_BLOCK.hosts.has(h)) return true
+    const dot = h.indexOf('.')
+    if (dot < 0) break
+    h = h.slice(dot + 1)
+  }
+  return false
+}
+
+function isListedAdUrl(url) {
+  const raw = String(url || '')
+  if (!/^https?:/i.test(raw)) return false
+  try {
+    if (isListedAdHost(new URL(raw).hostname)) return true
+  } catch {
+    return false
+  }
+  return SHARED_AD_BLOCK.patterns.some((re) => re.test(raw))
+}
+
+/** Blocked request / popup counters for the jiyu-web session (logged, throttled). */
+const adBlockStats = { total: 0, byKind: new Map(), byHost: new Map(), seenHosts: new Set() }
+let adBlockLogTimer = null
+function noteAdBlocked(kind, url) {
+  let host = ''
+  try {
+    host = new URL(String(url || '')).hostname.replace(/^www\./i, '').toLowerCase()
+  } catch {
+    host = String(url || '').slice(0, 40)
+  }
+  adBlockStats.total += 1
+  adBlockStats.byKind.set(kind, (adBlockStats.byKind.get(kind) || 0) + 1)
+  adBlockStats.byHost.set(host, (adBlockStats.byHost.get(host) || 0) + 1)
+  if (!adBlockStats.seenHosts.has(kind + ' ' + host)) {
+    adBlockStats.seenHosts.add(kind + ' ' + host)
+    console.log('[adblock] blocked ' + kind + ' ' + String(url || '').slice(0, 140))
+  }
+  if (adBlockLogTimer) return
+  adBlockLogTimer = setTimeout(() => {
+    adBlockLogTimer = null
+    const kinds = [...adBlockStats.byKind].map(([k, n]) => k + '=' + n).join(' ')
+    const top = [...adBlockStats.byHost]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+      .map(([h, n]) => h + ':' + n)
+      .join(' ')
+    console.log('[adblock] total blocked ' + adBlockStats.total + ' (' + kinds + ') top ' + top)
+  }, 15000)
+  if (typeof adBlockLogTimer.unref === 'function') adBlockLogTimer.unref()
+}
+
 /** Installer / forced-download bait from embed ads (PRIMEROLL → OperaSetup.exe). */
 /** OptimsServe-style injectors on Streamed embed.st pages (Defender: Suschil). */
 function isStreamedInjectedAdwareUrl(url) {
@@ -1250,6 +1330,7 @@ function isBlockedBrowserDownloadUrl(url) {
 function isAdHijackUrl(url) {
   const raw = String(url || '')
   if (!raw) return false
+  if (isListedAdUrl(raw)) return true
   if (
     /PWNgames|utm_source=PWN|OperaSetup|opera_gx|get\/opera|promo\.worldofwarships|worldofwarships\.com\/glow|utm_source=PRIMEROLL|download.*(browser|player)|install.*(browser|player)|pt[=:]["']?tabup|"pt"\s*:\s*"tabup"|effectivecpmnetwork|gunacarduus/i.test(
       raw,
@@ -2764,8 +2845,19 @@ function isPipLikeBrowserBounds(bounds) {
   return w > 0 && h > 0 && w <= 420 && h <= 240
 }
 
+/**
+ * Popups / popunders used to be loaded muted in a hidden "ad dock". Loading them is what
+ * pulled adware (Defender: Trojan:Win32/Suschil) into the jiyu-web disk cache, so they
+ * are now dropped outright. The opener already gets a denied window either way.
+ */
+const AD_DOCK_LOADS_POPUPS = false
+
 function showAdDock(url) {
   const target = String(url || '').trim()
+  if (!AD_DOCK_LOADS_POPUPS) {
+    if (target) noteAdBlocked('popup', target)
+    return true
+  }
   if (!/^https?:\/\//i.test(target)) return false
   // Never park Cloudflare challenges in the ad dock.
   if (/challenges\.cloudflare\.com|turnstile|__cf_chl/i.test(target)) return false
@@ -3126,6 +3218,41 @@ async function fetchYtsQuietly(targetUrl, attempts = 4) {
     }
   }
   return last
+}
+
+/**
+ * Stream pages (taifood-blog.asia/embed/..., embed.st) carry inline adware loaders that
+ * Defender flags (Trojan:Win32/Suschil!rfn) once Chromium writes them to Cache_Data.
+ * A no-store response header set in webRequest does not help: Electron edits headers
+ * above the network-service HttpCache, so the original response is still written.
+ * Request headers do reach the cache: Chromium treats any If-Range request header as
+ * LOAD_DISABLE_CACHE (no cache read or write), and servers must ignore If-Range when no
+ * Range header is sent (RFC 9110 13.1.5). Applied to documents, frames and non-player
+ * scripts only, so player CDNs, segments and images still cache.
+ */
+const NO_DISK_CACHE_IF_RANGE = 'Thu, 01 Jan 1970 00:00:00 GMT'
+let noDiskCacheCount = 0
+function keepOutOfDiskCache(details, headers) {
+  try {
+    if (String(details.method || 'GET').toUpperCase() !== 'GET') return
+    const type = String(details.resourceType || '')
+    if (type !== 'mainFrame' && type !== 'subFrame' && type !== 'script') return
+    const u = new URL(String(details.url || ''))
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') return
+    const host = u.hostname.toLowerCase()
+    if (host === 'challenges.cloudflare.com' || u.pathname.startsWith('/cdn-cgi/')) return
+    if (type === 'script' && isAllowedSportsPlayerHost(host)) return
+    for (const name of Object.keys(headers)) {
+      if (/^(range|if-range|if-match|if-unmodified-since)$/i.test(name)) return
+    }
+    headers['If-Range'] = NO_DISK_CACHE_IF_RANGE
+    noDiskCacheCount += 1
+    if (noDiskCacheCount === 1 || noDiskCacheCount % 200 === 0) {
+      console.log('[adblock] kept out of disk cache:', noDiskCacheCount, 'requests (latest', type, host + ')')
+    }
+  } catch {
+    /* ignore */
+  }
 }
 
 function webSession() {
@@ -5635,6 +5762,7 @@ app.whenReady().then(() => {
         ...details.requestHeaders,
         'User-Agent': BROWSER_UA,
       })
+      keepOutOfDiskCache(details, headers)
       if (!headers.Accept && !headers.accept) {
         headers.Accept =
           'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8'
@@ -5699,8 +5827,12 @@ app.whenReady().then(() => {
       callback({ requestHeaders: headers })
     })
     // Block ad networks + installer/adware bait in one handler (Electron keeps one listener).
-    ses.webRequest.onBeforeRequest((details, callback) => {
+    ses.webRequest.onBeforeRequest((details, rawCallback) => {
       const url = String(details.url || '')
+      const callback = (res) => {
+        if (res && res.cancel) noteAdBlocked(String(details.resourceType || 'request'), url)
+        rawCallback(res)
+      }
       if (isBlockedBrowserDownloadUrl(url) || isStreamedInjectedAdwareUrl(url)) {
         callback({ cancel: true })
         return
@@ -5738,6 +5870,13 @@ app.whenReady().then(() => {
     })
     installWebSessionDownloadGuard(ses)
     console.log('[cf-unlock] session UA =', BROWSER_UA)
+    console.log(
+      '[adblock] shared list',
+      SHARED_AD_BLOCK.hosts.size,
+      'hosts',
+      SHARED_AD_BLOCK.patterns.length,
+      'patterns; popups dropped',
+    )
     console.log('[cf-unlock] Sec-CH-UA =', desktopChromeClientHintHeaders()['Sec-CH-UA'])
   } catch (err) {
     console.log(

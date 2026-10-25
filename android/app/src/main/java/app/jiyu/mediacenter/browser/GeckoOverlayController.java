@@ -428,6 +428,11 @@ final class GeckoOverlayController {
           if (mediaProbe != null && !mediaProbe.finished && isSniffableMediaUrl(uri)) {
             return GeckoResult.fromValue(AllowOrDeny.DENY);
           }
+          if (BrowserAdBlock.isExternalAppScheme(uri)) {
+            android.util.Log.w("JiyuGecko", "denied external scheme " + safeUrl(uri));
+            restorePlayerEmbedIfNeeded("external-scheme");
+            return GeckoResult.fromValue(AllowOrDeny.DENY);
+          }
           if (BrowserAdBlock.shouldBlockNavigation(uri)) {
             android.util.Log.w("JiyuGecko", "denied ad/hijack nav " + safeUrl(uri));
             restorePlayerEmbedIfNeeded("blocked-nav");
@@ -459,6 +464,10 @@ final class GeckoOverlayController {
         ) {
           if (request != null) {
             noteMediaCandidate(request.uri);
+            if (BrowserAdBlock.isExternalAppScheme(request.uri)) {
+              android.util.Log.w("JiyuGecko", "denied subframe external scheme " + safeUrl(request.uri));
+              return GeckoResult.fromValue(AllowOrDeny.DENY);
+            }
             if (BrowserAdBlock.shouldBlockNavigation(request.uri)) {
             android.util.Log.w("JiyuGecko", "denied subframe ad " + safeUrl(request.uri));
             return GeckoResult.fromValue(AllowOrDeny.DENY);
@@ -591,6 +600,7 @@ final class GeckoOverlayController {
 
   private static synchronized void ensureRuntime(Context appContext) {
     if (sRuntime != null) return;
+    BrowserAdBlock.init(appContext);
     // GV 140 has no Builder.*Pref — ship autoplay prefs via config file so
     // PermissionDelegate actually receives AUTOPLAY_* requests (else Clappr stays Idle).
     String configPath = null;
