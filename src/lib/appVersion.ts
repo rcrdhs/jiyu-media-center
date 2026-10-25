@@ -12,6 +12,11 @@ export const APP_VERSION_LABEL = `v${APP_VERSION}`
 /** Short milestone log — newest first — so progress is visible in-app. */
 export const APP_RELEASES: ReadonlyArray<{ version: string; summary: string }> = [
   {
+    version: '0.3.85',
+    summary:
+      'Live streams autoplay again, and \'Unwrapping stream\' now waits until the video is really moving (up to 30 seconds); on Android, live streams keep playing when you switch to or from picture-in-picture instead of reloading; stream pop-ups and ad networks are blocked; rewinding a live stream stays put, a note tells you when you\'ve gone back past what the stream keeps, and the rewind buttons gray out at the start of that window; Continue watching now syncs between your devices through Jiyu\'s own sync service, with a device list and fewer uploads; every TV shelf shows the show\'s network; anime can play with an English dub when one is available, with a Sub/Dub button in the player and an Anime audio setting, and Jiyu remembers your choice per show; Added today, Kids and Series hide titles that have no playable source, and a desktop bug that made sources fail after playing from some providers is fixed',
+  },
+  {
     version: '0.3.84',
     summary:
       'Chinese anime from Bilibili and iQIYI now play: Jiyu looks up shows by their Chinese title with stricter matching, plays Bilibili episodes (international and mainland, including fan uploads) in its own player, and opens iQIYI episodes in the in-app browser; Bilibili shows get English subtitles from the episode\'s own track, with Chinese subtitles translated to English and the usual subtitle search as a fallback; you can optionally sign in to Bilibili in Settings, and the login stays on that device; football replays open the full match first, with a picker for Highlights and each half, skip download-only hosts, and switch to another player when one is down; Nationwide and football streams open faster, especially on Android, and \'Unwrapping stream\' stays up until the video is actually playing',
