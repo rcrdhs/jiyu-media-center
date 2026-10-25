@@ -12,6 +12,11 @@ export const APP_VERSION_LABEL = `v${APP_VERSION}`
 /** Short milestone log — newest first — so progress is visible in-app. */
 export const APP_RELEASES: ReadonlyArray<{ version: string; summary: string }> = [
   {
+    version: '0.3.87',
+    summary:
+      'Closing multiview tiles until one stream is left now takes you back to the normal player, and that stream keeps playing without restarting',
+  },
+  {
     version: '0.3.86',
     summary:
       'The Jiyu guide (How Jiyu works) now covers anime Sub/Dub, live streams, the network chips on shelves, titles hidden when they have no source, and the updated steps for pairing devices for sync',
