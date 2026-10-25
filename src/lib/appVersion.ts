@@ -12,6 +12,11 @@ export const APP_VERSION_LABEL = `v${APP_VERSION}`
 /** Short milestone log — newest first — so progress is visible in-app. */
 export const APP_RELEASES: ReadonlyArray<{ version: string; summary: string }> = [
   {
+    version: '0.3.88',
+    summary:
+      'Movies play in their original language, or English, instead of a foreign dub by default; when a server offers other languages, an Audio menu in the player lets you switch; Retry on a movie now tries a different server and keeps your place; a server that played the wrong language is no longer remembered for that title',
+  },
+  {
     version: '0.3.87',
     summary:
       'Closing multiview tiles until one stream is left now takes you back to the normal player, and that stream keeps playing without restarting',
