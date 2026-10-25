@@ -10,11 +10,15 @@ const STEPS = [
   },
   {
     title: 'Shelves update themselves',
-    body: 'The first catalog sync can take a while. Titles appear as they arrive — keep browsing. A small progress mark shows if sync continues in the background.',
+    body: 'The first catalog sync can take a while. Titles appear as they arrive — keep browsing. A small progress mark shows if sync continues in the background. Series cards show the network logo (Netflix, HBO, and so on), and Added today, Kids, and Series hide titles Jiyu cannot find a stream for, then check them again later.',
   },
   {
     title: 'Watch & Continue',
     body: 'Open a title to play. Progress saves automatically. Continue watching on Home (and each section) picks up where you left off. Restart clears that for the current episode.',
+  },
+  {
+    title: 'Anime: Sub or Dub',
+    body: 'Anime plays in Japanese with subtitles by default. When an episode has an English dub, the player shows a Sub / Dub button: switching keeps your place, and Jiyu remembers your pick for that show. With Dub on, subtitles turn off but stay available from the Subs button. Set your default under Anime audio in Library.',
   },
   {
     title: 'Saved list',
@@ -22,11 +26,11 @@ const STEPS = [
   },
   {
     title: 'Sync across devices',
-    body: 'In Library, open Continue watching sync. Create an account on one device, then enter the pair code on your other phones or PCs. Resume progress merges across every signed-in device.',
+    body: 'In Library, go to Continue watching sync and tap Create sync account on one device. It shows a single-use pair code (tap New pair code for another). On your other phones or PCs, enter it under Pair with another device and tap Link this device. Resume points then follow you across every linked device.',
   },
   {
     title: 'Library & sources',
-    body: 'Library is where you add playlists and web catalogs, set hide-keyword filters, manage sync, and tweak playback prefs.',
+    body: 'Library is where you add playlists and web catalogs, set hide-keyword filters, manage sync, choose anime Sub or Dub, and tweak playback prefs.',
   },
   {
     title: 'Hide titles',
@@ -35,6 +39,10 @@ const STEPS = [
   {
     title: 'Sports & Your teams',
     body: 'Add favorite teams under Sports. Matching live matches and recent replays show on Home under Your teams, and Jiyu can notify you before kickoff.',
+  },
+  {
+    title: 'Live streams',
+    body: 'Live channels and match streams start on their own — the Unwrapping stream cover stays until the video is actually moving. Pop-ups and ads on stream pages are blocked, and streams keep playing in PiP. Most live streams only keep the last 20-30 seconds or so, so rewinding is limited: a short notice tells you when you reach the limit, and on PC the rewind button grays out.',
   },
   {
     title: 'Player tips',
