@@ -228,12 +228,16 @@ public class InAppBrowserPlugin extends Plugin {
         // Same page already showing (PiP enter/expand, /web remount, repeat
         // openUrl): keep the live session like Electron's browser:navigate.
         // Re-loading restarted live football streams after every PiP hop.
+        boolean promoted = takePromoted(target);
         if (
-          !wasMulti
+          (!wasMulti || promoted)
           && gecko.getVisibility() == View.VISIBLE
-          && sameBrowserPage(currentUrl, target)
+          && (promoted || sameBrowserPage(currentUrl, target))
         ) {
-          android.util.Log.i("JiyuBrowser", "navigate kept live page (same url)");
+          android.util.Log.i(
+            "JiyuBrowser",
+            promoted ? "navigate kept promoted multiview tile" : "navigate kept live page (same url)"
+          );
           ensureUsableBounds();
           gecko.resume();
           notifyNav();
@@ -1370,6 +1374,77 @@ public class InAppBrowserPlugin extends Plugin {
         if (multi != null) multi.hide(id.trim(), blank, destroy);
       }
       call.resolve(ok());
+    });
+  }
+
+  private String promotedUrl = "";
+  private String promotedRequestedUrl = "";
+  private long promotedAt;
+
+  /** True once, shortly after multiPromote, for the same page (embed may have hopped). */
+  private boolean takePromoted(String target) {
+    if (promotedAt == 0) return false;
+    boolean fresh = System.currentTimeMillis() - promotedAt < 20000;
+    boolean same = sameBrowserPage(promotedUrl, target) || sameBrowserPage(promotedRequestedUrl, target)
+      || sameBrowserPage(currentUrl, target);
+    if (!fresh) {
+      promotedAt = 0;
+      return false;
+    }
+    if (!same) return false;
+    promotedAt = 0;
+    return true;
+  }
+
+  /** Multi-view closed down to one stream: keep that tile's Gecko session as the single overlay. */
+  @PluginMethod
+  public void multiPromote(PluginCall call) {
+    String id = call.getString("id", "");
+    String requested = call.getString("url", "");
+    main.post(() -> {
+      JSObject out = new JSObject();
+      try {
+        ensureOverlay();
+        if (gecko == null || gecko.getView() == null || id == null || id.trim().isEmpty()) {
+          out.put("ok", false);
+          out.put("error", "No browser view");
+          call.resolve(out);
+          return;
+        }
+        GeckoMultiHost.Promoted promoted = ensureGeckoMulti().detachForPromote(gecko, id.trim());
+        if (promoted == null) {
+          out.put("ok", false);
+          out.put("error", "No live tile");
+          call.resolve(out);
+          return;
+        }
+        geckoMultiActive = false;
+        if (multi != null) multi.hideAll(false, false);
+        if (!gecko.adoptSession(promoted.session, promoted.url)) {
+          out.put("ok", false);
+          out.put("error", "Adopt failed");
+          call.resolve(out);
+          return;
+        }
+        gecko.setVisibility(View.VISIBLE);
+        ensureUsableBounds();
+        gecko.resume();
+        gecko.setPageMuted(false);
+        currentUrl = promoted.url;
+        promotedUrl = promoted.url;
+        promotedRequestedUrl = requested == null ? "" : requested;
+        promotedAt = System.currentTimeMillis();
+        loading = false;
+        notifyNav();
+        android.util.Log.i("JiyuBrowser", "promoted multiview tile to single overlay");
+        out.put("ok", true);
+        out.put("url", promoted.url);
+        call.resolve(out);
+      } catch (Throwable t) {
+        out.put("ok", false);
+        out.put("error", String.valueOf(t.getMessage()));
+        call.resolve(out);
+      }
     });
   }
 

@@ -3214,6 +3214,12 @@ html.is-android .multi-view-full.is-fullscreen {
   flex: 0 0 auto;
 }
 
+/* Collapsed Multi-view (one native stream left): wrappers only, no layout box. */
+.multi-view-solo,
+.multi-view-solo-grid {
+  display: contents;
+}
+
 .multi-view-grid {
   flex: 1;
   min-height: 0;

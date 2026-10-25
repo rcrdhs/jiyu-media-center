@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { usePlayback } from '../context/PlaybackContext'
 
@@ -16,8 +16,14 @@ export function MultiviewPage() {
     item,
   } = usePlayback()
 
+  const prevSlotCount = useRef(slots.length)
+
   useEffect(() => {
+    const shrank = slots.length < prevSlotCount.current
+    prevSlotCount.current = slots.length
     if (slots.length === 0) return
+    // Closing tiles down to one collapses to the normal player - don't re-enter the grid.
+    if (shrank && slots.length === 1 && mode !== 'multi') return
     // Opening Multi-view from the sidebar remounts a parked session.
     mountMulti()
     if (mode === 'pip') expand()

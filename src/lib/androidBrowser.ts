@@ -69,6 +69,12 @@ type InAppBrowserPlugin = {
     destroy?: boolean
   }) => Promise<{ ok: boolean }>
   multiHideAll: (options?: { blank?: boolean }) => Promise<{ ok: boolean }>
+  /** Hand a live multiview tile session to the single overlay (no reload). Newer APKs only. */
+  multiPromote?: (options: { id: string; url?: string }) => Promise<{
+    ok: boolean
+    url?: string
+    error?: string
+  }>
   addListener: (
     event: 'nav',
     listener: (nav: BrowserNavState) => void,
@@ -303,4 +309,16 @@ export async function androidBrowserMultiHide(payload?: {
 
 export async function androidBrowserMultiHideAll(options?: { blank?: boolean }) {
   return NativeBrowser.multiHideAll(options || {})
+}
+
+/** Multi-view collapsed to one embed: keep its Gecko session alive as the single overlay. */
+export async function androidBrowserMultiPromote(payload: { id: string; url?: string }) {
+  try {
+    if (typeof NativeBrowser.multiPromote !== 'function') {
+      return { ok: false, error: 'multiPromote unavailable' }
+    }
+    return await NativeBrowser.multiPromote(payload)
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
 }

@@ -27,6 +27,7 @@ import {
   sameBrowserPageUrl,
   toAutoplayUrl,
 } from '../lib/webBrowser'
+import { takePromotedEmbed } from '../lib/multiviewCollapse'
 import { RIVESTREAM_EMBED_AUTO_SCRIPT } from '../lib/rivestreamEmbedAuto'
 import { cinetaroPlaybackUrl, isCinetaroCatalogPageUrl } from '../lib/cinetaro'
 import {
@@ -884,7 +885,9 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
       // so it cannot blank the surface after we navigate.
       detachGeneration.current += 1
       suppressLastChancePipRef.current = false
-      const unwrap = wantsUnwrapCover(target)
+      // Multi-view just handed this live tile to the single view: no cover, no kicks.
+      const promoted = takePromotedEmbed(target)
+      const unwrap = !promoted && wantsUnwrapCover(target)
       // The cover lives in the guest page (web-status is a red inline error row).
       if (unwrap) {
         startUnwrapCover()
@@ -916,6 +919,14 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
       // Prefer the live guest URL when main kept a Rive direct-player hop.
       const live = String(result?.url || target)
       setAddress(live)
+      if (promoted && result && 'kept' in result && result.kept) {
+        // Already playing (continued from Multi-view) - clicking it again would pause LIVE.
+        lastNudgeUrlRef.current = live
+        lastNudgeAtRef.current = Date.now()
+        setNav((current) => ({ ...current, url: live, loading: false, external: false }))
+        setStatus(null)
+        return
+      }
       setNav((current) => ({
         ...current,
         url: live,

@@ -4796,7 +4796,17 @@ function ensureWebBrowser() {
   webBrowserView.webContents.setBackgroundThrottling(false)
   void installRiveEmbedAutoScript(webBrowserView.webContents)
 
-  webBrowserView.webContents.setWindowOpenHandler(({ url }) => {
+  installEmbedNavGuard(webBrowserView.webContents)
+  installEscapeExitsFullscreen(webBrowserView.webContents)
+  installWebBrowserHandlers(webBrowserView)
+
+  return webBrowserView
+}
+
+/** Single-view listeners (nav, autoplay, volume, ad shield). Also used when a multiview
+ *  tile is promoted to be the single view (Multi-view collapsed to one stream). */
+function installWebBrowserHandlers(view) {
+  view.webContents.setWindowOpenHandler(({ url }) => {
     const target = String(url || '')
     // Never navigate the main sports/player tile into a popup (ads / adult sites).
     if (/^https?:\/\//i.test(target)) {
@@ -4804,12 +4814,11 @@ function ensureWebBrowser() {
     }
     return { action: 'deny' }
   })
-  installEmbedNavGuard(webBrowserView.webContents)
-  installEscapeExitsFullscreen(webBrowserView.webContents)
 
   const emitNav = () => {
-    if (!mainWindow || mainWindow.isDestroyed() || !webBrowserView) return
-    const contents = webBrowserView.webContents
+    if (!mainWindow || mainWindow.isDestroyed() || webBrowserView !== view) return
+    if (view.webContents.isDestroyed()) return
+    const contents = view.webContents
     mainWindow.webContents.send('browser:nav', {
       url: contents.getURL(),
       title: contents.getTitle(),
@@ -4819,39 +4828,39 @@ function ensureWebBrowser() {
     })
   }
 
-  webBrowserView.webContents.on('did-navigate', emitNav)
-  webBrowserView.webContents.on('did-navigate-in-page', emitNav)
-  webBrowserView.webContents.on('did-start-loading', emitNav)
-  webBrowserView.webContents.on('did-stop-loading', () => {
+  view.webContents.on('did-navigate', emitNav)
+  view.webContents.on('did-navigate-in-page', emitNav)
+  view.webContents.on('did-start-loading', emitNav)
+  view.webContents.on('did-stop-loading', () => {
     emitNav()
-    scheduleBrowserWheelVolume(webBrowserView.webContents)
-    scheduleBrowserAdShield(webBrowserView.webContents)
-    scheduleRiveEmbedAuto(webBrowserView.webContents)
-    scheduleWebBrowserSportsAutoplay(webBrowserView.webContents)
+    scheduleBrowserWheelVolume(view.webContents)
+    scheduleBrowserAdShield(view.webContents)
+    scheduleRiveEmbedAuto(view.webContents)
+    scheduleWebBrowserSportsAutoplay(view.webContents)
   })
-  webBrowserView.webContents.on('page-title-updated', emitNav)
-  webBrowserView.webContents.on('dom-ready', () => {
+  view.webContents.on('page-title-updated', emitNav)
+  view.webContents.on('dom-ready', () => {
     emitNav()
-    scheduleBrowserWheelVolume(webBrowserView.webContents)
-    scheduleBrowserAdShield(webBrowserView.webContents)
-    scheduleRiveEmbedAuto(webBrowserView.webContents)
-    scheduleWebBrowserSportsAutoplay(webBrowserView.webContents)
+    scheduleBrowserWheelVolume(view.webContents)
+    scheduleBrowserAdShield(view.webContents)
+    scheduleRiveEmbedAuto(view.webContents)
+    scheduleWebBrowserSportsAutoplay(view.webContents)
   })
   // Subframe loads (ads) used to re-run shield/volume on every iframe and hitch the stream.
   let frameShieldTimer = 0
-  webBrowserView.webContents.on('did-frame-finish-load', (_e, isMainFrame) => {
+  view.webContents.on('did-frame-finish-load', (_e, isMainFrame) => {
     if (isMainFrame) return
     if (frameShieldTimer) clearTimeout(frameShieldTimer)
     frameShieldTimer = setTimeout(() => {
       frameShieldTimer = 0
-      if (!webBrowserView || webBrowserView.webContents.isDestroyed()) return
-      scheduleBrowserAdShield(webBrowserView.webContents)
+      if (webBrowserView !== view || view.webContents.isDestroyed()) return
+      scheduleBrowserAdShield(view.webContents)
       // The player iframe often finishes after the top page: kick it now.
       if (typeof webBrowserSportsAutoplayKickNow === 'function') webBrowserSportsAutoplayKickNow()
     }, 800)
   })
   try {
-    webBrowserView.webContents.on('frame-created', (_e, details) => {
+    view.webContents.on('frame-created', (_e, details) => {
       const frame = details?.frame
       if (!frame) return
       setTimeout(() => {
@@ -4877,7 +4886,7 @@ function ensureWebBrowser() {
   } catch {
     /* older Electron */
   }
-  webBrowserView.webContents.on('console-message', (...args) => {
+  view.webContents.on('console-message', (...args) => {
     let message = ''
     if (typeof args[2] === 'string') message = args[2]
     else if (args[1] && typeof args[1] === 'object' && args[1] && 'message' in args[1]) {
@@ -4899,16 +4908,17 @@ function ensureWebBrowser() {
       mainWindow.webContents.send('browser:volume', { percent })
     }
   })
-  webBrowserView.webContents.on('did-fail-load', (_e, errorCode, errorDescription, validatedURL, isMainFrame) => {
+  view.webContents.on('did-fail-load', (_e, errorCode, errorDescription, validatedURL, isMainFrame) => {
     if (errorCode === -3) return
+    if (webBrowserView !== view) return
     const failedUrl = String(validatedURL || '')
     const dead =
       isDeadPlaceholderEmbedUrl(failedUrl) ||
       /ERR_NAME_NOT_RESOLVED|NAME_NOT_RESOLVED|DNS_PROBE/i.test(String(errorDescription || ''))
-    if (dead && webBrowserView && !webBrowserView.webContents.isDestroyed()) {
+    if (dead && !view.webContents.isDestroyed()) {
       let current = ''
       try {
-        current = webBrowserView.webContents.getURL() || ''
+        current = view.webContents.getURL() || ''
       } catch {
         current = ''
       }
@@ -4923,23 +4933,21 @@ function ensureWebBrowser() {
           current,
         )
       ) {
-        forceRiveEmbedHop(webBrowserView.webContents, 'fail-load')
+        forceRiveEmbedHop(view.webContents, 'fail-load')
       }
     }
     if (!isMainFrame) return
-    if (!mainWindow || mainWindow.isDestroyed() || !webBrowserView) return
+    if (!mainWindow || mainWindow.isDestroyed() || webBrowserView !== view) return
     mainWindow.webContents.send('browser:nav', {
-      url: validatedURL || webBrowserView.webContents.getURL(),
+      url: validatedURL || view.webContents.getURL(),
       title: dead
         ? 'Source failed — trying next server…'
         : `Failed to load (${errorDescription || errorCode})`,
-      canGoBack: navCanGoBack(webBrowserView.webContents),
-      canGoForward: navCanGoForward(webBrowserView.webContents),
+      canGoBack: navCanGoBack(view.webContents),
+      canGoForward: navCanGoForward(view.webContents),
       loading: false,
     })
   })
-
-  return webBrowserView
 }
 
 function applyBounds(view, bounds) {
@@ -5176,16 +5184,21 @@ function ensureMultiWebView(id) {
     return { action: 'deny' }
   })
   installEmbedNavGuard(view.webContents)
+  // A promoted tile (now the single view) keeps its webContents: tile handlers go quiet.
+  const isTile = () => multiWebViews.get(key) === view
   view.webContents.on('did-stop-loading', () => {
+    if (!isTile()) return
     scheduleBrowserAdShield(view.webContents)
     scheduleRiveEmbedAuto(view.webContents)
     scheduleMultiWebAutoplay(key)
   })
   view.webContents.on('dom-ready', () => {
+    if (!isTile()) return
     scheduleRiveEmbedAuto(view.webContents)
     scheduleMultiWebAutoplay(key)
   })
   view.webContents.on('console-message', (...args) => {
+    if (!isTile()) return
     let message = ''
     if (typeof args[2] === 'string') message = args[2]
     else if (args[1] && typeof args[1] === 'object' && args[1] && 'message' in args[1]) {
@@ -5197,9 +5210,11 @@ function ensureMultiWebView(id) {
   multiWebViews.set(key, view)
   installEscapeExitsFullscreen(view.webContents)
   view.webContents.on('focus', () => {
+    if (!isTile()) return
     emitMultiWebUserFocus(key)
   })
   view.webContents.on('before-input-event', (_event, input) => {
+    if (!isTile()) return
     if (!input || input.type !== 'mouseDown') return
     if (input.button && input.button !== 'left') return
     emitMultiWebUserFocus(key)
@@ -6868,7 +6883,13 @@ ipcMain.handle('browser:navigate', async (_event, url) => {
       current = ''
     }
     if (current && (sameBrowserPageUrl(current, target) || shouldKeepRiveGuestHop(current, target))) {
+      webBrowserPromoted = null
       return { ok: true, url: current, kept: true }
+    }
+    // Multi-view handed this live tile over (embed may have hopped servers since).
+    if (current && takePromotedBrowserUrl(current, target)) {
+      console.log('[browser] navigate kept promoted multiview tile', String(current).slice(0, 140))
+      return { ok: true, url: current, kept: true, promoted: true }
     }
     // PiP/hide may have left the guest muted — restore only if chrome volume is up.
     try {
@@ -7159,6 +7180,136 @@ ipcMain.handle('browser:multiHide', async (_event, payload) => {
 ipcMain.handle('browser:multiHideAll', async (_event, options) => {
   hideAllMultiWeb(options || {})
   return true
+})
+
+/** Multi-view closed down to one embed: that live tile becomes the single browser view
+ *  (same webContents - keeps playing, no reload). browser:navigate then reports kept. */
+let webBrowserPromoted = null
+
+function promoteMultiWebView(id, requestedUrls) {
+  const key = String(id || '')
+  const view = multiWebViews.get(key)
+  if (!key || !view || view.webContents.isDestroyed() || !mainWindow || mainWindow.isDestroyed()) {
+    return { ok: false, error: 'No live tile' }
+  }
+  const timers = multiWebAutoplayTimers.get(key) || []
+  for (const t of timers) clearTimeout(t)
+  multiWebAutoplayTimers.delete(key)
+  const wasAttached = multiWebAttached.has(key)
+  multiWebViews.delete(key)
+  multiWebAttached.delete(key)
+  if (multiWebAudioPrimary === key) multiWebAudioPrimary = ''
+  // Retire the parked single view (its handlers check webBrowserView !== view).
+  const old = webBrowserView
+  clearWebBrowserSportsAutoplay()
+  if (old && old !== view) {
+    try {
+      if (webBrowserAttached) mainWindow.contentView.removeChildView(old)
+    } catch {
+      /* ignore */
+    }
+    try {
+      old.webContents.destroy()
+    } catch {
+      /* ignore */
+    }
+  }
+  webBrowserView = view
+  if (!wasAttached) {
+    try {
+      mainWindow.contentView.addChildView(view)
+    } catch {
+      /* ignore */
+    }
+  }
+  webBrowserAttached = true
+  webBrowserVisible = true
+  try {
+    view.setVisible(true)
+  } catch {
+    /* ignore */
+  }
+  try {
+    const b = view.getBounds()
+    if (b && b.width >= 8 && b.height >= 8) webBrowserLastBounds = b
+  } catch {
+    /* ignore */
+  }
+  installWebBrowserHandlers(view)
+  let current = ''
+  try {
+    current = view.webContents.getURL() || ''
+  } catch {
+    current = ''
+  }
+  const urls = (Array.isArray(requestedUrls) ? requestedUrls : [requestedUrls])
+    .map((u) => String(u || ''))
+    .filter(Boolean)
+  webBrowserPromoted = { urls: [...urls, current].filter(Boolean), at: Date.now() }
+  const wantSound = !(Number.isFinite(webBrowserVolume) && webBrowserVolume <= 0.001)
+  try {
+    view.webContents.setBackgroundThrottling(false)
+    view.webContents.setAudioMuted(!wantSound)
+  } catch {
+    /* ignore */
+  }
+  if (wantSound) {
+    // Non-spotlight tiles were muted in-page too; bring this one back at chrome volume.
+    const level = Number.isFinite(webBrowserVolume) && webBrowserVolume > 0.001 ? webBrowserVolume : 1
+    const script = `(() => {
+      try {
+        window.__jiyuVolLevel = ${Number(level)};
+        document.querySelectorAll('video,audio').forEach((m) => {
+          m.muted = false;
+          try { m.volume = ${Number(level)}; } catch (_) {}
+          if (m.paused && !m.ended) {
+            const p = m.play();
+            if (p && typeof p.catch === 'function') p.catch(() => {});
+          }
+        });
+        return 'ok';
+      } catch (_) { return 'error'; }
+    })();`
+    for (const frame of collectContentFrames(view.webContents, { maxFrames: 8 })) {
+      try {
+        void frame.executeJavaScript(script, true).catch(() => {})
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  scheduleBrowserWheelVolume(view.webContents)
+  if (Number.isFinite(webBrowserVolume)) void applyWebBrowserVolume(webBrowserVolume, { emit: false })
+  console.log('[browser] promoted multi tile to single view', { id: key, url: current.slice(0, 140) })
+  try {
+    mainWindow.webContents.send('browser:nav', {
+      url: current,
+      title: view.webContents.getTitle(),
+      canGoBack: navCanGoBack(view.webContents),
+      canGoForward: navCanGoForward(view.webContents),
+      loading: false,
+    })
+  } catch {
+    /* ignore */
+  }
+  return { ok: true, url: current }
+}
+
+function takePromotedBrowserUrl(current, target) {
+  const entry = webBrowserPromoted
+  if (!entry) return false
+  if (Date.now() - entry.at > 20000) {
+    webBrowserPromoted = null
+    return false
+  }
+  const urls = [...entry.urls, current].filter(Boolean)
+  if (!urls.some((u) => sameBrowserPageUrl(u, target))) return false
+  webBrowserPromoted = null
+  return true
+}
+
+ipcMain.handle('browser:multiPromote', async (_event, payload) => {
+  return promoteMultiWebView(payload?.id, payload?.urls || payload?.url)
 })
 
 ipcMain.handle('desktop:isDesktop', async () => true)

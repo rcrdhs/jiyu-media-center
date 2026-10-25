@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { usePlayback } from '../context/PlaybackContext'
 import { useWebBrowser } from '../context/WebBrowserContext'
@@ -8,12 +8,16 @@ import {
   androidBrowserHide,
   androidBrowserMultiHide,
   androidBrowserMultiHideAll,
+  androidBrowserMultiPromote,
   isAndroidInAppBrowser,
 } from '../lib/androidBrowser'
 import {
   isNativeMedia3PlaybackItem,
   isWebEmbedPlaybackItem,
+  toAutoplayUrl,
 } from '../lib/webBrowser'
+import { notePromotedEmbed } from '../lib/multiviewCollapse'
+import type { StreamItem } from '../types'
 import { media3Hide, isAndroidMedia3Host } from '../lib/androidMedia3'
 import { MultiView } from './MultiView'
 import { Player } from './Player'
@@ -55,6 +59,14 @@ export function GlobalPlayer() {
   const { openInPip, parkForMultiview, closeBrowser } = useWebBrowser()
   const navigate = useNavigate()
   const location = useLocation()
+  // Multi-view collapsed to this native stream: keep rendering it through MultiView's
+  // tree (solo) so the same <video>/hls.js instance continues instead of restarting.
+  const [soloId, setSoloId] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!soloId) return
+    if (mode === 'off' || mode === 'multi' || item?.id !== soloId) setSoloId(null)
+  }, [soloId, mode, item?.id])
 
   // Hard-reset native web tiles whenever playback stops.
   useEffect(() => {
@@ -122,6 +134,44 @@ export function GlobalPlayer() {
     await exitOsFullscreen({ force: true })
   }
 
+  /** Closing tiles left one stream: leave Multi-view and continue it as the normal player. */
+  function collapseMultiviewTo(survivor: StreamItem) {
+    if (isWebEmbedPlaybackItem(survivor)) {
+      // Hand the live tile to the single browser view (no reload), then show /web.
+      const tileUrl = toAutoplayUrl(survivor.url)
+      const urls = [tileUrl, survivor.url]
+      notePromotedEmbed(urls)
+      if (isAndroidInAppBrowser()) {
+        void androidBrowserMultiPromote({ id: survivor.id, url: tileUrl })
+      } else {
+        void window.signalDesktop?.browserMultiPromote?.({ id: survivor.id, url: tileUrl, urls })
+      }
+      navigate(`/web?url=${encodeURIComponent(survivor.url)}`, {
+        replace: true,
+        state: {
+          from: returnTo || '/section/sports',
+          playerMode: 'embed',
+          pipOnBack: true,
+          continueWatch: {
+            id: survivor.id,
+            title: survivor.title,
+            poster: survivor.poster,
+            category: survivor.category,
+            playlistIndex: 0,
+            detailUrl: survivor.detailUrl || survivor.url,
+            playUrl: survivor.url,
+            transport: survivor.transport,
+            sourceKind: survivor.sourceKind,
+            source: survivor.source,
+          },
+        },
+      })
+      return
+    }
+    setSoloId(survivor.id)
+    navigate(`/watch/${survivor.id}`, { replace: true, state: { from: returnTo || '/' } })
+  }
+
   async function leaveFullPlayer() {
     forceSaveProgress()
     await exitFullscreenIfNeeded()
@@ -179,7 +229,8 @@ export function GlobalPlayer() {
     )
   }
 
-  // Keep MultiView for a single leftover tile too — remounting as /web kills playback.
+  // Multi-view grid (a lone tile only while docked / still adding). Closing tiles down
+  // to one stream collapses to the normal player via collapseMultiviewTo().
   if (mode === 'multi' && slots.length >= 1 && multiMounted) {
     return (
       <MultiView
@@ -187,8 +238,10 @@ export function GlobalPlayer() {
         primaryId={primaryId}
         onSpotlight={spotlight}
         onRemove={(id) => {
+          const remaining = slots.filter((slot) => slot.id !== id)
           void window.signalDesktop?.browserMultiHide?.({ id, destroy: true })
           if (isAndroidInAppBrowser()) void androidBrowserMultiHide({ id, destroy: true })
+          if (remaining.length === 1) collapseMultiviewTo(remaining[0])
           removeSlot(id)
         }}
         onCloseAll={() => {
@@ -231,25 +284,37 @@ export function GlobalPlayer() {
     return null
   }
 
-  return (
-    <Player
-      item={item}
-      layout={mode === 'pip' ? 'pip' : 'full'}
-      onExpand={() => {
-        expand()
-        navigate(`/watch/${item.id}`)
-      }}
-      onClose={() => {
-        if (mode === 'full' || mode === 'multi') {
-          void leaveFullPlayer()
-        } else {
-          forceSaveProgress()
-          void exitFullscreenIfNeeded().then(() => {
-            clearWebSurfaces({ blank: true })
-            stop()
-          })
-        }
-      }}
-    />
-  )
+  const current = item
+  const layout = mode === 'pip' ? 'pip' : 'full'
+  const onExpand = () => {
+    expand()
+    navigate(`/watch/${current.id}`)
+  }
+  const onClose = () => {
+    if (mode === 'full' || mode === 'multi') {
+      void leaveFullPlayer()
+    } else {
+      forceSaveProgress()
+      void exitFullscreenIfNeeded().then(() => {
+        clearWebSurfaces({ blank: true })
+        stop()
+      })
+    }
+  }
+
+  // Survivor of a collapsed Multi-view: same tree position as its tile = no restart.
+  if (soloId && current.id === soloId && slots.length === 1 && slots[0].id === soloId) {
+    return (
+      <MultiView
+        slots={slots}
+        primaryId={current.id}
+        onSpotlight={spotlight}
+        onRemove={() => {}}
+        onCloseAll={() => {}}
+        solo={{ layout, onExpand, onClose }}
+      />
+    )
+  }
+
+  return <Player item={current} layout={layout} onExpand={onExpand} onClose={onClose} />
 }

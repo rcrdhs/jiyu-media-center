@@ -52,6 +52,7 @@ contextBridge.exposeInMainWorld('signalDesktop', {
     return () => ipcRenderer.removeListener('browser:multi-focus', listener)
   },
   browserMultiHide: (payload) => ipcRenderer.invoke('browser:multiHide', payload),
+  browserMultiPromote: (payload) => ipcRenderer.invoke('browser:multiPromote', payload),
   browserMultiHideAll: (options) => ipcRenderer.invoke('browser:multiHideAll', options || {}),
   quit: () => ipcRenderer.invoke('app:quit'),
   exitFullScreen: () => ipcRenderer.invoke('app:exitFullScreen'),

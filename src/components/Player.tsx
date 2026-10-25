@@ -7275,7 +7275,7 @@ export function Player({
             </button>
           </div>
         </header>
-        <div className="player-stage">
+        <div key="player-stage" className="player-stage">
           <video
             key={videoMountKey}
             ref={videoRef}
@@ -7729,7 +7729,11 @@ export function Player({
         </div>
       )}
 
-      <div className="player-stage" onPointerUp={isPip ? undefined : toggleChromeOnTap}>
+      <div
+        key="player-stage"
+        className="player-stage"
+        onPointerUp={isPip ? undefined : toggleChromeOnTap}
+      >
         <video
           key={videoMountKey}
           ref={videoRef}

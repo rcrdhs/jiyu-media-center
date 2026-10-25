@@ -327,20 +327,24 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
           ? prev.primaryId
           : nextSlots[0].id
       let nextMode = prev.mode
+      let collapsed = false
       if (nextSlots.length === 1) {
-        // Stay in multi with one tile — collapsing to full unmounts WebEmbedTile,
-        // blanks the survivor, then reloads /web (black / 00:00).
-        if (prev.mode === 'multi') nextMode = 'multi'
-        else nextMode = prev.mode === 'pip' ? 'pip' : 'full'
+        // One stream left: leave Multi-view and continue it in the normal player.
+        // GlobalPlayer hands the live tile over (web embed promoted / same <video>),
+        // so the survivor keeps playing instead of reloading.
+        if (prev.mode === 'multi') {
+          nextMode = 'full'
+          collapsed = true
+        } else nextMode = prev.mode === 'pip' ? 'pip' : 'full'
       } else if (prev.mode === 'full') {
         nextMode = 'multi'
       }
       return {
         slots: nextSlots,
-        primaryId: nextPrimary,
+        primaryId: collapsed ? nextSlots[0].id : nextPrimary,
         mode: nextMode,
-        awaitingAdd: prev.awaitingAdd,
-        multiMounted: prev.multiMounted,
+        awaitingAdd: collapsed ? false : prev.awaitingAdd,
+        multiMounted: collapsed ? true : prev.multiMounted,
         returnTo: prev.returnTo,
         resumeItem: prev.resumeItem,
       }

@@ -355,8 +355,14 @@ final class GeckoOverlayController {
         .build();
 
     session = new GeckoSession(sessionSettings);
+    installSessionDelegates(session);
+    session.open(sRuntime);
+  }
+
+  /** Single-stream delegates (permissions, nav, progress, history) for {@code target}. */
+  private void installSessionDelegates(GeckoSession target) {
     // Without this, Clappr/JW stay in "Idle" — Gecko blocks audible autoplay by default.
-    session.setPermissionDelegate(
+    target.setPermissionDelegate(
       new GeckoSession.PermissionDelegate() {
         @Override
         public GeckoResult<Integer> onContentPermissionRequest(
@@ -378,7 +384,7 @@ final class GeckoOverlayController {
       }
     );
     // Workaround for Bug 1758212
-    session.setContentDelegate(
+    target.setContentDelegate(
       new GeckoSession.ContentDelegate() {
         @Override
         public void onTitleChange(GeckoSession s, String title) {
@@ -387,7 +393,7 @@ final class GeckoOverlayController {
         }
       }
     );
-    session.setProgressDelegate(
+    target.setProgressDelegate(
       new GeckoSession.ProgressDelegate() {
         @Override
         public void onPageStart(GeckoSession s, String url) {
@@ -414,7 +420,7 @@ final class GeckoOverlayController {
         }
       }
     );
-    session.setNavigationDelegate(
+    target.setNavigationDelegate(
       new GeckoSession.NavigationDelegate() {
         @Override
         public GeckoResult<AllowOrDeny> onLoadRequest(
@@ -517,7 +523,7 @@ final class GeckoOverlayController {
         }
       }
     );
-    session.setHistoryDelegate(
+    target.setHistoryDelegate(
       new GeckoSession.HistoryDelegate() {
         @Override
         public void onHistoryStateChange(
@@ -534,7 +540,54 @@ final class GeckoOverlayController {
       }
     );
 
-    session.open(sRuntime);
+  }
+
+  /**
+   * Multiview collapsed to one stream: adopt that tile's live session as the
+   * single-stream session (no reload). Returns false if the view refused it.
+   */
+  boolean adoptSession(GeckoSession adopted, String url) {
+    if (adopted == null || view == null) return false;
+    GeckoSession old = session;
+    if (old != null && old != adopted) {
+      try {
+        old.setActive(false);
+      } catch (Throwable ignored) {}
+      try {
+        view.releaseSession();
+      } catch (Throwable ignored) {}
+      try {
+        old.close();
+      } catch (Throwable ignored) {}
+    }
+    session = adopted;
+    bridgePorts.clear();
+    try {
+      installSessionDelegates(adopted);
+      adopted.setMediaSessionDelegate(null);
+    } catch (Throwable ignored) {}
+    try {
+      view.setSession(adopted);
+    } catch (Throwable t) {
+      try {
+        adopted.close();
+      } catch (Throwable ignored) {}
+      session = null;
+      ensureSession();
+      return false;
+    }
+    installBridge(adopted);
+    try {
+      adopted.setActive(true);
+    } catch (Throwable ignored) {}
+    String live = url == null ? "" : url;
+    currentUrl = live;
+    if (BrowserAdBlock.isPlayerEmbedHost(live)) lastPlayerEmbedUrl = live;
+    loading = false;
+    main.removeCallbacks(hideLoadCoverRunnable);
+    showLoadCover(false);
+    emitNav();
+    return true;
   }
 
   /**

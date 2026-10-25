@@ -27,6 +27,11 @@ interface MultiViewProps {
   /** Leave the grid; keep streams parked for remount. */
   onDismount?: () => void
   onMinimize?: () => void
+  /**
+   * One native stream left after closing tiles: render it as the normal full / PiP
+   * player in the same React position, so its <video> + hls.js keep playing.
+   */
+  solo?: { layout: 'full' | 'pip'; onExpand: () => void; onClose: () => void }
 }
 
 export function MultiView({
@@ -37,7 +42,9 @@ export function MultiView({
   onCloseAll,
   onDismount,
   onMinimize,
+  solo,
 }: MultiViewProps) {
+  const isSolo = Boolean(solo)
   const navigate = useNavigate()
   const { awaitingAdd, armMultiviewAdd, cancelMultiviewAdd, dismountMulti } =
     usePlayback()
@@ -52,6 +59,7 @@ export function MultiView({
   )
 
   useEffect(() => {
+    if (isSolo) return
     aliveRef.current = true
     document.documentElement.classList.add('multiview-open')
     // Kill single-stream Gecko completely so its audio cannot leak under Multiview.
@@ -64,7 +72,7 @@ export function MultiView({
       document.documentElement.classList.remove('multiview-open')
       void exitOsFullscreen({ onlyIfOwner: 'multi' })
     }
-  }, [electron, android])
+  }, [electron, android, isSolo])
 
   useEffect(() => {
     return subscribeFullscreenOwner((owner) => {
@@ -93,6 +101,7 @@ export function MultiView({
 
   // Clicking a non-primary native embed switches audio there.
   useEffect(() => {
+    if (isSolo) return
     const stop = window.signalDesktop?.onBrowserMultiFocus?.((state) => {
       const id = String(state?.id || '')
       if (!id) return
@@ -101,14 +110,14 @@ export function MultiView({
       onSpotlight(id)
     })
     return () => stop?.()
-  }, [slots, primaryId, onSpotlight])
+  }, [slots, primaryId, onSpotlight, isSolo])
 
   // Keep mute graph in sync whenever the spotlight changes.
   useEffect(() => {
-    if (!primaryId) return
+    if (isSolo || !primaryId) return
     if (electron) void window.signalDesktop?.browserMultiSpotlight?.({ id: primaryId })
     else if (android) void androidBrowserMultiSpotlight({ id: primaryId })
-  }, [primaryId, slots.length, electron, android])
+  }, [primaryId, slots.length, electron, android, isSolo])
 
   const toggleFullscreen = useCallback(() => {
     if (getFullscreenOwner() === 'multi') {
@@ -119,6 +128,7 @@ export function MultiView({
   }, [])
 
   useEffect(() => {
+    if (isSolo) return
     function onKey(e: KeyboardEvent) {
       if (e.key === 'f' || e.key === 'F') {
         const tag = (e.target as HTMLElement | null)?.tagName
@@ -133,14 +143,20 @@ export function MultiView({
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [toggleFullscreen])
+  }, [toggleFullscreen, isSolo])
 
   return (
     <div
-      className={`multi-view multi-view-full ${gridClass}${isFullscreen ? ' is-fullscreen' : ''}`}
-      role="dialog"
-      aria-label="Multi-view"
+      className={
+        solo
+          ? 'multi-view-solo'
+          : `multi-view multi-view-full ${gridClass}${isFullscreen ? ' is-fullscreen' : ''}`
+      }
+      role={solo ? undefined : 'dialog'}
+      aria-label={solo ? undefined : 'Multi-view'}
     >
+      {/* Children keep fixed positions so a solo survivor is not remounted. */}
+      {solo ? null : (
       <header className="multi-view-bar">
         <button
           type="button"
@@ -223,7 +239,8 @@ export function MultiView({
           </button>
         </div>
       </header>
-      {isFullscreen ? (
+      )}
+      {!solo && isFullscreen ? (
         <button
           type="button"
           className="multi-view-fs-exit"
@@ -233,9 +250,19 @@ export function MultiView({
           Exit full
         </button>
       ) : null}
-      <div className={`multi-view-grid ${gridClass}`}>
+      <div className={solo ? 'multi-view-solo-grid' : `multi-view-grid ${gridClass}`}>
         {slots.map((slot) =>
-          isWebEmbedPlaybackItem(slot) ? (
+          solo ? (
+            isWebEmbedPlaybackItem(slot) ? null : (
+              <Player
+                key={slot.id}
+                item={slot}
+                layout={solo.layout}
+                onExpand={solo.onExpand}
+                onClose={solo.onClose}
+              />
+            )
+          ) : isWebEmbedPlaybackItem(slot) ? (
             <WebEmbedTile
               key={slot.id}
               item={slot}

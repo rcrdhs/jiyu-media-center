@@ -314,6 +314,12 @@ declare global {
         destroy?: boolean
       }) => Promise<boolean>
       browserMultiHideAll?: (options?: { blank?: boolean }) => Promise<boolean>
+      /** Multi-view collapsed to one embed: that live tile becomes the single browser view. */
+      browserMultiPromote?: (payload: {
+        id: string
+        url?: string
+        urls?: string[]
+      }) => Promise<{ ok: boolean; url?: string; error?: string }>
       onSaveContinue?: (callback: () => void) => () => void
       continueSaved?: () => void
       quit?: () => Promise<void>

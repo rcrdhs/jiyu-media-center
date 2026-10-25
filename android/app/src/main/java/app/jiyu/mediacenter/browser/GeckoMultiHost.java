@@ -157,6 +157,8 @@ final class GeckoMultiHost {
   void hide(GeckoOverlayController gecko, String id) {
     if (id == null) return;
     Tile removed = tiles.remove(id);
+    // Unknown id (already promoted / closed): never blank the single overlay.
+    if (removed == null) return;
     releaseTile(removed);
     if (tiles.isEmpty()) {
       hideAll(gecko);
@@ -168,6 +170,49 @@ final class GeckoMultiHost {
     }
     if (!anyPrimary) tiles.values().iterator().next().primary = true;
     applyMute();
+  }
+
+  /** Live tile handed to the single overlay when Multi-view collapses to one stream. */
+  static final class Promoted {
+    final GeckoSession session;
+    final String url;
+
+    Promoted(GeckoSession session, String url) {
+      this.session = session;
+      this.url = url;
+    }
+  }
+
+  /**
+   * Take tile {@code id}'s session out of the grid without closing it, then end the
+   * multi host (other tiles released). Returns null if the tile has no live session.
+   */
+  Promoted detachForPromote(GeckoOverlayController gecko, String id) {
+    if (id == null) return null;
+    Tile tile = tiles.remove(id);
+    if (tile == null || tile.session == null) return null;
+    GeckoSession session = tile.session;
+    String url = tile.loadedUrl != null && !tile.loadedUrl.isEmpty() ? tile.loadedUrl : tile.url;
+    try {
+      if (tile.media != null) tile.media.muteAudio(false);
+    } catch (Throwable ignored) {}
+    tile.media = null;
+    tile.ports.clear();
+    tile.audioReady = false;
+    if (tile.view != null) {
+      tile.view.setVisibility(View.GONE);
+      try {
+        tile.view.releaseSession();
+      } catch (Throwable ignored) {}
+      ViewGroup parent = tile.view.getParent() instanceof ViewGroup
+        ? (ViewGroup) tile.view.getParent()
+        : null;
+      if (parent != null) parent.removeView(tile.view);
+      tile.view = null;
+    }
+    tile.session = null;
+    endWithoutBlank(gecko);
+    return new Promoted(session, url == null ? "" : url);
   }
 
   void hideAll(GeckoOverlayController gecko) {
