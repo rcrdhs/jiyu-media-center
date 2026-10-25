@@ -158,6 +158,26 @@ import {
 import { maskUserFacingMessage } from '../lib/sourceMask'
 import { upsertTorrentItems } from '../lib/torrentCatalogStore'
 import type { StreamItem, StreamPlaylistItem, TorrentStreamResult } from '../types'
+import {
+  type AnimeAudioMode,
+  type AnimeDubInfo,
+  animeDubDetailUrl,
+  animeDubHasEpisode,
+  effectiveAnimeAudioMode,
+  findAnimeEnglishDub,
+  getShowAnimeAudioMode,
+  isAnimeDubRowTitle,
+  isDualAudioReleaseName,
+  remuxUrlIsDub,
+  remuxUrlWithAudio,
+  setShowAnimeAudioMode,
+} from '../lib/animeAudio'
+
+/** What the anime Sub / Dub button can switch for the current episode. */
+type AnimeAudioChoice =
+  | { kind: 'm2box'; info: AnimeDubInfo; index: number; season: number; episode: number }
+  | { kind: 'hls'; en: number; ja: number }
+  | { kind: 'remux' }
 
 /** Remux pipe (`/stream.mp4`) is not byte-seekable — resume via ffmpeg `-ss` query. */
 function withResumeOffset(
@@ -236,6 +256,14 @@ function isTimeBuffered(video: HTMLVideoElement, time: number): boolean {
     /* ignore */
   }
   return false
+}
+
+/** M2Box row whose own subject is the English dub ("Title [English]"). */
+function isAnimeDubRowItem(item: Pick<StreamItem, 'title' | 'tags'>): boolean {
+  return (
+    isAnimeDubRowTitle(item.title) ||
+    Boolean(item.tags?.some((t) => /^m2box-dub-row$/i.test(String(t))))
+  )
 }
 
 function isRemuxPlaybackUrl(url: string | undefined): boolean {
@@ -637,6 +665,17 @@ export function Player({
   const [subsFetchTick, setSubsFetchTick] = useState(0)
   const subsEnabledRef = useRef(true)
   subsEnabledRef.current = subsEnabled
+  /** Anime Sub / Dub: switchable audio for this episode (null = no dub found, no button). */
+  const [animeAudioChoice, setAnimeAudioChoice] = useState<AnimeAudioChoice | null>(null)
+  const animeAudioChoiceRef = useRef<AnimeAudioChoice | null>(null)
+  animeAudioChoiceRef.current = animeAudioChoice
+  /** Audio currently playing for this anime episode. */
+  const [animeAudioMode, setAnimeAudioMode] = useState<AnimeAudioMode>('sub')
+  const animeAudioGenRef = useRef(0)
+  const animeAudioBusyRef = useRef(false)
+  /** Mid-episode Sub / Dub switch on an mp4 / remux source: reopen here, not at 0. */
+  const audioSwitchResumeRef = useRef(0)
+  const animeShowTitle = cleanShowDisplayTitle(item.title) || item.title
   /** Positive = delay subs (later); negative = show earlier. Fixes out-of-sync softsubs. */
   const [subtitleDelaySec, setSubtitleDelaySec] = useState(0)
   const subtitleDelayRef = useRef(0)
@@ -923,6 +962,9 @@ export function Player({
     setPlaylistOpen(false)
     playlistOpenRef.current = false
     setSubsEnabled(true)
+    setAnimeAudioChoice(null)
+    setAnimeAudioMode('sub')
+    primeAnimeAudioPicker(list, nextIndex)
     setEpisodeLoading(false)
     setLoadingPlaylistIndex(null)
     episodeFailRef.current = { index: -1, fails: 0 }
@@ -2889,6 +2931,9 @@ export function Player({
       episodeFailTimerRef.current = 0
     }
     const failGen = ++episodeFailGenRef.current
+    const animeAudioGen = ++animeAudioGenRef.current
+    setAnimeAudioChoice(null)
+    setAnimeAudioMode('sub')
 
     const clearVideoSource = () => {
       const video = videoRef.current
@@ -2968,11 +3013,55 @@ export function Player({
         const seMatch = /^S(\d{1,2})E(\d{1,4})$/i.exec(episodeKey)
         const season = seMatch ? Number(seMatch[1]) : 1
         const episode = seMatch ? Number(seMatch[2]) : index + 1
-        const resolved = await resolveM2BoxPlay(item.detailUrl || item.url, {
-          subjectId: item.m2boxSubjectId,
-          season,
-          episode,
-        })
+        // Anime Sub / Dub: M2Box lists the English dub ("… [English]") and the original
+        // as separate subjects. Play the one the preference asks for; any miss plays
+        // this row as before.
+        const m2Anime = shouldPreferRivestreamJapaneseAudio(item)
+        const isDubRow = isAnimeDubRowItem(item)
+        let m2Info: AnimeDubInfo | null | undefined
+        let m2Mode: AnimeAudioMode = isDubRow ? 'dub' : 'sub'
+        let resolved: Awaited<ReturnType<typeof resolveM2BoxPlay>> | null = null
+        if (m2Anime) {
+          const want: AnimeAudioMode = isDubRow
+            ? getShowAnimeAudioMode(animeShowTitle) ?? 'dub'
+            : effectiveAnimeAudioMode(animeShowTitle)
+          if (want !== m2Mode) {
+            setStatus(want === 'dub' ? 'Looking for the English dub…' : 'Looking for Japanese audio…')
+            m2Info = await withTimeout(
+              findAnimeEnglishDub(animeShowTitle),
+              10_000,
+              'Dub lookup timed out.',
+            ).catch(() => null)
+            if (episodeFailGenRef.current !== failGen) return
+            const alt = want === 'dub' ? m2Info?.dub : m2Info?.original
+            if (m2Info && alt && animeDubHasEpisode(m2Info, season, episode)) {
+              const altResolved = await withTimeout(
+                resolveM2BoxPlay(animeDubDetailUrl(alt), {
+                  subjectId: alt.subjectId,
+                  season,
+                  episode,
+                }),
+                20_000,
+                'Audio took too long to open.',
+              ).catch(() => null)
+              if (episodeFailGenRef.current !== failGen) return
+              if (altResolved?.ok && altResolved.url) {
+                resolved = altResolved
+                m2Mode = want
+              }
+            }
+            if (!resolved && want === 'dub') {
+              flash('No English dub for this episode — Japanese with subtitles')
+            }
+          }
+        }
+        if (!resolved) {
+          resolved = await resolveM2BoxPlay(item.detailUrl || item.url, {
+            subjectId: item.m2boxSubjectId,
+            season,
+            episode,
+          })
+        }
         if (episodeFailGenRef.current !== failGen) return
         if (!resolved.ok || !resolved.url) {
           failOnEpisode(resolved.ok === false ? resolved.error : 'Could not resolve M2Box stream')
@@ -3016,6 +3105,22 @@ export function Player({
         })
         if (subtitleUrl) setSubsFetchTick((n) => n + 1)
         setEpisodeLoading(false)
+        if (m2Anime) {
+          const playing = m2Mode
+          if (playing === 'dub') setSubsEnabled(false)
+          // Offer the button only when the other audio exists for this show.
+          const mark = (info: AnimeDubInfo | null) => {
+            if (!info || animeAudioGenRef.current !== animeAudioGen) return
+            if (!animeDubHasEpisode(info, season, episode)) return
+            if (playing === 'dub' && isDubRow && !info.original) return
+            const choice: AnimeAudioChoice = { kind: 'm2box', info, index, season, episode }
+            animeAudioChoiceRef.current = choice
+            setAnimeAudioChoice(choice)
+            setAnimeAudioMode(playing)
+          }
+          if (m2Info !== undefined) mark(m2Info)
+          else void findAnimeEnglishDub(animeShowTitle).then(mark)
+        }
       } catch (err) {
         failOnEpisode(err instanceof Error ? err.message : 'Could not load M2Box episode')
         return
@@ -3066,7 +3171,9 @@ export function Player({
               const attempt = await withTimeout(
                 torrentStream(uri, {
                   keepOthers: inMultiview,
-                  preferJapaneseAudio: shouldPreferRivestreamJapaneseAudio(item),
+                  preferJapaneseAudio:
+                    shouldPreferRivestreamJapaneseAudio(item) &&
+                    effectiveAnimeAudioMode(animeShowTitle) !== 'dub',
                 }),
                 TORRENT_CANDIDATE_TIMEOUT_MS,
                 'Release took too long to start — trying another source.',
@@ -3107,6 +3214,11 @@ export function Player({
                   },
             ),
           )
+          markRemuxDualAudio(
+            animeAudioGen,
+            `${nyaa.choice.title} ${result.name || ''} ${result.fileName || ''}`,
+            result.url,
+          )
           index = nyaa.playIndex
           // Torrent now: a Movy referrer from an earlier attempt must not stick.
           activePlaybackReferrerRef.current = ''
@@ -3123,15 +3235,105 @@ export function Player({
           return 'played'
         }
 
+        // Anime Sub / Dub. Dub preference: try the English dub (M2Box) first; on any miss
+        // fall through to the normal Japanese chain. Sub: unchanged chain, and the dub
+        // lookup runs after playback starts (cached per show) to decide on the button.
+        const animeAudio = shouldPreferRivestreamJapaneseAudio(item)
+        const dubFits = (info: AnimeDubInfo | null): info is AnimeDubInfo => {
+          if (!info || !animeDubHasEpisode(info, season, episode)) return false
+          // M2Box sometimes merges seasons (e.g. 47 eps in "S1") — numbering would be off.
+          const local = playlist
+            .map((row) => /^S(\d{1,2})E(\d{1,4})$/i.exec(playlistEpisodeKey(row) || ''))
+            .filter((m): m is RegExpExecArray => Boolean(m) && Number(m![1]) === season)
+            .map((m) => Number(m[2]))
+          const localMax = local.length ? Math.max(...local) : 0
+          const m2Max = info.seasons.find((s) => s.season === season)?.maxEpisode || 0
+          return !localMax || !m2Max || m2Max <= localMax + 2
+        }
+        const markDubPicker = (info: AnimeDubInfo, playing: AnimeAudioMode) => {
+          if (animeAudioGenRef.current !== animeAudioGen) return
+          const cur = animeAudioChoiceRef.current
+          if (cur && cur.kind !== 'm2box') return
+          const choice: AnimeAudioChoice = { kind: 'm2box', info, index, season, episode }
+          animeAudioChoiceRef.current = choice
+          setAnimeAudioChoice(choice)
+          setAnimeAudioMode(playing)
+        }
+        const tryPlayAnimeDub = async (): Promise<boolean> => {
+          setStatus('Looking for the English dub…')
+          const info = await withTimeout(
+            findAnimeEnglishDub(showName),
+            10_000,
+            'Dub lookup timed out.',
+          ).catch(() => null)
+          if (episodeFailGenRef.current !== failGen) return false
+          if (!dubFits(info)) {
+            flash('No English dub for this episode — Japanese with subtitles')
+            return false
+          }
+          setStatus('Opening English dub…')
+          const resolved = await withTimeout(
+            resolveM2BoxPlay(animeDubDetailUrl(info.dub), {
+              subjectId: info.dub.subjectId,
+              season,
+              episode,
+            }),
+            20_000,
+            'Dub took too long to open.',
+          ).catch(() => null)
+          if (episodeFailGenRef.current !== failGen) return false
+          if (!resolved || !resolved.ok || !resolved.url) {
+            flash('English dub unavailable right now — Japanese with subtitles')
+            return false
+          }
+          const dubUrl = resolved.url
+          hlsFallbackMetaRef.current = null
+          activePlaybackReferrerRef.current = resolved.referer || ''
+          if (window.signalDesktop?.setPlaybackHeaders) {
+            void window.signalDesktop.setPlaybackHeaders({
+              url: dubUrl,
+              referrer: resolved.referer,
+            })
+          }
+          // Subtitles stay available (Subs button) — the sidecar finds them as usual.
+          setLocalPlaylist((prev) => {
+            const base = prev ?? item.playlist ?? []
+            return base.map((row, i) =>
+              i === index
+                ? {
+                    ...row,
+                    url: dubUrl,
+                    episodeKey: row.episodeKey || episodeKey || undefined,
+                    subtitleUrl: undefined,
+                    subtitleKind: undefined,
+                  }
+                : row,
+            )
+          })
+          markDubPicker(info, 'dub')
+          setSubsEnabled(false)
+          setStatus('Playing · English dub')
+          return true
+        }
+        const dubPlayed =
+          animeAudio && effectiveAnimeAudioMode(showName) === 'dub'
+            ? await tryPlayAnimeDub()
+            : false
+        if (episodeFailGenRef.current !== failGen) return
+
         let tmdbId = rivestreamTmdbIdFromItem(item)
-        if (item.category === 'anime') {
+        if (dubPlayed) {
+          /* English dub (M2Box) — playlist row already set */
+        } else if (item.category === 'anime') {
           setStatus('Looking up show…')
           tmdbId = (await resolveAnimeTmdbTvId(item.title, tmdbId)) || ''
         } else if (!tmdbId && isYmoviesCatalogItem(item)) {
           setStatus('Looking up show…')
           tmdbId = (await lookupRivestreamTmdbId(item.title)) || ''
         }
-        if (!tmdbId) {
+        if (dubPlayed) {
+          /* English dub playing */
+        } else if (!tmdbId) {
           const nyaa = await tryPlayFromNyaa()
           if (nyaa === 'failed') return
           if (nyaa === 'skip') {
@@ -3405,6 +3607,12 @@ export function Player({
             }
           }
         }
+        if (animeAudio && !dubPlayed) {
+          // Japanese is playing — find out (cached, off the critical path) whether a dub exists.
+          void findAnimeEnglishDub(showName).then((info) => {
+            if (dubFits(info)) markDubPicker(info, 'sub')
+          })
+        }
       } catch (err) {
         failOnEpisode(err instanceof Error ? err.message : 'Could not load episode')
         return
@@ -3481,7 +3689,9 @@ export function Player({
             attempt = await withTimeout(
               torrentStream(uri, {
                 keepOthers: inMultiview,
-                preferJapaneseAudio: shouldPreferRivestreamJapaneseAudio(item),
+                preferJapaneseAudio:
+                    shouldPreferRivestreamJapaneseAudio(item) &&
+                    effectiveAnimeAudioMode(animeShowTitle) !== 'dub',
               }),
               TORRENT_CANDIDATE_TIMEOUT_MS,
               'Release took too long to start — trying another source.',
@@ -3558,6 +3768,13 @@ export function Player({
             return row
           })
         })
+        if (result?.ok && result.url) {
+          markRemuxDualAudio(
+            animeAudioGen,
+            `${entry.title || ''} ${result.name || ''} ${result.fileName || ''}`,
+            result.url,
+          )
+        }
       } catch (err) {
         failOnEpisode(err instanceof Error ? err.message : 'Could not start episode')
         return
@@ -3585,6 +3802,7 @@ export function Player({
     if (index !== playlistIndex || options?.fromRestart) {
       autoSeekResumeOnceRef.current = 0
       stallHoldPlayheadRef.current = 0
+      audioSwitchResumeRef.current = 0
     }
     if (options?.fromRestart) {
       // Give the new load its own guard window, and remount even when the
@@ -3601,6 +3819,174 @@ export function Player({
     bumpChrome()
   }
   selectPlaylistItemRef.current = selectPlaylistItem
+
+  /**
+   * First episode opened by the show page (or a resume): tell the Sub / Dub button what is
+   * playing. Episodes the Player opens itself are marked in selectPlaylistItem.
+   */
+  function primeAnimeAudioPicker(list: StreamPlaylistItem[] | null, startIndex: number) {
+    animeAudioChoiceRef.current = null
+    if (!shouldPreferRivestreamJapaneseAudio(item)) return
+    const gen = ++animeAudioGenRef.current
+    const row = list?.[startIndex]
+    const url = row?.url || (list ? '' : item.url) || ''
+    if (!url) return
+    if (isRemuxPlaybackUrl(url)) {
+      markRemuxDualAudio(gen, String(row?.fileName || item.title || ''), url)
+      return
+    }
+    const tags = item.tags ?? []
+    const playingDub =
+      tags.some((t) => /^anime-dub$/i.test(String(t))) ||
+      (isAnimeDubRowItem(item) && !tags.some((t) => /^anime-sub$/i.test(String(t))))
+    if (playingDub) {
+      setAnimeAudioMode('dub')
+      setSubsEnabled(false)
+    }
+    const key = /^S(\d{1,2})E(\d{1,4})$/i.exec(row?.episodeKey || parseEpisodeKey(item.title) || '')
+    const season = key ? Number(key[1]) : 1
+    const episode = key ? Number(key[2]) : startIndex + 1
+    const localMax = (list ?? [])
+      .map((r) => /^S(\d{1,2})E(\d{1,4})$/i.exec(r.episodeKey || ''))
+      .reduce((max, m) => (m && Number(m[1]) === season ? Math.max(max, Number(m[2])) : max), 0)
+    const showTitle = animeShowTitle
+    void findAnimeEnglishDub(showTitle).then((info) => {
+      if (animeAudioGenRef.current !== gen || animeAudioChoiceRef.current) return
+      const m2Max = info?.seasons.find((x) => x.season === season)?.maxEpisode || 0
+      const fits =
+        Boolean(info) &&
+        animeDubHasEpisode(info!, season, episode) &&
+        (isM2BoxCatalogItem(item) || !localMax || !m2Max || m2Max <= localMax + 2)
+      if (!info || !fits) {
+        if (!playingDub && effectiveAnimeAudioMode(showTitle) === 'dub') {
+          flash('No English dub for this show — Japanese with subtitles')
+        }
+        return
+      }
+      // Dub row with no separate original listed: nothing to switch to.
+      if (playingDub && !info.original && isAnimeDubRowItem(item)) return
+      const choice: AnimeAudioChoice = { kind: 'm2box', info, index: startIndex, season, episode }
+      animeAudioChoiceRef.current = choice
+      setAnimeAudioChoice(choice)
+      setAnimeAudioMode(playingDub ? 'dub' : 'sub')
+    })
+  }
+
+  /** Dual-audio anime torrent (Japanese + English): the remuxer can switch tracks. */
+  function markRemuxDualAudio(gen: number, releaseName: string, url: string) {
+    if (!shouldPreferRivestreamJapaneseAudio(item)) return
+    if (animeAudioGenRef.current !== gen) return
+    if (!isRemuxPlaybackUrl(url) || !isDualAudioReleaseName(releaseName)) return
+    const choice: AnimeAudioChoice = { kind: 'remux' }
+    animeAudioChoiceRef.current = choice
+    setAnimeAudioChoice(choice)
+    const dub = remuxUrlIsDub(url)
+    setAnimeAudioMode(dub ? 'dub' : 'sub')
+    if (dub) setSubsEnabled(false)
+  }
+
+  /** Sub / Dub button: switch this episode's audio, keep the position, remember per show. */
+  async function switchAnimeAudio(next: AnimeAudioMode) {
+    const choice = animeAudioChoice
+    if (!choice || next === animeAudioMode || animeAudioBusyRef.current) return
+    const video = videoRef.current
+    const at = video ? Math.max(0, Math.floor(absolutePlayhead(video))) : 0
+    const prevMode = animeAudioMode
+    const label = next === 'dub' ? 'English dub' : 'Japanese audio · subtitles on'
+    setShowAnimeAudioMode(animeShowTitle, next)
+    setAnimeAudioMode(next)
+    setSubsEnabled(next === 'sub')
+    bumpChrome()
+    if (choice.kind === 'hls') {
+      const hls = hlsInstanceRef.current
+      if (hls) hls.audioTrack = next === 'dub' ? choice.en : choice.ja
+      flash(label)
+      return
+    }
+    const reopenAt = (url: string) => {
+      if (at >= 5 && isVodCategory(item.category)) {
+        upsertContinueEntry(
+          {
+            id: item.id,
+            title: item.title,
+            poster: item.poster,
+            category: item.category,
+            playlistIndex,
+            episodeTitle: hasPlaylist ? activePlaylistItem.title : undefined,
+            currentTime: at,
+            duration: 0,
+            runtimeSeconds: item.runtimeSeconds,
+            torrentUri: item.torrentUri,
+            detailUrl: item.detailUrl,
+            playUrl: item.detailUrl || item.torrentUri,
+            source: item.source,
+          },
+          { allowUnknownDuration: true, playbackUrl: url },
+        )
+        if (/\.m3u8(?:[?#]|$)/i.test(url)) {
+          resumePendingRef.current = true
+          autoSeekResumeOnceRef.current = at
+        } else {
+          audioSwitchResumeRef.current = at
+        }
+      }
+      setLocalPlaylist((prev) => {
+        const base = prev ?? item.playlist ?? []
+        return base.map((row, i) => (i === playlistIndex ? { ...row, url } : row))
+      })
+    }
+    if (choice.kind === 'remux') {
+      reopenAt(remuxUrlWithAudio(stripResumeOffset(activePlaylistItem.url), next))
+      flash(label)
+      return
+    }
+    const target = next === 'dub' ? choice.info.dub : choice.info.original
+    if (!target) {
+      // No separate original-audio stream listed — reopen this episode the normal way.
+      if (at >= 5) {
+        audioSwitchResumeRef.current = at
+        autoSeekResumeOnceRef.current = at
+      }
+      flash(label)
+      void selectPlaylistItemRef.current(playlistIndex, { rotateSource: true })
+      return
+    }
+    animeAudioBusyRef.current = true
+    setStatus(next === 'dub' ? 'Opening English dub…' : 'Opening Japanese audio…')
+    try {
+      const resolved = await withTimeout(
+        resolveM2BoxPlay(animeDubDetailUrl(target), {
+          subjectId: target.subjectId,
+          season: choice.season,
+          episode: choice.episode,
+        }),
+        20_000,
+        'Audio switch timed out.',
+      )
+      if (!resolved.ok || !resolved.url) throw new Error('unavailable')
+      if (animeAudioChoiceRef.current !== choice) return
+      hlsFallbackMetaRef.current = null
+      activePlaybackReferrerRef.current = resolved.referer || ''
+      if (window.signalDesktop?.setPlaybackHeaders) {
+        void window.signalDesktop.setPlaybackHeaders({
+          url: resolved.url,
+          referrer: resolved.referer,
+        })
+      }
+      reopenAt(resolved.url)
+      flash(label)
+    } catch {
+      if (animeAudioChoiceRef.current === choice) {
+        setShowAnimeAudioMode(animeShowTitle, prevMode)
+        setAnimeAudioMode(prevMode)
+        setSubsEnabled(prevMode === 'sub')
+      }
+      flash(next === 'dub' ? 'English dub unavailable right now' : 'Japanese audio unavailable right now')
+      setStatus('Playing')
+    } finally {
+      animeAudioBusyRef.current = false
+    }
+  }
 
   function moveInPlaylist(delta: number) {
     void selectPlaylistItem(playlistIndex + delta)
@@ -5464,8 +5850,12 @@ export function Player({
         }
         let settled = false
         let resumeAttempt = 0
+        // Sub / Dub switch mid-episode: reopen at the same spot (no Resume prompt).
+        const audioSwitchAt = audioSwitchResumeRef.current
+        audioSwitchResumeRef.current = 0
         const saved = getContinueEntry(item.id)
         const resumeAt =
+          audioSwitchAt < 5 &&
           saved &&
           !restartGuardRef.current &&
           saved.playlistIndex === playlistIndex &&
@@ -5605,9 +5995,28 @@ export function Player({
         video.addEventListener('timeupdate', onProgressTick)
 
         // Always open at t=0 first so the swarm's priority pieces can start playback.
-        setTimelineOffsetSeconds(0)
-        if (resumeAt >= 5) setResumeOffer(resumeAt)
-        video.src = activePlaylistItem.url
+        if (audioSwitchAt >= 5 && isRemuxPlaybackUrl(activePlaylistItem.url)) {
+          setTimelineOffsetSeconds(audioSwitchAt)
+          watchClockRef.current = { lastTs: 0, accrued: audioSwitchAt }
+          video.src = withResumeOffset(activePlaylistItem.url, audioSwitchAt, { exact: true })
+        } else {
+          setTimelineOffsetSeconds(0)
+          if (resumeAt >= 5) setResumeOffer(resumeAt)
+          if (audioSwitchAt >= 5) {
+            video.addEventListener(
+              'loadedmetadata',
+              () => {
+                try {
+                  video.currentTime = audioSwitchAt
+                } catch {
+                  /* ignore */
+                }
+              },
+              { once: true },
+            )
+          }
+          video.src = activePlaylistItem.url
+        }
         video.load()
         void ensureVideoAutoplay(video)
       })
@@ -5868,11 +6277,40 @@ export function Player({
           applyHlsQuality()
           // Prefer Japanese (anime) or English audio when the HLS master lists multiple tracks.
           // MULTI packs often default to French — don't leave that as the active group.
+          let hlsDualAnnounced = false
           const pickPreferredAudioTrack = () => {
             try {
               const tracks = hls?.audioTracks || []
               if (tracks.length < 2) return
-              const wantJa = shouldPreferRivestreamJapaneseAudio(item)
+              const animeItem = shouldPreferRivestreamJapaneseAudio(item)
+              if (animeItem) {
+                // Japanese + English in one stream → Sub / Dub button, no reload to switch.
+                const blobOf = (t: (typeof tracks)[number]) =>
+                  `${t.name || ''} ${t.lang || ''}`.toLowerCase()
+                const jaIdx = tracks.findIndex((t) =>
+                  /japanese|\bjpn?\b|\bja\b|\bjp\b|nihongo/.test(blobOf(t)),
+                )
+                const enIdx = tracks.findIndex((t) =>
+                  /english|\beng\b|\ben-?us\b|^en$|\ben-/.test(blobOf(t)),
+                )
+                if (jaIdx >= 0 && enIdx >= 0 && jaIdx !== enIdx) {
+                  const dub =
+                    effectiveAnimeAudioMode(cleanShowDisplayTitle(item.title) || item.title) ===
+                    'dub'
+                  const want = dub ? enIdx : jaIdx
+                  if (hls && hls.audioTrack !== want) hls.audioTrack = want
+                  if (!hlsDualAnnounced) {
+                    hlsDualAnnounced = true
+                    const choice: AnimeAudioChoice = { kind: 'hls', en: enIdx, ja: jaIdx }
+                    animeAudioChoiceRef.current = choice
+                    setAnimeAudioChoice(choice)
+                    setAnimeAudioMode(dub ? 'dub' : 'sub')
+                    if (dub) setSubsEnabled(false)
+                  }
+                  return
+                }
+              }
+              const wantJa = animeItem
               const scored = tracks.map((t, index) => {
                 const blob = `${t.name || ''} ${t.lang || ''} ${t.groupId || ''}`.toLowerCase()
                 let score = 0
@@ -7102,6 +7540,21 @@ export function Player({
                 }}
               />
             </label>
+            {animeAudioChoice && (
+              <button
+                type="button"
+                className={`ghost-btn control-btn${animeAudioMode === 'dub' ? ' is-armed' : ''}`}
+                onClick={() => void switchAnimeAudio(animeAudioMode === 'dub' ? 'sub' : 'dub')}
+                aria-pressed={animeAudioMode === 'dub'}
+                title={
+                  animeAudioMode === 'dub'
+                    ? 'Playing the English dub - click for Japanese audio with subtitles'
+                    : 'Playing Japanese audio with subtitles - click for the English dub'
+                }
+              >
+                {animeAudioMode === 'dub' ? 'Dub' : 'Sub'}
+              </button>
+            )}
             {showSubsControls && (
               <>
                 <button

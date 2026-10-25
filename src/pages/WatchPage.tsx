@@ -33,6 +33,7 @@ import {
 } from '../lib/torrents'
 import { cinetaroCinextreamMovieEmbedUrl } from '../lib/cinetaro'
 import { resolveM2BoxPlay } from '../lib/m2box'
+import { isAnimeDubRowTitle, pickAnimeAudioSubject } from '../lib/animeAudio'
 import { ensureEpisodeSoftSubtitles, resolveSoftSubtitles } from '../lib/softSubs'
 import {
   lookupTmdbMovieMeta,
@@ -440,14 +441,39 @@ export function WatchPage() {
         }
         const resumeTitle = saved?.episodeTitle || saved?.title || item!.title
         const { season, episode } = m2boxSeasonEpisode(resumeTitle)
-        const [resolved, episodeList] = await Promise.all([
-          resolveM2BoxPlay(item!.detailUrl || item!.url, {
+        // Anime: resume in the audio the user picked (English dub or Japanese).
+        const animeRow = shouldPreferRivestreamJapaneseAudio(item!)
+        const dubRow = animeRow && isAnimeDubRowTitle(item!.title)
+        const resolveResume = async () => {
+          if (animeRow) {
+            const pick = await pickAnimeAudioSubject({
+              title: cleanShowDisplayTitle(item!.title) || item!.title,
+              season,
+              episode,
+              m2boxRow: true,
+              dubRow,
+            })
+            if (pick) {
+              const alt = await resolveM2BoxPlay(pick.detailUrl, {
+                subjectId: pick.subjectId,
+                season,
+                episode,
+              }).catch(() => null)
+              if (alt?.ok) return { resolved: alt, pick }
+            }
+          }
+          const own = await resolveM2BoxPlay(item!.detailUrl || item!.url, {
             subjectId: item!.m2boxSubjectId,
             season,
             episode,
-          }),
+          })
+          return { resolved: own, pick: null }
+        }
+        const [{ resolved, pick: resumePick }, episodeList] = await Promise.all([
+          resolveResume(),
           resolveShowEpisodes(item!, itemsRef.current),
         ])
+        const playingDub = resumePick ? resumePick.mode === 'dub' : dubRow
         if (cancelled) return
         if (!resolved.ok) {
           navigate(`/show/${item!.id}`, { replace: true, state: { from: returnTo } })
@@ -534,14 +560,18 @@ export function WatchPage() {
             transport: 'direct',
             tags: [
               ...new Set([
-                ...(item!.tags ?? []),
+                ...(item!.tags ?? []).filter((t) => !/^(?:anime-(?:dub|sub)|m2box-dub-row)$/i.test(String(t))),
                 'm2box',
                 resolved.format,
                 ...(subtitleUrl ? ['softsub'] : []),
+                ...(animeRow ? [playingDub ? 'anime-dub' : 'anime-sub'] : []),
+                ...(dubRow ? ['m2box-dub-row'] : []),
               ]),
             ],
             runtimeSeconds: resolved.durationSeconds ?? item!.runtimeSeconds,
-            m2boxSubjectId: resolved.subjectId || item!.m2boxSubjectId,
+            m2boxSubjectId: resumePick
+              ? item!.m2boxSubjectId
+              : resolved.subjectId || item!.m2boxSubjectId,
           },
           { forceFull: true, returnTo: returnTo ?? `/show/${item!.id}` },
         )

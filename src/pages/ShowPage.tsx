@@ -29,6 +29,11 @@ import {
   type EpisodeChoice,
 } from '../lib/torrents'
 import { resolveM2BoxPlay } from '../lib/m2box'
+import {
+  effectiveAnimeAudioMode,
+  isAnimeDubRowTitle,
+  pickAnimeAudioSubject,
+} from '../lib/animeAudio'
 import { resolveNetMirrorPlay } from '../lib/netmirror'
 import { resolveYmoviesPlay } from '../lib/ymovies'
 import { resolveCinetaroPlay } from '../lib/cinetaro'
@@ -305,7 +310,9 @@ export function ShowPage() {
           const attempt = await withTimeout(
             torrentStream(candidate, {
               keepOthers,
-              preferJapaneseAudio: shouldPreferRivestreamJapaneseAudio(item),
+              preferJapaneseAudio:
+                shouldPreferRivestreamJapaneseAudio(item) &&
+                effectiveAnimeAudioMode(cleanShowDisplayTitle(item.title) || item.title) !== 'dub',
             }),
             TORRENT_CANDIDATE_TIMEOUT_MS,
             'Release took too long to start — trying another source.',
@@ -360,6 +367,62 @@ export function ShowPage() {
           torrentInfoHash: result.infoHash,
           subtitleUrl: result.subtitleUrl ?? result.playlist?.[0]?.subtitleUrl,
           subtitleKind: result.subtitleKind ?? result.playlist?.[0]?.subtitleKind,
+        },
+        { forceFull: true, returnTo: `/show/${item.id}` },
+      )
+      return true
+    }
+
+    /** Anime, Dub preference: English dub from M2Box. False → the normal Japanese chain. */
+    const tryPlayAnimeDubNative = async (season: number, episode: number): Promise<boolean> => {
+      const showName = cleanShowDisplayTitle(item.title) || item.title
+      if (effectiveAnimeAudioMode(showName) !== 'dub') return false
+      const localMax = episodes.reduce((max, ep) => {
+        const m = /^S(\d{1,2})E(\d{1,4})$/i.exec(ep.key)
+        return m && Number(m[1]) === season ? Math.max(max, Number(m[2])) : max
+      }, 0)
+      setPrepareStatus('Looking for the English dub…')
+      const pick = await pickAnimeAudioSubject({
+        title: showName,
+        season,
+        episode,
+        m2boxRow: false,
+        localMaxEpisode: localMax || undefined,
+      })
+      if (!pick || !stillCurrent()) return false
+      setPrepareStatus('Opening English dub…')
+      let resolved: Awaited<ReturnType<typeof resolveM2BoxPlay>>
+      try {
+        resolved = await withTimeout(
+          resolveM2BoxPlay(pick.detailUrl, { subjectId: pick.subjectId, season, episode }),
+          20_000,
+          'Dub took too long to open.',
+        )
+      } catch {
+        return false
+      }
+      if (!resolved.ok || !resolved.url || !stillCurrent()) return false
+      const dubUrl = resolved.url
+      if (window.signalDesktop?.setPlaybackHeaders) {
+        void window.signalDesktop.setPlaybackHeaders({ url: dubUrl, referrer: resolved.referer })
+      }
+      // English subtitles stay available (Subs button); the Player finds them as usual.
+      const playlist: StreamPlaylistItem[] = episodes.map((ep, i) =>
+        i === index
+          ? { title: ep.title, url: dubUrl, episodeKey: ep.key }
+          : { title: ep.title, url: '', episodeKey: ep.key },
+      )
+      play(
+        {
+          ...item,
+          title: `${showName} · ${chosen.key}`,
+          description: chosen.title || item.description,
+          url: dubUrl,
+          httpReferrer: resolved.referer,
+          playlist,
+          transport: 'direct',
+          tags: [...new Set([...(item.tags ?? []).filter((t) => !/^(?:anime-(?:dub|sub)|m2box-dub-row)$/i.test(String(t))), 'anime-dub', resolved.format])],
+          runtimeSeconds: mergeRuntimeSeconds(resolved.durationSeconds, item.runtimeSeconds),
         },
         { forceFull: true, returnTo: `/show/${item.id}` },
       )
@@ -608,15 +671,49 @@ export function ShowPage() {
         const seMatch = /^S(\d{1,2})E(\d{1,4})$/i.exec(chosen.key)
         const season = seMatch ? Number(seMatch[1]) : 1
         const episode = seMatch ? Number(seMatch[2]) : index + 1
-        const resolved = await resolveM2BoxPlay(item.detailUrl || item.url, {
-          subjectId: item.m2boxSubjectId,
-          season,
-          episode,
-        })
+        const animeRow = shouldPreferRivestreamJapaneseAudio(item)
+        const dubRow = animeRow && isAnimeDubRowTitle(item.title)
+        let audioPick = animeRow
+          ? await pickAnimeAudioSubject({
+              title: cleanShowDisplayTitle(item.title) || item.title,
+              season,
+              episode,
+              m2boxRow: true,
+              dubRow,
+            })
+          : null
+        let altResolved: Awaited<ReturnType<typeof resolveM2BoxPlay>> | null = null
+        if (audioPick) {
+          setPrepareStatus(
+            audioPick.mode === 'dub' ? 'Opening English dub…' : 'Opening Japanese audio…',
+          )
+          altResolved = await withTimeout(
+            resolveM2BoxPlay(audioPick.detailUrl, {
+              subjectId: audioPick.subjectId,
+              season,
+              episode,
+            }),
+            20_000,
+            'Audio took too long to open.',
+          ).catch(() => null)
+          if (!altResolved?.ok) {
+            altResolved = null
+            audioPick = null
+          }
+        }
+        if (!stillCurrent()) return
+        const resolved =
+          altResolved ??
+          (await resolveM2BoxPlay(item.detailUrl || item.url, {
+            subjectId: item.m2boxSubjectId,
+            season,
+            episode,
+          }))
         if (!resolved.ok) {
           setPlayError(resolved.error || 'Could not resolve stream')
           return
         }
+        const playingDub = audioPick ? audioPick.mode === 'dub' : dubRow
         if (window.signalDesktop?.setPlaybackHeaders) {
           void window.signalDesktop.setPlaybackHeaders({
             url: resolved.url,
@@ -686,14 +783,19 @@ export function ShowPage() {
             transport: 'direct',
             tags: [
               ...new Set([
-                ...(item.tags ?? []),
+                ...(item.tags ?? []).filter((t) => !/^(?:anime-(?:dub|sub)|m2box-dub-row)$/i.test(String(t))),
                 'm2box',
                 resolved.format,
                 ...(subtitleUrl ? ['softsub'] : []),
+                ...(animeRow ? [playingDub ? 'anime-dub' : 'anime-sub'] : []),
+                ...(dubRow ? ['m2box-dub-row'] : []),
               ]),
             ],
             runtimeSeconds: mergeRuntimeSeconds(resolved.durationSeconds, item.runtimeSeconds),
-            m2boxSubjectId: resolved.subjectId || item.m2boxSubjectId,
+            // Keep the row's own subject: the Player re-picks audio per episode.
+            m2boxSubjectId: audioPick
+              ? item.m2boxSubjectId
+              : resolved.subjectId || item.m2boxSubjectId,
           },
           { forceFull: true, returnTo: `/show/${item.id}` },
         )
@@ -708,6 +810,10 @@ export function ShowPage() {
         const seMatch = /^S(\d{1,2})E(\d{1,4})$/i.exec(chosen.key)
         const season = seMatch ? Number(seMatch[1]) : 1
         const episode = seMatch ? Number(seMatch[2]) : index + 1
+        if (shouldPreferRivestreamJapaneseAudio(item)) {
+          const dubOk = await tryPlayAnimeDubNative(season, episode)
+          if (dubOk || !stillCurrent()) return
+        }
         let tmdbId = rivestreamTmdbIdFromItem(item)
         if (item.category === 'anime') {
           setPrepareStatus('Looking up show…')
@@ -1020,7 +1126,9 @@ export function ShowPage() {
           const attempt = await withTimeout(
             torrentStream(candidate, {
               keepOthers,
-              preferJapaneseAudio: shouldPreferRivestreamJapaneseAudio(item),
+              preferJapaneseAudio:
+                shouldPreferRivestreamJapaneseAudio(item) &&
+                effectiveAnimeAudioMode(cleanShowDisplayTitle(item.title) || item.title) !== 'dub',
             }),
             TORRENT_CANDIDATE_TIMEOUT_MS,
             'Release took too long to start — trying another source.',
