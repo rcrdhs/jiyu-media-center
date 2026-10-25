@@ -836,6 +836,15 @@ const BROWSER_SEEK_OVERLAY_SCRIPT = `(() => {
           border-color: rgba(240,180,41,0.45);
           transform: scale(1.06);
         }
+        #\${ROOT_ID} button.is-disabled,
+        #\${ROOT_ID} button.is-disabled:hover {
+          opacity: 0.38;
+          cursor: default;
+          transform: none;
+          background: rgba(8,10,14,0.88);
+          border-color: rgba(255,255,255,0.18);
+          box-shadow: none;
+        }
         #\${ROOT_ID} svg { width: 1.45rem; height: 1.45rem; display: block; }
         #\${ROOT_ID} .jiyu-seek-badge {
           position: absolute;
@@ -868,6 +877,20 @@ const BROWSER_SEEK_OVERLAY_SCRIPT = `(() => {
       );
     };
 
+    const LIVE_MIN_ROOM = 2;
+    const liveInfo = (v) => {
+      try {
+        return typeof window.__jiyuLiveInfo === 'function' ? window.__jiyuLiveInfo(v) : null;
+      } catch (_) {
+        return null;
+      }
+    };
+    const liveNotice = (v) => {
+      try {
+        if (typeof window.__jiyuLiveNotice === 'function') window.__jiyuLiveNotice('limit', v);
+      } catch (_) {}
+    };
+
     const seekBy = (delta) => {
       const v = pickVideo();
       if (!v) return false;
@@ -884,7 +907,23 @@ const BROWSER_SEEK_OVERLAY_SCRIPT = `(() => {
         }
       } catch (_) {}
       if (!(hi > lo)) { lo = 0; hi = v.duration; }
-      v.currentTime = Math.min(hi, Math.max(lo, (Number(v.currentTime) || 0) + delta));
+      let target = (Number(v.currentTime) || 0) + delta;
+      if (delta < 0) {
+        // Live streams (live-rewind-guard.js): stop at the oldest point the
+        // stream can still serve instead of seeking off it and snapping to live.
+        const info = liveInfo(v);
+        if (info) {
+          if (info.room < LIVE_MIN_ROOM) {
+            liveNotice(v);
+            return false;
+          }
+          if (target < info.lo + 0.5) {
+            target = info.lo + 0.5;
+            liveNotice(v);
+          }
+        }
+      }
+      v.currentTime = Math.min(hi, Math.max(lo, target));
       try { v.play().catch(() => {}); } catch (_) {}
       return true;
     };
@@ -920,6 +959,19 @@ const BROWSER_SEEK_OVERLAY_SCRIPT = `(() => {
       }, true);
     }
 
+    // Gray out rewind at the start of a live window; re-enable once there is room.
+    const syncLiveState = () => {
+      const back = root.querySelector('button[data-delta^="-"]');
+      if (!back) return;
+      const v = pickVideo();
+      const info = v ? liveInfo(v) : null;
+      const off = Boolean(info && info.room < LIVE_MIN_ROOM);
+      back.classList.toggle('is-disabled', off);
+      back.setAttribute('aria-disabled', off ? 'true' : 'false');
+      back.title = off ? 'Start of the live window' : '-10s';
+    };
+    let liveTimer = 0;
+
     let hideTimer = 0;
     const show = () => {
       const v = pickVideo();
@@ -928,8 +980,14 @@ const BROWSER_SEEK_OVERLAY_SCRIPT = `(() => {
         return;
       }
       root.classList.add('is-visible');
+      syncLiveState();
+      if (!liveTimer) liveTimer = window.setInterval(syncLiveState, 500);
       window.clearTimeout(hideTimer);
-      hideTimer = window.setTimeout(() => root.classList.remove('is-visible'), 2200);
+      hideTimer = window.setTimeout(() => {
+        root.classList.remove('is-visible');
+        window.clearInterval(liveTimer);
+        liveTimer = 0;
+      }, 2200);
     };
 
     window.addEventListener('mousemove', show, { passive: true });
