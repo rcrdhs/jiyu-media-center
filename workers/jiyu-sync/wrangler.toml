@@ -1,0 +1,31 @@
+# Jiyu cross-device Continue-watching sync (separate from jiyu-wyzie).
+# Deploy:  set CLOUDFLARE_ACCOUNT_ID (same account as jiyu-wyzie), then
+#   npx wrangler d1 migrations apply jiyu-sync --remote
+#   npx wrangler deploy
+# No secrets: tokens are random per device and only their SHA-256 hashes are stored.
+name = "jiyu-sync"
+main = "src/index.js"
+compatibility_date = "2024-11-01"
+workers_dev = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "jiyu-sync"
+database_id = "365f5199-1a37-4d36-830d-5517c847cf84"
+migrations_dir = "migrations"
+
+# Per-IP limits for account creation and pairing (brute-force guard on pair codes).
+[[ratelimits]]
+name = "AUTH_LIMITER"
+namespace_id = "7201"
+  [ratelimits.simple]
+  limit = 10
+  period = 60
+
+# Per-device limit for normal sync traffic (keeps a runaway client inside the free tier).
+[[ratelimits]]
+name = "SYNC_LIMITER"
+namespace_id = "7202"
+  [ratelimits.simple]
+  limit = 60
+  period = 60
