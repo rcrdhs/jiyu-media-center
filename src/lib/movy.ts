@@ -13,6 +13,7 @@ import {
   recordStreamProbeResult,
 } from './streamLearning'
 import { getViewingQuality, resolveRequestedQuality } from './viewingQuality'
+import { normalizeLanguageCode } from './language'
 
 export const MOVY_STREAM_ORIGIN = 'https://api.wecollege.net'
 export const MOVY_PLAY_REFERER = 'https://www.movy.sx/'
@@ -237,12 +238,39 @@ export interface MovyResolveOptions {
   preferBackend?: MovyBackend
   /** Prefer a Movy city that worked last time (e.g. miami). */
   preferProvider?: string
+  /**
+   * TMDB original_language (ISO 639-1). Cities that list several language
+   * streams (austin: Hindi / English / Tamil...) pick this first, then English.
+   * Looked up from TMDB when omitted.
+   */
+  originalLanguage?: string
+  /** Audio menu: play this language key (see MovyAudioOption.key) when listed. */
+  audioLanguage?: string
+  /** Retry: skip this city so a different source is picked. */
+  avoidProvider?: string
+  /**
+   * Only ask these cities (Audio menu re-resolve on the current city). Skips the
+   * Atlantic / Streamo fallbacks, which have no language choice.
+   */
+  providers?: string[]
 }
 
 export interface MovyStreamSource {
   url: string
   quality?: string
   provider: string
+  /** Spoken language read from the source label ("Hindi", "English"...); '' when unlabeled. */
+  language?: string
+  /** Label says "Subbed" (subtitled release). */
+  subbed?: boolean
+}
+
+/** One same-city language stream for the Player Audio menu. */
+export interface MovyAudioOption {
+  /** Language code, "<code>:sub" for subbed releases, or "und" for unlabeled. */
+  key: string
+  label: string
+  url: string
 }
 
 export interface MovySubtitle {
@@ -266,6 +294,16 @@ export type MovyPlayResult =
       subtitleKind?: 'file'
       /** movy city providers vs Atlantic (hls.lol) / Streamo (ShowBox) fallbacks. */
       backend?: MovyBackend
+      /** Audio key of the chosen Movy source (see MovyAudioOption.key). */
+      language?: string
+      /**
+       * False when the stream is a dub in a language other than the original /
+       * English (only possible when the Audio menu forced it). Callers must not
+       * remember such a pick as "last good".
+       */
+      languageOk?: boolean
+      /** Same-city language streams (2+ when the city offers a choice). */
+      audioOptions?: MovyAudioOption[]
     }
   | { ok: false; error: string }
 
@@ -302,7 +340,9 @@ function normalizeSources(raw: MovyDecodedPayload, provider: string): {
   for (const row of raw.sources || []) {
     const url = String(row.url || row.file || '').trim()
     if (!/^https?:\/\//i.test(url)) continue
-    sources.push({ url, quality: row.quality ? String(row.quality) : undefined, provider })
+    const quality = row.quality ? String(row.quality) : undefined
+    const lang = movySourceLanguage(quality)
+    sources.push({ url, quality, provider, language: lang.language, subbed: lang.subbed })
   }
   const subtitles: MovySubtitle[] = []
   for (const row of raw.subtitles || []) {
@@ -355,11 +395,175 @@ function isAutoQualityLabel(s: MovyStreamSource): boolean {
   return /^auto$/i.test(String(s.quality || '').trim())
 }
 
+const MOVY_LANGUAGE_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
+  [/\b(english|eng)\b/i, 'en'],
+  [/\bhindi\b/i, 'hi'],
+  [/\btamil\b/i, 'ta'],
+  [/\btelugu\b/i, 'te'],
+  [/\b(bengali|bangla)\b/i, 'bn'],
+  [/\bmalayalam\b/i, 'ml'],
+  [/\bkannada\b/i, 'kn'],
+  [/\bmarathi\b/i, 'mr'],
+  [/\bpunjabi\b/i, 'pa'],
+  [/\burdu\b/i, 'ur'],
+  [/\b(spanish|espanol|latino|castellano)\b|espa\u00f1ol/i, 'es'],
+  [/\b(french|francais)\b|fran\u00e7ais/i, 'fr'],
+  [/\b(german|deutsch)\b/i, 'de'],
+  [/\b(italian|italiano)\b/i, 'it'],
+  [/\b(portuguese|portugues)\b|portugu\u00eas/i, 'pt'],
+  [/\brussian\b/i, 'ru'],
+  [/\bjapanese\b/i, 'ja'],
+  [/\bkorean\b/i, 'ko'],
+  [/\b(chinese|mandarin|cantonese)\b/i, 'zh'],
+  [/\barabic\b/i, 'ar'],
+  [/\bturkish\b/i, 'tr'],
+  [/\bthai\b/i, 'th'],
+  [/\bindonesian\b/i, 'id'],
+  [/\bpolish\b/i, 'pl'],
+  [/\bvietnamese\b/i, 'vi'],
+]
+
+/**
+ * Some cities (austin) label each source with a spoken language instead of a
+ * height: "Hindi", "English", "Tamil", "Hindi Subbed". Each is its own master
+ * with a single audio track, so the language must be chosen per source.
+ */
+export function movySourceLanguage(label?: string): { language: string; subbed: boolean } {
+  const text = String(label || '').trim()
+  if (!text || /\b(dual|multi)\b/i.test(text)) return { language: '', subbed: false }
+  for (const [re, code] of MOVY_LANGUAGE_PATTERNS) {
+    if (re.test(text)) {
+      return { language: code, subbed: /\bsub(bed|s|titled)?\b/i.test(text) && !/\bdub/i.test(text) }
+    }
+  }
+  return { language: '', subbed: false }
+}
+
+/** Audio menu key: "hi", "hi:sub", or "und" for unlabeled sources. */
+export function movyAudioKey(s: Pick<MovyStreamSource, 'language' | 'subbed'>): string {
+  if (!s.language) return 'und'
+  return s.subbed ? `${s.language}:sub` : s.language
+}
+
+type MovyLanguagePref = {
+  /** Normalized TMDB original language ('' when unknown). */
+  original: string
+  /** Audio-menu key the user picked ('' = automatic). */
+  forced: string
+}
+
+const MOVY_LANGUAGE_OK_RANK = 2
+
+/**
+ * 0 original audio (or English / unlabeled for English-original titles),
+ * 1 unlabeled on a non-English title, 2 English dub of a non-English title,
+ * 3 subbed release, 4 another language's dub.
+ */
+function movyBaseLanguageRank(s: MovyStreamSource, original: string): number {
+  const englishOriginal = !original || original === 'en'
+  if (s.subbed) return s.language === original && !englishOriginal ? 1 : 3
+  if (!s.language) return englishOriginal ? 0 : 1
+  if (original && s.language === original) return 0
+  if (s.language === 'en') return englishOriginal ? 0 : 2
+  return 4
+}
+
+function movyLanguageRank(s: MovyStreamSource, pref?: MovyLanguagePref): number {
+  if (!pref) return 0
+  const base = movyBaseLanguageRank(s, pref.original)
+  if (pref.forced) return movyAudioKey(s) === pref.forced ? 0 : base + 10
+  return base
+}
+
+function isMovyLanguageOk(s: MovyStreamSource, pref: MovyLanguagePref): boolean {
+  return movyBaseLanguageRank(s, pref.original) <= MOVY_LANGUAGE_OK_RANK
+}
+
+function movyAudioLabel(s: MovyStreamSource): string {
+  if (!s.language) return 'Default'
+  const raw = String(s.quality || '').replace(/\s+/g, ' ').trim()
+  if (raw && raw.length <= 24) return raw
+  return s.subbed ? `${s.language.toUpperCase()} (sub)` : s.language.toUpperCase()
+}
+
+function buildMovyAudioOptions(sources: MovyStreamSource[], pref: MovyLanguagePref): MovyAudioOption[] {
+  if (!sources.some((s) => s.language)) return []
+  const cap = movyQualityCap()
+  const byKey = new Map<string, MovyStreamSource>()
+  for (const s of [...sources].sort((a, b) => compareMovySources(a, b, cap))) {
+    const key = movyAudioKey(s)
+    if (!byKey.has(key)) byKey.set(key, s)
+  }
+  if (byKey.size < 2) return []
+  const auto: MovyLanguagePref = { original: pref.original, forced: '' }
+  return [...byKey.entries()]
+    .sort((a, b) => movyLanguageRank(a[1], auto) - movyLanguageRank(b[1], auto))
+    .map(([key, s]) => ({ key, label: movyAudioLabel(s), url: s.url }))
+}
+
+/** What the Player needs to show the Audio menu / rotate a Movy movie. */
+export type MovyPlaySession = {
+  provider: string
+  backend: MovyBackend
+  /** Current audio key ('' when not a Movy city). */
+  language: string
+  audioOptions: MovyAudioOption[]
+  /** The resolve request that produced this URL (Audio menu re-resolves with it). */
+  request: MovyResolveOptions
+}
+
+const movyPlaySessions = new Map<string, MovyPlaySession>()
+
+/** Kept in memory by played URL so option URLs never land in persisted StreamItems. */
+export function rememberMovyPlaySession(url: string, session: MovyPlaySession): void {
+  if (!url) return
+  movyPlaySessions.delete(url)
+  movyPlaySessions.set(url, session)
+  while (movyPlaySessions.size > 40) {
+    const oldest = movyPlaySessions.keys().next().value
+    if (oldest == null) break
+    movyPlaySessions.delete(oldest)
+  }
+}
+
+export function getMovyPlaySession(url: string | undefined | null): MovyPlaySession | null {
+  if (!url) return null
+  return movyPlaySessions.get(url) ?? null
+}
+
+const tmdbOriginalLanguageCache = new Map<string, string>()
+
+async function lookupMovyOriginalLanguage(tmdbId: string, mediaType: MovyMediaType): Promise<string> {
+  const key = `${mediaType}:${tmdbId}`
+  const hit = tmdbOriginalLanguageCache.get(key)
+  if (hit != null) return hit
+  try {
+    // Lazy: rivestream pulls in the torrent stack; keep it off movy's load path.
+    const { fetchTmdbOriginalLanguage } = await import('./rivestream')
+    const lang = normalizeLanguageCode(await fetchTmdbOriginalLanguage(tmdbId, mediaType))
+    tmdbOriginalLanguageCache.set(key, lang)
+    return lang
+  } catch {
+    return ''
+  }
+}
+
 /**
  * Prefer Auto (ABR master, like movy.sx) when under the quality cap, then highest
- * fixed ladder at/under cap. Unlabeled / over-cap last.
+ * fixed ladder at/under cap. Unlabeled / over-cap last. With a language pref,
+ * the spoken language outranks quality (austin labels sources by language only).
  */
-function compareMovySources(a: MovyStreamSource, b: MovyStreamSource, cap: number): number {
+function compareMovySources(
+  a: MovyStreamSource,
+  b: MovyStreamSource,
+  cap: number,
+  pref?: MovyLanguagePref,
+): number {
+  if (pref) {
+    const la = movyLanguageRank(a, pref)
+    const lb = movyLanguageRank(b, pref)
+    if (la !== lb) return la - lb
+  }
   const aAuto = isAutoQualityLabel(a)
   const bAuto = isAutoQualityLabel(b)
   // Auto masters ABR like the website — prefer over a locked 1080p city label.
@@ -376,10 +580,13 @@ function compareMovySources(a: MovyStreamSource, b: MovyStreamSource, cap: numbe
   return ha - hb
 }
 
-function pickMovySource(sources: MovyStreamSource[]): MovyStreamSource | null {
+function pickMovySource(
+  sources: MovyStreamSource[],
+  pref?: MovyLanguagePref,
+): MovyStreamSource | null {
   if (!sources.length) return null
   const cap = movyQualityCap()
-  return [...sources].sort((a, b) => compareMovySources(a, b, cap))[0] ?? null
+  return [...sources].sort((a, b) => compareMovySources(a, b, cap, pref))[0] ?? null
 }
 
 async function fetchProviderSources(
@@ -551,10 +758,39 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
 
   const season = options.mediaType === 'tv' ? Math.max(1, options.season || 1) : undefined
   const episode = options.mediaType === 'tv' ? Math.max(1, options.episode || 1) : undefined
-  const providers = rankMovyProviders(
-    options.mediaType === 'tv' ? MOVY_TV_PROVIDERS : MOVY_MOVIE_PROVIDERS,
+  const baseProviders = options.mediaType === 'tv' ? MOVY_TV_PROVIDERS : MOVY_MOVIE_PROVIDERS
+  const onlyProviders = (options.providers || [])
+    .map((p) => String(p || '').trim().toLowerCase())
+    .filter((p) => (baseProviders as readonly string[]).includes(p))
+  const avoidProvider = String(options.avoidProvider || '').trim().toLowerCase()
+  let providers = rankMovyProviders(
+    onlyProviders.length ? onlyProviders : baseProviders,
     options.preferProvider,
   )
+  // Retry: rotate away from the city that just failed / played the wrong file.
+  if (avoidProvider && providers.length > 1) {
+    providers = providers.filter((p) => p !== avoidProvider)
+  }
+  const citiesOnly = onlyProviders.length > 0
+  const forcedAudio = String(options.audioLanguage || '').trim().toLowerCase()
+  const givenOriginal = normalizeLanguageCode(options.originalLanguage)
+  // Fetched in parallel with the seed; a slow TMDB just means "assume English".
+  const originalLanguagePromise: Promise<string> = givenOriginal
+    ? Promise.resolve(givenOriginal)
+    : withTimeoutOr(lookupMovyOriginalLanguage(tmdbId, options.mediaType), 3_000, '')
+
+  const withSession = (result: MovyPlayResult): MovyPlayResult => {
+    if (result.ok) {
+      rememberMovyPlaySession(result.url, {
+        provider: result.provider,
+        backend: result.backend ?? 'movy',
+        language: result.language ?? '',
+        audioOptions: result.audioOptions ?? [],
+        request: { ...options, tmdbId, title },
+      })
+    }
+    return result
+  }
 
   const tryAtlanticFallback = async (): Promise<MovyPlayResult | null> => {
     const started = Date.now()
@@ -621,10 +857,13 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
       probeMs: number
       /** True when the playlist is a multi-bitrate master (true ABR ladder). */
       abrMaster: boolean
+      /** movyLanguageRank of best (0 = wanted audio). */
+      languageRank: number
     }
 
     const buildResult = (pick: AliveCity): MovyPlayResult => {
       const sub = pickEnglishSubtitle(pick.decoded.subtitles)
+      const audioOptions = buildMovyAudioOptions(pick.decoded.sources, pref)
       return {
         ok: true,
         mode: 'hls',
@@ -638,12 +877,17 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
         subtitleUrl: sub,
         subtitleKind: sub ? 'file' : undefined,
         backend: 'movy',
+        language: movyAudioKey(pick.best),
+        languageOk: isMovyLanguageOk(pick.best, pref),
+        audioOptions: audioOptions.length >= 2 ? audioOptions : undefined,
       }
     }
 
     const pickFromPool = async (englishAlive: AliveCity[]): Promise<MovyPlayResult | null> => {
       if (englishAlive.length === 0) return null
-      let pool = englishAlive
+      // Spoken language first: original / English audio beats a faster dub.
+      const minRank = Math.min(...englishAlive.map((c) => c.languageRank))
+      let pool = englishAlive.filter((c) => c.languageRank === minRank)
       // Prefer website-fast Auto CDNs (majorplay ~200ms) over paleoak (~6s masters
       // + 9s segments) that buffer/stall anime on desktop and Android.
       const fast = pool.filter((c) => c.probeMs > 0 && c.probeMs <= 2_000)
@@ -695,6 +939,8 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
         let pending = providers.length
         const englishAlive: AliveCity[] = []
         const seenUrls = new Set<string>()
+        // Audio menu: keep waiting until a city that lists the picked language answers.
+        const satisfied = () => !pref.forced || englishAlive.some((c) => c.languageRank === 0)
         let graceTimer: ReturnType<typeof setTimeout> | null = null
 
         const settleOne = () => {
@@ -714,7 +960,7 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
         }
 
         const armEarlyPick = () => {
-          if (finished || graceTimer != null) return
+          if (finished || graceTimer != null || !satisfied()) return
           graceTimer = setTimeout(() => {
             graceTimer = null
             void finalize()
@@ -738,7 +984,7 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
               settleOne()
               return
             }
-            const best = pickMovySource(decoded.sources)
+            const best = pickMovySource(decoded.sources, pref)
             if (!best?.url) {
               recordStreamProbeResult(provider, false, Date.now() - started)
               settleOne()
@@ -757,9 +1003,16 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
               settleOne()
               return
             }
+            const languageRank = movyLanguageRank(best, pref)
+            // A city whose best source is still another language's dub (austin
+            // listing only Hindi/Tamil...) counts like paris: never auto-picked.
+            const languageAcceptable =
+              (pref.forced && languageRank === 0) || isMovyLanguageOk(best, pref)
+            const foreignCity = isLikelyForeignDubMovyProvider(provider) && pref.original !== 'fr'
             if (
               probe.ok &&
-              !isLikelyForeignDubMovyProvider(provider)
+              languageAcceptable &&
+              (!foreignCity || (pref.forced && languageRank === 0))
             ) {
               englishAlive.push({
                 provider,
@@ -768,10 +1021,11 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
                 started,
                 probeMs: probe.ms,
                 abrMaster: Boolean(probe.abrMaster),
+                languageRank,
               })
               // Two English cities: pick now (duration vote). One live city: short
               // grace so a peer can join, then pick without waiting on 500/hung cities.
-              if (englishAlive.length >= 2) {
+              if (englishAlive.length >= 2 && satisfied()) {
                 void finalize()
                 return
               }
@@ -783,8 +1037,12 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
       })
 
     let seed: string
+    let pref: MovyLanguagePref
     try {
-      seed = await fetchMovySeed(tmdbId)
+      ;[seed, pref] = await Promise.all([
+        fetchMovySeed(tmdbId),
+        originalLanguagePromise.then((original) => ({ original, forced: forcedAudio })),
+      ])
     } catch {
       return null
     }
@@ -802,6 +1060,11 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
     return result
   }
 
+  if (citiesOnly) {
+    const movy = await resolveMovyCities()
+    return movy ? withSession(movy) : { ok: false, error: 'No streams for this title' }
+  }
+
   // Kick fallbacks immediately — Streamo alone needs ~9s for its provider lookup.
   const fallbacks = {
     atlantic: tryAtlanticFallback(),
@@ -813,16 +1076,16 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
   const preferred = options.preferBackend
   if (preferred === 'atlantic' || preferred === 'streamo') {
     const first = await fallbacks[preferred]
-    if (first) return first
+    if (first) return withSession(first)
   }
 
   const movy = await resolveMovyCities()
-  if (movy) return movy
+  if (movy) return withSession(movy)
 
   for (const key of fallbackOrder) {
     if (key === preferred) continue
     const alt = await fallbacks[key]
-    if (alt) return alt
+    if (alt) return withSession(alt)
   }
 
   return { ok: false, error: 'No streams for this title' }

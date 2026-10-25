@@ -919,9 +919,18 @@ export async function fetchTmdbTvGenreIds(tmdbId: string): Promise<number[] | nu
 
 /** Fetch original_language for a known TMDB TV id when catalog didn't store it. */
 export async function fetchTmdbTvOriginalLanguage(tmdbId: string): Promise<string | null> {
+  return fetchTmdbOriginalLanguage(tmdbId, 'tv')
+}
+
+/** TMDB original_language (ISO 639-1, lowercase) for a movie or show; null when unknown. */
+export async function fetchTmdbOriginalLanguage(
+  tmdbId: string | number,
+  mediaType: 'movie' | 'tv',
+): Promise<string | null> {
   const id = String(tmdbId || '').trim()
   if (!id) return null
-  const url = `${TMDB_API}/tv/${encodeURIComponent(id)}?api_key=${encodeURIComponent(TMDB_KEY)}&language=en-US`
+  const kind = mediaType === 'movie' ? 'movie' : 'tv'
+  const url = `${TMDB_API}/${kind}/${encodeURIComponent(id)}?api_key=${encodeURIComponent(TMDB_KEY)}&language=en-US`
   let data: unknown
   if (window.signalDesktop?.fetchJsonGet) {
     const result = await window.signalDesktop.fetchJsonGet(url, RIVESTREAM_PLAY_REFERER)

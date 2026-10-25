@@ -15,6 +15,8 @@ export type LastGoodPlay = {
   /** Movy city / Atlantic provider / torrent site tag */
   provider?: string
   host?: string
+  /** Movy audio key that played ("en", "hi"...) when the city labels languages. */
+  language?: string
   at: number
 }
 
@@ -73,7 +75,7 @@ export function playReliabilityKey(opts: {
 export function rememberLastGoodPlay(
   key: string,
   pipe: PlayPipe,
-  detail?: { provider?: string; host?: string },
+  detail?: { provider?: string; host?: string; language?: string },
 ) {
   if (!key) return
   const map = load()
@@ -81,9 +83,42 @@ export function rememberLastGoodPlay(
     pipe,
     provider: detail?.provider?.trim() || undefined,
     host: detail?.host?.trim() || undefined,
+    language: detail?.language?.trim() || undefined,
     at: Date.now(),
   }
   save(map)
+}
+
+/**
+ * Remember a resolveMovyPlay pick, unless it is a dub in a language other than the
+ * original / English: that city is forgotten so it can never be pinned again.
+ */
+export function rememberResolvedHlsPlay(
+  key: string,
+  result: {
+    backend?: 'movy' | 'atlantic' | 'streamo'
+    provider?: string
+    url?: string
+    language?: string
+    languageOk?: boolean
+  },
+) {
+  if (!key) return
+  if (result.languageOk === false) {
+    forgetLastGoodPlay(key)
+    return
+  }
+  let host: string | undefined
+  try {
+    host = result.url ? new URL(result.url).hostname : undefined
+  } catch {
+    host = undefined
+  }
+  rememberLastGoodPlay(key, result.backend ?? 'movy', {
+    provider: result.provider,
+    host,
+    language: result.language,
+  })
 }
 
 export function getLastGoodPlay(key: string): LastGoodPlay | null {

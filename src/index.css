@@ -5249,6 +5249,37 @@ html.is-android .web-browser-page.is-embed-player.is-watching .web-player-tile {
   color: var(--accent);
 }
 
+/* Movy Audio menu (one stream per language on some cities). */
+.player-audio-menu {
+  position: relative;
+  display: inline-flex;
+}
+
+.player-audio-menu-list {
+  position: absolute;
+  bottom: calc(100% + 0.4rem);
+  left: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 9rem;
+  max-height: min(50vh, 18rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0.35rem;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--bg-1);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+}
+
+.player-audio-menu-list .control-btn {
+  justify-content: flex-start;
+  text-align: left;
+  white-space: nowrap;
+}
+
 .volume-control {
   display: inline-flex;
   align-items: center;

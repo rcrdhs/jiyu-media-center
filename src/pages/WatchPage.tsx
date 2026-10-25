@@ -45,8 +45,9 @@ import {
   getLastGoodPlay,
   playReliabilityKey,
   preferredResolveBackend,
-  rememberLastGoodPlay,
+  rememberResolvedHlsPlay,
 } from '../lib/playReliability'
+import { normalizeLanguageCode } from '../lib/language'
 import { upsertTorrentItems } from '../lib/torrentCatalogStore'
 import { TORRENTIO_TV_TRIAL } from '../lib/torrentio'
 import { getViewingQuality, resolveRequestedQuality } from '../lib/viewingQuality'
@@ -1042,11 +1043,15 @@ export function WatchPage() {
           String(item!.title || item!.description || ''),
         )
         let tmdbId = rivestreamTmdbIdFromItem(item!)
+        // Original audio language: Movy cities like austin list Hindi / English /
+        // Tamil streams side by side; resolveMovyPlay asks TMDB when this is empty.
+        let originalLanguage = normalizeLanguageCode(item!.originalLanguage)
         if (!tmdbId) {
           try {
             const meta = await lookupTmdbMovieMeta(item!.title || movieTitle)
             if (cancelled) return
             tmdbId = meta?.tmdbId || ''
+            if (!originalLanguage) originalLanguage = normalizeLanguageCode(meta?.originalLanguage)
           } catch {
             tmdbId = ''
           }
@@ -1067,6 +1072,7 @@ export function WatchPage() {
                 year: yearMatch?.[1],
                 preferBackend: preferredResolveBackend(lastGood),
                 preferProvider: lastGood?.provider,
+                originalLanguage: originalLanguage || undefined,
               }),
               22_000,
               'Source lookup timed out.',
@@ -1076,16 +1082,8 @@ export function WatchPage() {
               if (!item!.rivestreamTmdbId) {
                 void upsertTorrentItems([{ ...item!, rivestreamTmdbId: tmdbId }])
               }
-              rememberLastGoodPlay(reliabilityKey, movy.backend ?? 'movy', {
-                provider: movy.provider,
-                host: (() => {
-                  try {
-                    return new URL(movy.url).hostname
-                  } catch {
-                    return undefined
-                  }
-                })(),
-              })
+              // A dub in another language is never pinned as "last good".
+              rememberResolvedHlsPlay(reliabilityKey, movy)
               let subtitleUrl = movy.subtitleUrl
               let subtitleKind = movy.subtitleKind
               if (!subtitleUrl) {

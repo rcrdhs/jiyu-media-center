@@ -45,6 +45,7 @@ import {
   shouldPreferRivestreamJapaneseAudio,
 } from '../lib/rivestream'
 import { resolveMovyPlay } from '../lib/movy'
+import { normalizeLanguageCode } from '../lib/language'
 import { BILIBILI_TV_PLAY_REFERER } from '../lib/bilibiliTv'
 import { resolveDonghuaPlay } from '../lib/donghuaResolve'
 import { ensureEpisodeSoftSubtitles } from '../lib/softSubs'
@@ -462,6 +463,8 @@ export function ShowPage() {
             season,
             episode,
             year: yearMatch?.[0],
+            // Language-labeled cities (austin) pick the show's own audio, then English.
+            originalLanguage: normalizeLanguageCode(item.originalLanguage) || undefined,
           }),
           // Anime long-runners (One Piece) need more probe time on Android.
           item.category === 'anime' ? 35_000 : 20_000,

@@ -54,6 +54,7 @@ import {
   playReliabilityKey,
   preferredResolveBackend,
   rememberLastGoodPlay,
+  rememberResolvedHlsPlay,
   type PlayPipe,
 } from '../lib/playReliability'
 import {
@@ -84,7 +85,14 @@ import {
   rivestreamTmdbIdFromItem,
   shouldPreferRivestreamJapaneseAudio,
 } from '../lib/rivestream'
-import { resolveMovyPlay, MOVY_PLAY_REFERER, probeMovyHlsUrl } from '../lib/movy'
+import {
+  resolveMovyPlay,
+  MOVY_PLAY_REFERER,
+  probeMovyHlsUrl,
+  getMovyPlaySession,
+  rememberMovyPlaySession,
+  type MovyAudioOption,
+} from '../lib/movy'
 import { BILIBILI_TV_PLAY_REFERER } from '../lib/bilibiliTv'
 import { resolveDonghuaPlay } from '../lib/donghuaResolve'
 import { biliSubtitleHeaders, isBiliSubtitleUrl } from '../lib/biliSubs'
@@ -673,6 +681,11 @@ export function Player({
   const [animeAudioMode, setAnimeAudioMode] = useState<AnimeAudioMode>('sub')
   const animeAudioGenRef = useRef(0)
   const animeAudioBusyRef = useRef(false)
+  /** Movy Audio menu (cities that list Hindi / English / Tamil... streams). */
+  const [movyAudioOpen, setMovyAudioOpen] = useState(false)
+  const [movyAudioBusy, setMovyAudioBusy] = useState(false)
+  const movyAudioBusyRef = useRef(false)
+  const activeUrlRef = useRef('')
   /** Mid-episode Sub / Dub switch on an mp4 / remux source: reopen here, not at 0. */
   const audioSwitchResumeRef = useRef(0)
   const animeShowTitle = cleanShowDisplayTitle(item.title) || item.title
@@ -863,7 +876,8 @@ export function Player({
     }
     hlsFallbackMetaRef.current = {
       tmdbId,
-      mediaType: 'tv',
+      // Single-file movies: the stall fallback must not ask Atlantic for "S1E1".
+      mediaType: item.category === 'movies' && !seMatch && playlist.length <= 1 ? 'movie' : 'tv',
       season,
       episode,
       title: cleanShowDisplayTitle(item.title) || item.title,
@@ -901,6 +915,18 @@ export function Player({
     ? `Episodes · ${uiEpisodeKey} · ${uiPlaylistIndex + 1}/${playlist.length}`
     : `Episodes · ${uiPlaylistIndex + 1}/${playlist.length}`
   const hasPlaylist = playlist.length > 1
+  activeUrlRef.current = activePlaylistItem.url || ''
+  // Audio menu: only when the Movy city that is playing lists 2+ language streams.
+  const movyAudioSession = getMovyPlaySession(activePlaylistItem.url)
+  const movyAudioOptions = movyAudioSession?.audioOptions ?? []
+  const movyAudioCurrent =
+    movyAudioOptions.find((o) => o.key === movyAudioSession?.language) ?? null
+  useEffect(() => {
+    setMovyAudioOpen(false)
+  }, [activePlaylistItem.url])
+  useEffect(() => {
+    if (!chromeVisible) setMovyAudioOpen(false)
+  }, [chromeVisible])
   // Prefer the active episode's subs only — never fall back to another episode's
   // show-level subtitleUrl (that reused E02 captions while watching E05).
   const subtitleUrl = activePlaylistItem.subtitleUrl
@@ -2917,7 +2943,26 @@ export function Player({
     // If the playlist already carries Nyaa/torrent magnets, use those — don't
     // bounce back into Rive (which often only has a dead embed shell).
     // Movy signed playlists expire — re-resolve on episode change / force / rotate.
+    // Single-file movie on a Movy / Atlantic / Streamo HLS pipe: Retry and stall
+    // remints re-resolve the *movie* (the TV branch below asked for S1E1) and rotate
+    // away from the city that just played.
+    const movieTmdbId =
+      item.category === 'movies' && playlist.length <= 1 && !entry.torrentUri
+        ? rivestreamTmdbIdFromItem(item)
+        : ''
+    const movieOnHlsPipe =
+      movyStyleUrl ||
+      Boolean(getMovyPlaySession(entry.url)) ||
+      ['movy', 'atlantic', 'streamo'].includes(
+        inferPlayPipe({ url: entry.url, referrer: activePlaybackReferrerRef.current }) ?? '',
+      ) ||
+      Boolean(item.tags?.some((t) => /^(movy|atlantic|streamo)$/i.test(t)))
+    const needsMovyMovie =
+      Boolean(movieTmdbId) &&
+      movieOnHlsPipe &&
+      (Boolean(options?.rotateSource) || (movyStyleUrl && Boolean(options?.force)))
     const needsRivestream =
+      !needsMovyMovie &&
       isRivestreamShow &&
       !entry.torrentUri &&
       (options?.rotateSource ||
@@ -3124,6 +3169,93 @@ export function Player({
       } catch (err) {
         failOnEpisode(err instanceof Error ? err.message : 'Could not load M2Box episode')
         return
+      }
+    } else if (needsMovyMovie) {
+      setEpisodeLoading(true)
+      setMediaReady(false)
+      setStatus(options?.rotateSource ? 'Trying another source…' : 'Opening stream…')
+      setError(null)
+      // Keep the playhead across the source switch (tail keeps autoSeekResumeOnceRef
+      // for a same-index remint).
+      const video = videoRef.current
+      const keepAt =
+        video && !options?.fromRestart && index === playlistIndex
+          ? Math.max(0, Math.floor(absolutePlayhead(video)))
+          : 0
+      if (keepAt > 0) pinStallPlayhead(keepAt)
+      try {
+        const prevSession = getMovyPlaySession(entry.url)
+        const reliabilityKey = playReliabilityKey({
+          itemId: item.id,
+          tmdbId: movieTmdbId,
+          mediaType: 'movie',
+        })
+        // Retry: never pin the pipe / city that just failed.
+        if (options?.rotateSource) forgetLastGoodPlay(reliabilityKey)
+        const yearMatch = /\b((?:19|20)\d{2})\b/.exec(String(item.title || item.description || ''))
+        const movy = await withTimeout(
+          resolveMovyPlay({
+            tmdbId: movieTmdbId,
+            title:
+              prevSession?.request.title || cleanShowDisplayTitle(item.title) || item.title,
+            mediaType: 'movie',
+            year: prevSession?.request.year ?? yearMatch?.[1],
+            originalLanguage:
+              normalizeLanguageCode(item.originalLanguage) ||
+              prevSession?.request.originalLanguage ||
+              undefined,
+            avoidProvider:
+              options?.rotateSource && !options?.fromRestart ? prevSession?.provider : undefined,
+          }),
+          22_000,
+          'Source lookup timed out.',
+        )
+        if (episodeFailGenRef.current !== failGen) return
+        if (!movy.ok) {
+          failOnEpisode(movy.error || 'No other source for this movie right now')
+          return
+        }
+        rememberResolvedHlsPlay(reliabilityKey, movy)
+        hlsFallbackMetaRef.current = {
+          tmdbId: movieTmdbId,
+          mediaType: 'movie',
+          title: cleanShowDisplayTitle(item.title) || item.title,
+          tried: movy.backend === 'atlantic',
+          busy: false,
+        }
+        activePlaybackReferrerRef.current = movy.referer || MOVY_PLAY_REFERER
+        if (window.signalDesktop?.setPlaybackHeaders) {
+          void window.signalDesktop.setPlaybackHeaders({
+            url: movy.url,
+            referrer: movy.referer || MOVY_PLAY_REFERER,
+          })
+        }
+        if (keepAt >= 5) reopenMovyAt(movy.url, keepAt, index)
+        setLocalPlaylist((prev) => {
+          const base = prev && prev.length > 0 ? prev : playlist
+          return base.map((row, i) =>
+            i === index
+              ? {
+                  ...row,
+                  url: movy.url,
+                  // Keep captions already attached; Movy's own English track wins.
+                  subtitleUrl: movy.subtitleUrl || row.subtitleUrl,
+                  subtitleKind: movy.subtitleUrl ? movy.subtitleKind : row.subtitleKind,
+                }
+              : row,
+          )
+        })
+        if (options?.rotateSource && prevSession?.provider && prevSession.provider !== movy.provider) {
+          flash('Switched to another source')
+        }
+      } catch (err) {
+        failOnEpisode(err instanceof Error ? err.message : 'Could not load movie')
+        return
+      } finally {
+        if (episodeFailGenRef.current === failGen) {
+          setEpisodeLoading(false)
+          setLoadingPlaylistIndex(null)
+        }
       }
     } else if (needsRivestream) {
       setEpisodeLoading(true)
@@ -3363,6 +3495,11 @@ export function Player({
               year: yearMatch?.[0],
               preferBackend: preferredResolveBackend(lastGood),
               preferProvider: lastGood?.provider,
+              originalLanguage: normalizeLanguageCode(item.originalLanguage) || undefined,
+              avoidProvider:
+                options?.rotateSource && !options?.fromRestart
+                  ? getMovyPlaySession(entry.url)?.provider
+                  : undefined,
             }),
             item.category === 'anime' ? 35_000 : 20_000,
             'Source lookup timed out.',
@@ -3381,16 +3518,7 @@ export function Player({
             }
             activePlaybackReferrerRef.current = movy.referer || MOVY_PLAY_REFERER
             if (usedAtlantic) setStatus('Playing')
-            rememberLastGoodPlay(reliabilityKey, movy.backend ?? 'movy', {
-              provider: movy.provider,
-              host: (() => {
-                try {
-                  return new URL(movy.url).hostname
-                } catch {
-                  return undefined
-                }
-              })(),
-            })
+            rememberResolvedHlsPlay(reliabilityKey, movy)
             let subtitleUrl = movy.subtitleUrl
             let subtitleKind = movy.subtitleKind
             if (!subtitleUrl) {
@@ -3985,6 +4113,93 @@ export function Player({
       setStatus('Playing')
     } finally {
       animeAudioBusyRef.current = false
+    }
+  }
+
+  /**
+   * Audio menu (Movy cities that ship one stream per language): reopen the picked
+   * language's stream from the same city at the current position.
+   */
+  /**
+   * Same-title source swap (Audio menu / movie Retry): reopen the new URL at `at`.
+   * hls.js restores via autoSeekResumeOnceRef; direct files via audioSwitchResumeRef.
+   */
+  function reopenMovyAt(url: string, at: number, index: number) {
+    if (isVodCategory(item.category)) {
+      upsertContinueEntry(
+        {
+          id: item.id,
+          title: item.title,
+          poster: item.poster,
+          category: item.category,
+          playlistIndex: index,
+          episodeTitle: hasPlaylist ? playlist[index]?.title : undefined,
+          currentTime: at,
+          duration: 0,
+          runtimeSeconds: item.runtimeSeconds,
+          torrentUri: item.torrentUri,
+          detailUrl: item.detailUrl,
+          playUrl: item.detailUrl || item.torrentUri,
+          source: item.source,
+        },
+        { allowUnknownDuration: true, playbackUrl: url },
+      )
+    }
+    resumePendingRef.current = true
+    autoSeekResumeOnceRef.current = at
+    audioSwitchResumeRef.current = at
+  }
+
+  async function switchMovyAudio(option: MovyAudioOption) {
+    const fromUrl = activePlaylistItem.url
+    const session = getMovyPlaySession(fromUrl)
+    if (!session || option.key === session.language || movyAudioBusyRef.current) return
+    const video = videoRef.current
+    const at = video ? Math.max(0, Math.floor(absolutePlayhead(video))) : 0
+    const index = playlistIndex
+    movyAudioBusyRef.current = true
+    setMovyAudioBusy(true)
+    setStatus(`Opening ${option.label} audio…`)
+    bumpChrome()
+    try {
+      let url = ''
+      if (await probeMovyHlsUrl(option.url, MOVY_PLAY_REFERER)) {
+        url = option.url
+        rememberMovyPlaySession(url, { ...session, language: option.key })
+      } else {
+        // Signed link went stale — ask the same city again for that language.
+        const fresh = await withTimeout(
+          resolveMovyPlay({
+            ...session.request,
+            audioLanguage: option.key,
+            providers: [session.provider],
+            preferProvider: session.provider,
+            preferBackend: undefined,
+            avoidProvider: undefined,
+          }),
+          20_000,
+          'Audio switch timed out.',
+        )
+        if (fresh.ok && fresh.language === option.key) url = fresh.url
+      }
+      if (!url) throw new Error('unavailable')
+      if (activeUrlRef.current !== fromUrl) return
+      activePlaybackReferrerRef.current = MOVY_PLAY_REFERER
+      if (window.signalDesktop?.setPlaybackHeaders) {
+        void window.signalDesktop.setPlaybackHeaders({ url, referrer: MOVY_PLAY_REFERER })
+      }
+      if (at >= 5) reopenMovyAt(url, at, index)
+      setLocalPlaylist((prev) => {
+        const base = prev && prev.length > 0 ? prev : playlist
+        return base.map((row, i) => (i === index ? { ...row, url } : row))
+      })
+      flash(`Audio: ${option.label}`)
+    } catch {
+      flash(`${option.label} audio unavailable right now`)
+      setStatus('Playing')
+    } finally {
+      movyAudioBusyRef.current = false
+      setMovyAudioBusy(false)
     }
   }
 
@@ -6399,6 +6614,8 @@ export function Player({
           // (was >= 5, which dropped early mid-open recovers back to 0).
           if (autoAt > 0.5) {
             autoSeekResumeOnceRef.current = 0
+            // hls.js took the reopen — drop the direct-file fallback seek.
+            audioSwitchResumeRef.current = 0
             pinStallPlayhead(autoAt)
             let jumped = false
             const jump = () => {
@@ -6828,6 +7045,7 @@ export function Player({
                 year: yearMatch?.[0],
                 preferBackend: preferredResolveBackend(lastGood),
                 preferProvider: lastGood?.provider,
+                originalLanguage: normalizeLanguageCode(item.originalLanguage) || undefined,
               }),
               20_000,
               'Source lookup timed out.',
@@ -6845,9 +7063,7 @@ export function Player({
                 busy: false,
               }
               activePlaybackReferrerRef.current = movy.referer || MOVY_PLAY_REFERER
-              rememberLastGoodPlay(reliabilityKey, movy.backend ?? 'movy', {
-                provider: movy.provider,
-              })
+              rememberResolvedHlsPlay(reliabilityKey, movy)
               let subtitleUrl = movy.subtitleUrl
               let subtitleKind = movy.subtitleKind
               if (!subtitleUrl) {
@@ -7540,6 +7756,47 @@ export function Player({
                 }}
               />
             </label>
+            {!animeAudioChoice && movyAudioOptions.length >= 2 && (
+              <div className="player-audio-menu">
+                <button
+                  type="button"
+                  className={`ghost-btn control-btn${movyAudioOpen ? ' is-armed' : ''}`}
+                  onClick={() => {
+                    setMovyAudioOpen((open) => !open)
+                    bumpChrome()
+                  }}
+                  disabled={movyAudioBusy}
+                  aria-haspopup="menu"
+                  aria-expanded={movyAudioOpen}
+                  title="Audio language"
+                >
+                  {movyAudioBusy ? 'Audio…' : `Audio: ${movyAudioCurrent?.label || 'Default'}`}
+                </button>
+                {movyAudioOpen && (
+                  <div className="player-audio-menu-list" role="menu" aria-label="Audio language">
+                    {movyAudioOptions.map((option) => {
+                      const active = option.key === movyAudioCurrent?.key
+                      return (
+                        <button
+                          key={option.key}
+                          type="button"
+                          role="menuitemradio"
+                          aria-checked={active}
+                          className={`ghost-btn control-btn${active ? ' is-armed' : ''}`}
+                          onClick={() => {
+                            setMovyAudioOpen(false)
+                            bumpChrome()
+                            if (!active) void switchMovyAudio(option)
+                          }}
+                        >
+                          {option.label}
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
             {animeAudioChoice && (
               <button
                 type="button"
