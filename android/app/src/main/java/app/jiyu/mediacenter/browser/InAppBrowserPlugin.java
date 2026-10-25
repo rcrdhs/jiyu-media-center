@@ -214,6 +214,7 @@ public class InAppBrowserPlugin extends Plugin {
     }
     main.post(() -> {
       try {
+        final boolean wasMulti = geckoMultiActive;
         geckoMultiActive = false;
         hideMultiForSingle();
         ensureOverlay();
@@ -222,6 +223,25 @@ public class InAppBrowserPlugin extends Plugin {
           err.put("ok", false);
           err.put("error", "Could not attach browser view");
           call.resolve(err);
+          return;
+        }
+        // Same page already showing (PiP enter/expand, /web remount, repeat
+        // openUrl): keep the live session like Electron's browser:navigate.
+        // Re-loading restarted live football streams after every PiP hop.
+        if (
+          !wasMulti
+          && gecko.getVisibility() == View.VISIBLE
+          && sameBrowserPage(currentUrl, target)
+        ) {
+          android.util.Log.i("JiyuBrowser", "navigate kept live page (same url)");
+          ensureUsableBounds();
+          gecko.resume();
+          notifyNav();
+          JSObject kept = ok();
+          kept.put("url", currentUrl);
+          kept.put("external", false);
+          kept.put("kept", true);
+          call.resolve(kept);
           return;
         }
         // resolveMedia parks the surface at 2×2 INVISIBLE — expand before paint
@@ -1589,6 +1609,28 @@ public class InAppBrowserPlugin extends Plugin {
     nav.put("loading", loading);
     nav.put("external", false);
     notifyListeners("nav", nav);
+  }
+
+  /** Mirrors sameBrowserPageUrl in src/lib/webBrowser.ts (Electron browser:navigate). */
+  static boolean sameBrowserPage(String a, String b) {
+    if (a == null || b == null || a.isEmpty() || b.isEmpty()) return false;
+    if (a.startsWith("about:") || b.startsWith("about:")) return false;
+    try {
+      android.net.Uri left = android.net.Uri.parse(a);
+      android.net.Uri right = android.net.Uri.parse(b);
+      String lh = left.getHost() == null ? "" : left.getHost().toLowerCase().replaceFirst("^www\\.", "");
+      String rh = right.getHost() == null ? "" : right.getHost().toLowerCase().replaceFirst("^www\\.", "");
+      if (lh.isEmpty() || !lh.equals(rh)) return false;
+      if ("/watch".equals(left.getPath()) && "/watch".equals(right.getPath())) {
+        String lv = left.getQueryParameter("v");
+        return lv != null && lv.equals(right.getQueryParameter("v"));
+      }
+      String la = a.split("#", 2)[0];
+      String ra = b.split("#", 2)[0];
+      return la.equals(ra);
+    } catch (Throwable t) {
+      return a.equals(b);
+    }
   }
 
   private static JSObject ok() {

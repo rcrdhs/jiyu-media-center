@@ -913,6 +913,9 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
         setNav((current) => ({ ...current, loading: false, title: 'Failed' }))
         return
       }
+      // Same page kept live (PiP enter/expand, /web remount): nothing is loading,
+      // so drop the load cover now instead of flashing black over the stream.
+      if (result && 'kept' in result && result.kept) stopUnwrapCover(false)
       // Prefer the live guest URL when main kept a Rive direct-player hop.
       const live = String(result?.url || target)
       setAddress(live)

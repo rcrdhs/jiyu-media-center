@@ -17,6 +17,8 @@ type InAppBrowserPlugin = {
     error?: string
     /** Reserved; Android in-app browser always stays in-process (GeckoView). */
     external?: boolean
+    /** Same page already showing - live session kept, no reload (matches Electron). */
+    kept?: boolean
   }>
   goBack: () => Promise<{ ok: boolean }>
   goForward: () => Promise<{ ok: boolean }>
