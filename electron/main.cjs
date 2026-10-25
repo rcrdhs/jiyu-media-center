@@ -5355,8 +5355,8 @@ function scheduleWebBrowserSportsAutoplay(contents, options = {}) {
   // replays; the old live-only [900, 2800] left slower streams paused.
   // Denser early polls: most players mount within ~1-2s of dom-ready, and the
   // renderer's "Unwrapping stream…" cover stays up until this kick lands.
-  // Keep polling to the renderer's 20s unwrap cap: slow embeds mount late.
-  const intervals = [300, 700, 1200, 2000, 3200, 5200, 8500, 11000, 14500, 18000]
+  // Keep polling to the renderer's 30s unwrap cap: slow embeds mount late.
+  const intervals = [300, 700, 1200, 2000, 3200, 5200, 8500, 11000, 14500, 18000, 22500, 27000]
   let running = false
   const run = async () => {
     if (!webBrowserView || webBrowserView.webContents.isDestroyed()) return

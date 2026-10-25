@@ -60,7 +60,7 @@ const PIP_MARGIN = 12
 
 /** Live streams: keep "Unwrapping stream…" over the page until a video is really playing. */
 const UNWRAP_COVER_TICK_MS = 300
-const UNWRAP_COVER_MAX_MS = 20_000
+const UNWRAP_COVER_MAX_MS = 30_000
 const UNWRAP_COVER_MIN_MS = 800
 
 /** Live embeds (sports / replays / YouTube live like Nationwide) get the unwrap cover. */
@@ -466,7 +466,7 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
     [execInGuest],
   )
 
-  /** Keep "Unwrapping stream…" up until a <video> is really playing (≈20s cap). */
+  /** Keep "Unwrapping stream…" up until a <video> is really playing (≈30s cap). */
   const startUnwrapCover = useCallback(() => {
     const gen = ++unwrapGenRef.current
     const startedAt = Date.now()
@@ -630,11 +630,13 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
           [2600, true],
           [4200, true],
           [7000, false],
-          // Slow embeds: keep trying until the 20s unwrap cap. Each kick checks
+          // Slow embeds: keep trying until the 30s unwrap cap. Each kick checks
           // for a playing video first and is a no-op once the stream runs.
           [10000, false],
           [13500, true],
           [17000, false],
+          [21000, true],
+          [25000, false],
         ] as const) {
           autoplayTimers.current.push(window.setTimeout(() => sportsKick(aggressive), ms))
         }
