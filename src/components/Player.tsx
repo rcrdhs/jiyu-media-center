@@ -1378,7 +1378,11 @@ export function Player({
     }
   }
 
-  function saveContinueProgress() {
+  /**
+   * urgent: pause / hide / close / PiP / end — always write locally and push to sync now.
+   * Plain playback ticks only write when the playhead moved ≥5 s (see upsertContinueEntry).
+   */
+  function saveContinueProgress(urgent = false) {
     if (isTile) return
     const video = videoRef.current
     if (!video) return
@@ -1505,7 +1509,7 @@ export function Player({
           (item.torrentUri || item.transport === 'torrent' ? 'torrent' : undefined),
         source: item.source,
       },
-      { allowUnknownDuration: true, playbackUrl },
+      { allowUnknownDuration: true, playbackUrl, urgent },
     )
     } catch (err) {
       console.warn('Continue watching progress save failed:', err)
@@ -5326,7 +5330,7 @@ export function Player({
       const playbackUrl = activePlaylistItem.url
       const trusted = remuxTrustedRuntime(playhead, playbackUrl)
       const reported = remuxReportedAbsolute()
-      saveContinueProgress()
+      saveContinueProgress(true)
 
       if (cancelled) return
       if (!shouldAutoAdvanceAfterEnd(playhead, playbackUrl, trusted, reported)) return
@@ -5356,7 +5360,7 @@ export function Player({
             playhead / reported >= 0.97 &&
             !isLikelyPartialDuration(reported, playhead, { playbackUrl }))
         if ((atMediaEnd || (nearComplete && (video.ended || video.paused))) && playhead >= 60) {
-          saveContinueProgress()
+          saveContinueProgress(true)
           advanceToNextEpisodeOrWatchNext()
         }
         return
@@ -6544,7 +6548,7 @@ export function Player({
       remuxDeferTimer = 0
       remuxContinueBusy = false
       leadBufferPauseRef.current = false
-      saveContinueProgress()
+      saveContinueProgress(true)
       video.removeEventListener('play', onPlay)
       video.removeEventListener('playing', onPlaying)
       video.removeEventListener('loadeddata', markMediaReadyIfPainted)
@@ -6569,7 +6573,8 @@ export function Player({
   useEffect(() => {
     if (isTile) return
 
-    const persist = () => saveContinueProgress()
+    const persist = () => saveContinueProgress(false)
+    const persistNow = () => saveContinueProgress(true)
     const onTimeUpdate = () => {
       persist()
       const video = videoRef.current
@@ -6609,13 +6614,13 @@ export function Player({
         }
       }
     }
-    const onPauseSave = () => persist()
-    const onPageHide = () => persist()
-    const onForceSave = () => persist()
+    const onPauseSave = () => persistNow()
+    const onPageHide = () => persistNow()
+    const onForceSave = () => persistNow()
     const onVisibility = () => {
-      if (document.visibilityState === 'hidden') persist()
+      if (document.visibilityState === 'hidden') persistNow()
     }
-    const onBeforeUnload = () => persist()
+    const onBeforeUnload = () => persistNow()
 
     const video = videoRef.current
     video?.addEventListener('timeupdate', onTimeUpdate)
@@ -6633,7 +6638,7 @@ export function Player({
     }, 1000)
 
     return () => {
-      persist()
+      persistNow()
       video?.removeEventListener('timeupdate', onTimeUpdate)
       video?.removeEventListener('pause', onPauseSave)
       window.removeEventListener('pagehide', onPageHide)

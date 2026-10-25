@@ -6158,6 +6158,9 @@ app.whenReady().then(() => {
 
 ipcMain.handle('app:getVersion', async () => APP_VERSION)
 
+// Continue-watching sync device token (encrypted file in userData; see syncSecret.cjs).
+require('./syncSecret.cjs').registerSyncSecretIpc()
+
 ipcMain.handle('app:backgroundSync', async (_event, active) => {
   try {
     if (mainWindow && !mainWindow.isDestroyed()) {

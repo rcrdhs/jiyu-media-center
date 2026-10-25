@@ -1,0 +1,4 @@
+{
+  "//": "Public Continue-watching sync Worker (workers/jiyu-sync). Not a secret.",
+  "syncUrl": "https://jiyu-sync.free-river.workers.dev"
+}

@@ -43,6 +43,7 @@ public class MainActivity extends BridgeActivity {
     registerPlugin(CatalogSyncPlugin.class);
     registerPlugin(CastPlugin.class);
     registerPlugin(BiliSessionPlugin.class);
+    registerPlugin(app.jiyu.mediacenter.sync.SyncSecretPlugin.class);
     super.onCreate(savedInstanceState);
     applyDarkSystemBars();
     // Splash / Capacitor can flip icon appearance after first paint — re-assert.

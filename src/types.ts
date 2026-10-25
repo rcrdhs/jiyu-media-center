@@ -416,6 +416,10 @@ declare global {
       biliTvSignInCancel?: () => Promise<BiliTvSessionStatus>
       biliTvSignOut?: () => Promise<BiliTvSessionStatus>
       onBiliTvSession?: (callback: (status: BiliTvSessionStatus) => void) => () => void
+      /** Continue-watching sync token, encrypted with OS safeStorage in main (never localStorage). */
+      syncSecretGet?: () => Promise<{ token: string | null; encrypted: boolean }>
+      syncSecretSet?: (token: string) => Promise<{ ok: boolean; encrypted: boolean }>
+      syncSecretClear?: () => Promise<{ ok: boolean }>
       /** Softsubs via Wyzie — key stays in Electron main .env; no key → jiyu-wyzie Worker. */
       resolveWyzieSubtitle?: (options: {
         tmdbId: string | number

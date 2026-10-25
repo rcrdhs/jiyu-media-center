@@ -91,6 +91,10 @@ contextBridge.exposeInMainWorld('signalDesktop', {
   biliTvSignIn: () => ipcRenderer.invoke('bili:tvSignIn'),
   biliTvSignInCancel: () => ipcRenderer.invoke('bili:tvSignInCancel'),
   biliTvSignOut: () => ipcRenderer.invoke('bili:tvSignOut'),
+  // Continue-watching sync token: encrypted in main (safeStorage), never in localStorage.
+  syncSecretGet: () => ipcRenderer.invoke('sync:secretGet'),
+  syncSecretSet: (token) => ipcRenderer.invoke('sync:secretSet', String(token || '')),
+  syncSecretClear: () => ipcRenderer.invoke('sync:secretClear'),
   onBiliTvSession: (callback) => {
     const listener = (_event, payload) => callback(payload)
     ipcRenderer.on('bili:tvSession', listener)

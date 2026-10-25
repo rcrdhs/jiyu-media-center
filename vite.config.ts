@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { defineConfig } from 'vite'
+import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
 
 const root = path.dirname(fileURLToPath(import.meta.url))
@@ -9,9 +9,27 @@ const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'))
   version?: string
 }
 const appVersion = pkg.version || '0.0.0'
-const syncUrl = String(process.env.VITE_JIYU_SYNC_URL || '').trim()
 
-export default defineConfig({
+/**
+ * Continue-watching sync host baked into every build (desktop, Android, web).
+ * Order: VITE_JIYU_SYNC_URL env → .env* files → committed config/public-sync.json.
+ * Only a public https Worker URL — never a token.
+ */
+function resolveSyncUrl(mode: string): string {
+  const fromEnv =
+    process.env.VITE_JIYU_SYNC_URL || loadEnv(mode, root, 'VITE_JIYU_').VITE_JIYU_SYNC_URL || ''
+  if (fromEnv.trim()) return fromEnv.trim()
+  try {
+    const cfg = JSON.parse(
+      fs.readFileSync(path.join(root, 'config', 'public-sync.json'), 'utf8'),
+    ) as { syncUrl?: string }
+    return String(cfg.syncUrl || '').trim()
+  } catch {
+    return ''
+  }
+}
+
+export default defineConfig(({ mode }) => ({
   plugins: [react()],
   base: './',
   // Electron reads TMDB_API_KEY from .env; expose the same key to the Vite
@@ -21,7 +39,7 @@ export default defineConfig({
   define: {
     __JIYU_VERSION__: JSON.stringify(appVersion),
     // Same Continue-watching sync host for Android, desktop, future TV/Apple.
-    __JIYU_SYNC_URL__: JSON.stringify(syncUrl),
+    __JIYU_SYNC_URL__: JSON.stringify(resolveSyncUrl(mode)),
   },
   resolve: {
     alias: {
@@ -59,4 +77,4 @@ export default defineConfig({
   optimizeDeps: {
     include: ['mpegts.js'],
   },
-})
+}))

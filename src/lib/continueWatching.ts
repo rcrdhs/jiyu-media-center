@@ -30,6 +30,8 @@ const MIN_SECONDS = 5
 /** Watched this much of the title → treat as finished (no Continue watching). */
 export const COMPLETE_RATIO = 0.95
 export const FORCE_SAVE_CONTINUE_EVENT = 'jiyu:force-save-continue'
+/** Minimum playhead movement before a non-urgent progress save rewrites storage. */
+const LOCAL_SAVE_MIN_DELTA_SEC = 5
 
 /** Titles that support Continue watching / mid-playback resume. */
 export const VOD_CATEGORIES = ['movies', 'series', 'anime', 'kids'] as const
@@ -253,19 +255,24 @@ export function repairContinueWithRuntime(
 }
 
 export function removeContinueEntry(id: string) {
-  writeAll(readAll().filter((entry) => entry.id !== id))
+  const all = readAll()
+  const removed = all.find((entry) => entry.id === id)
+  // Already gone (e.g. finished-title ticks after the row was dropped) — no write, no tombstone.
+  if (!removed) return
+  writeAll(all.filter((entry) => entry.id !== id))
   void import('./progressSync').then((mod) => {
-    mod.queueProgressSyncDelete(id)
+    mod.queueProgressSyncDelete(id, removed.category)
   })
 }
 
 export function clearContinueWatching() {
-  const ids = readAll().map((entry) => entry.id)
+  const rows = readAll().map((entry) => ({ id: entry.id, category: entry.category }))
   localStorage.removeItem(KEY)
   window.dispatchEvent(new CustomEvent(CONTINUE_WATCHING_EVENT))
-  if (ids.length > 0) {
+  if (rows.length > 0) {
+    // One batched upload for the whole clear, not one request per title.
     void import('./progressSync').then((mod) => {
-      for (const id of ids) mod.queueProgressSyncDelete(id)
+      mod.queueProgressSyncDeletes(rows)
     })
   }
 }
@@ -273,6 +280,8 @@ export function clearContinueWatching() {
 /** Apply a merged Continue watching list from cross-device sync (trims per shelf). */
 export function applySyncedContinueEntries(entries: ContinueWatchingEntry[]) {
   writeAll(entries)
+  // Remote playhead changes don't alter shelf membership — refresh Resume labels anyway.
+  window.dispatchEvent(new CustomEvent(CONTINUE_WATCHING_EVENT))
 }
 
 /** Rebuild a playable catalog-shaped item from a continue row (movies / series / anime). */
@@ -483,7 +492,12 @@ export function shouldTrackProgress(
 
 export function upsertContinueEntry(
   entry: Omit<ContinueWatchingEntry, 'updatedAt'> & { updatedAt?: number },
-  options?: { allowUnknownDuration?: boolean; playbackUrl?: string },
+  options?: {
+    allowUnknownDuration?: boolean
+    playbackUrl?: string
+    /** Pause / hide / close / end — always write and sync immediately. */
+    urgent?: boolean
+  },
 ) {
   if (!isVodCategory(entry.category)) return
 
@@ -582,6 +596,19 @@ export function upsertContinueEntry(
     return
   }
 
+  // Playback ticks: skip the localStorage rewrite until the playhead moved enough.
+  if (
+    !options?.urgent &&
+    entry.updatedAt === undefined &&
+    existing &&
+    existing.category === next.category &&
+    (existing.playlistIndex || 0) === (next.playlistIndex || 0) &&
+    (existing.duration || 0) === (next.duration || 0) &&
+    Math.abs((existing.currentTime || 0) - next.currentTime) < LOCAL_SAVE_MIN_DELTA_SEC
+  ) {
+    return
+  }
+
   mirrorWatchHistory(next)
 
   // Replace only this title id — never drop other categories' resumes.
@@ -591,7 +618,7 @@ export function upsertContinueEntry(
   // Cross-device sync (no-op when unsigned / unconfigured). Dynamic import
   // avoids a static cycle with progressSync.
   void import('./progressSync').then((mod) => {
-    mod.queueProgressSyncPush(next)
+    mod.queueProgressSyncPush(next, { urgent: Boolean(options?.urgent) })
   })
 }
 
