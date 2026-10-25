@@ -53,6 +53,7 @@ import {
   TMDB_ANIME_SOURCE_ID,
   TMDB_KIDS_SOURCE_ID,
   TMDB_TV_SOURCE_ID,
+  indexTmdbTvTitles,
 } from '../lib/tmdbTv'
 import { ZENOX_SOURCE_ID } from '../lib/zenox'
 import {
@@ -386,6 +387,8 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
     void torrentSourceRevision
     void hideKeywordsTick
     let base = items.filter((item) => item.category === 'series')
+    // Card network chips: M2Box rows borrow a same-title TMDB row's id.
+    indexTmdbTvTitles(base)
     base = filterShelfVisibleItems(base)
     return base.filter(isSeriesWebCatalogItem)
   }, [items, torrentSourceRevision, hideKeywordsTick])

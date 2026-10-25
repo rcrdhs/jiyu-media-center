@@ -2119,6 +2119,48 @@ html.is-android .new-titles-head h2 {
   opacity: 0.75;
 }
 
+/* TV network chip (TMDB networks) - bottom-left of the poster. */
+.media-card-network {
+  position: absolute;
+  left: 0.45rem;
+  bottom: 0.45rem;
+  z-index: 2;
+  max-width: calc(100% - 0.9rem);
+  display: inline-flex;
+  align-items: center;
+  padding: 0.22rem 0.45rem;
+  border-radius: 6px;
+  background: rgba(8, 10, 13, 0.78);
+  color: #f2f4f7;
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  line-height: 1.1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+/* Most TMDB network logos are dark-on-transparent: light chip keeps them readable. */
+.media-card-network.has-logo {
+  background: rgba(244, 246, 249, 0.92);
+  padding: 0.2rem 0.4rem;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+}
+
+.media-card-art .media-card-network img,
+.media-card:hover .media-card-art .media-card-network img {
+  position: static;
+  display: block;
+  width: auto;
+  height: 0.95rem;
+  max-width: 4.6rem;
+  object-fit: contain;
+  transform: none;
+  filter: none;
+}
+
 .media-card-art .status-badge {
   left: auto;
   right: 0.55rem;

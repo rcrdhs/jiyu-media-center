@@ -23,6 +23,8 @@ import {
   toggleWatchlist,
 } from '../lib/watchlist'
 import { CardPreview } from './CardPreview'
+import { CardNetworkBadge } from './CardNetworkBadge'
+import { cardTmdbTvId } from '../lib/tmdbTv'
 import { prefetchYouTubeLive } from '../lib/youtubeLive'
 import { androidBrowserPrewarm } from '../lib/androidBrowser'
 import type { StreamHealthState, StreamItem } from '../types'
@@ -65,6 +67,10 @@ export function MediaCard({ item }: MediaCardProps) {
   const [saved, setSaved] = useState(() => isOnWatchlist(item.id))
   const [nowMs, setNowMs] = useState(() => Date.now())
   const hoverTimer = useRef<number | null>(null)
+  const wrapRef = useRef<HTMLDivElement | null>(null)
+  // TV cards: network chip from TMDB, same on Popular / Airing / Trending.
+  const networkTmdbId = cardTmdbTvId(item)
+  const networkSearchTitle = !networkTmdbId && item.category === 'series' ? item.title : ''
   const matchSides =
     item.category === 'sports' ? parseSportsMatchSides(item.title) : null
   const catalogPoster = (() => {
@@ -194,6 +200,7 @@ export function MediaCard({ item }: MediaCardProps) {
 
   return (
     <div
+      ref={wrapRef}
       className={`media-card-wrap status-${status}`}
       data-item-id={item.id}
       onMouseEnter={onEnter}
@@ -250,6 +257,14 @@ export function MediaCard({ item }: MediaCardProps) {
           ) : (
             <span className="media-card-fallback">{item.title.slice(0, 1)}</span>
           )}
+          {networkTmdbId || networkSearchTitle ? (
+            <CardNetworkBadge
+              tmdbId={networkTmdbId}
+              searchTitle={networkSearchTitle}
+              releasedAt={item.releasedAt}
+              anchorRef={wrapRef}
+            />
+          ) : null}
           {previewing && <CardPreview url={item.url} onEnd={endPreview} />}
           {/* Sports meta (league + viewers/countdown) lives in the card body like PPV.st */}
           {eventBadge && item.category !== 'sports' ? (

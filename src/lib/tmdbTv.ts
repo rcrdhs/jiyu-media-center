@@ -4,7 +4,9 @@
  */
 
 import type { TorrentPageLink } from './torrents'
+import type { StreamItem } from '../types'
 import { genresFromTmdbIds } from './genres'
+import { normalizeTitleKey } from './dedupe'
 
 export const TMDB_TV_SOURCE_ID = 'builtin-tmdb-tv'
 export const TMDB_ANIME_SOURCE_ID = 'builtin-tmdb-anime'
@@ -16,6 +18,9 @@ export const TMDB_TV_BY_YEAR_FEED_PREFIX = 'jiyu://tmdb-tv-by-year'
 export const TMDB_ANIME_FULL_FEED_PREFIX = 'jiyu://tmdb-anime-full'
 export const TMDB_KIDS_SHOWS_FEED_PREFIX = 'jiyu://tmdb-kids-shows'
 export const TMDB_TV_DETAIL_PREFIX = 'jiyu://tmdb-tv'
+
+/** Same public TMDB key used by RiveStream's client (metadata / episode lists / networks). */
+const TMDB_PUBLIC_API_KEY = 'd64117f26031a428449f102ced3aba73'
 
 /**
  * Series discover pages (20/page, TMDB max ~500 pages).
@@ -407,7 +412,7 @@ export async function fetchTmdbTvEpisodeList(
   }
 
   // Same public TMDB key used by RiveStream's client (metadata / episode lists).
-  const apiKey = 'd64117f26031a428449f102ced3aba73'
+  const apiKey = TMDB_PUBLIC_API_KEY
 
   const showUrl = `https://api.themoviedb.org/3/tv/${encodeURIComponent(id)}?api_key=${apiKey}&language=en-US`
   const show = await fetchJson(showUrl)
@@ -513,8 +518,445 @@ export async function fetchTmdbTvEpisodeList(
     networks: networks.length > 0 ? networks : undefined,
     error: episodes.length === 0 ? 'No episodes found on TMDB' : undefined,
   }
+  rememberTmdbTvNetworks(id, networks)
   if (episodes.length > 0) {
     episodeListCache.set(id, { at: Date.now(), result })
   }
   return result
+}
+
+/* ------------------------------------------------------------------------ */
+/* Network (channel / streamer) labels for TV cards                          */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * Catalog list endpoints (popular / on_the_air / trending) don't include
+ * networks, so cards look them up from `/tv/{id}` lazily - only for cards on
+ * screen, two at a time, and remembered in localStorage so each show costs one
+ * request per month (shared by every shelf + the show page).
+ */
+const NETWORK_CACHE_STORAGE_KEY = 'jiyu-tmdb-tv-networks-v1'
+const NETWORK_CACHE_TTL_MS = 30 * 24 * 60 * 60_000
+/** Shows TMDB lists without a network: re-check less often than never. */
+const NETWORK_EMPTY_TTL_MS = 7 * 24 * 60 * 60_000
+/** After a failed lookup, wait before asking TMDB again this session. */
+const NETWORK_FAIL_RETRY_MS = 10 * 60_000
+const NETWORK_CACHE_MAX = 4000
+const NETWORK_FETCH_CONCURRENCY = 2
+
+type NetworkCacheEntry = {
+  /** Saved-at (ms). */
+  a: number
+  /** [name, logo_path?] pairs (paths keep storage small). */
+  n: Array<[string, string?]>
+}
+
+let networkCache: Map<string, NetworkCacheEntry> | null = null
+let networkSaveTimer: ReturnType<typeof setTimeout> | null = null
+const networkInflight = new Map<string, Promise<TmdbTvNetworkInfo[] | undefined>>()
+const networkFailedAt = new Map<string, number>()
+const networkQueue: Array<() => void> = []
+let networkActive = 0
+
+function networkLogoUrl(path: string | undefined, size = 'w154'): string | undefined {
+  const p = String(path || '').trim()
+  if (!p) return undefined
+  return `https://image.tmdb.org/t/p/${size}${p.startsWith('/') ? '' : '/'}${p}`
+}
+
+function networkLogoPath(url: string | undefined): string | undefined {
+  const m = String(url || '').match(/\/t\/p\/[^/]+(\/.+)$/)
+  return m?.[1] || undefined
+}
+
+function loadNetworkCache(): Map<string, NetworkCacheEntry> {
+  if (networkCache) return networkCache
+  networkCache = new Map()
+  try {
+    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(NETWORK_CACHE_STORAGE_KEY) : null
+    if (raw) {
+      const parsed = JSON.parse(raw) as Record<string, NetworkCacheEntry>
+      for (const [id, entry] of Object.entries(parsed || {})) {
+        if (entry && typeof entry.a === 'number' && Array.isArray(entry.n)) networkCache.set(id, entry)
+      }
+    }
+  } catch {
+    /* corrupt cache - start fresh */
+  }
+  return networkCache
+}
+
+function scheduleNetworkCacheSave(): void {
+  if (networkSaveTimer != null) return
+  networkSaveTimer = setTimeout(() => {
+    networkSaveTimer = null
+    const cache = loadNetworkCache()
+    // Oldest first out when the cache grows past the cap.
+    if (cache.size > NETWORK_CACHE_MAX) {
+      const sorted = [...cache.entries()].sort((x, y) => x[1].a - y[1].a)
+      for (const [id] of sorted.slice(0, cache.size - NETWORK_CACHE_MAX)) cache.delete(id)
+    }
+    try {
+      localStorage.setItem(NETWORK_CACHE_STORAGE_KEY, JSON.stringify(Object.fromEntries(cache)))
+    } catch {
+      /* storage full / unavailable - in-memory cache still works */
+    }
+  }, 800)
+}
+
+/** Save networks for a TMDB TV id (also fed by the show page's full fetch). */
+export function rememberTmdbTvNetworks(tmdbId: string, networks: TmdbTvNetworkInfo[] | undefined): void {
+  const id = String(tmdbId || '').trim()
+  if (!id) return
+  const cache = loadNetworkCache()
+  cache.set(id, {
+    a: Date.now(),
+    n: (networks || []).map((row) => {
+      const path = networkLogoPath(row.logoUrl)
+      return path ? [row.name, path] : [row.name]
+    }),
+  })
+  networkFailedAt.delete(id)
+  scheduleNetworkCacheSave()
+}
+
+/**
+ * Cached networks for a TMDB TV id: `undefined` when unknown / stale,
+ * `[]` when TMDB lists none.
+ */
+export function getCachedTmdbTvNetworks(
+  tmdbId: string,
+  logoSize = 'w154',
+): TmdbTvNetworkInfo[] | undefined {
+  const id = String(tmdbId || '').trim()
+  if (!id) return undefined
+  const entry = loadNetworkCache().get(id)
+  if (!entry) return undefined
+  const ttl = entry.n.length > 0 ? NETWORK_CACHE_TTL_MS : NETWORK_EMPTY_TTL_MS
+  if (Date.now() - entry.a > ttl) return undefined
+  return entry.n.map(([name, path]) => ({ name, logoUrl: networkLogoUrl(path, logoSize) }))
+}
+
+function runNetworkQueue(): void {
+  while (networkActive < NETWORK_FETCH_CONCURRENCY && networkQueue.length > 0) {
+    const job = networkQueue.shift()!
+    networkActive += 1
+    job()
+  }
+}
+
+/**
+ * Look up a show's networks (one light `/tv/{id}` request, queued 2 at a time).
+ * `isWanted` lets a card that scrolled away drop out before its turn.
+ */
+export function loadTmdbTvNetworks(
+  tmdbId: string,
+  options: { isWanted?: () => boolean; logoSize?: string } = {},
+): Promise<TmdbTvNetworkInfo[] | undefined> {
+  const id = String(tmdbId || '').trim()
+  if (!/^\d+$/.test(id)) return Promise.resolve(undefined)
+  const cached = getCachedTmdbTvNetworks(id, options.logoSize)
+  if (cached) return Promise.resolve(cached)
+  const failedAt = networkFailedAt.get(id)
+  if (failedAt && Date.now() - failedAt < NETWORK_FAIL_RETRY_MS) return Promise.resolve(undefined)
+  const existing = networkInflight.get(id)
+  if (existing) {
+    return existing.then(() => getCachedTmdbTvNetworks(id, options.logoSize))
+  }
+  const promise = new Promise<TmdbTvNetworkInfo[] | undefined>((resolve) => {
+    networkQueue.push(() => {
+      void (async () => {
+        try {
+          if (options.isWanted && !options.isWanted()) {
+            resolve(undefined)
+            return
+          }
+          const fresh = getCachedTmdbTvNetworks(id, options.logoSize)
+          if (fresh) {
+            resolve(fresh)
+            return
+          }
+          const url =
+            `https://api.themoviedb.org/3/tv/${encodeURIComponent(id)}` +
+            `?api_key=${TMDB_PUBLIC_API_KEY}&language=en-US`
+          const res = await fetchJson(url)
+          if (!res.ok || !res.data || typeof res.data !== 'object') {
+            networkFailedAt.set(id, Date.now())
+            resolve(undefined)
+            return
+          }
+          const rows = (res.data as { networks?: Array<{ name?: string; logo_path?: string | null }> })
+            .networks
+          const networks: TmdbTvNetworkInfo[] = []
+          for (const row of rows || []) {
+            const name = String(row.name || '').trim()
+            if (!name) continue
+            networks.push({ name, logoUrl: networkLogoUrl(row.logo_path || undefined) })
+          }
+          rememberTmdbTvNetworks(id, networks)
+          resolve(getCachedTmdbTvNetworks(id, options.logoSize))
+        } catch {
+          networkFailedAt.set(id, Date.now())
+          resolve(undefined)
+        } finally {
+          networkActive -= 1
+          runNetworkQueue()
+        }
+      })()
+    })
+    runNetworkQueue()
+  })
+  // Only share the request while it's in flight (a dropped "unwanted" job
+  // must not block a later card that does want it).
+  networkInflight.set(id, promise)
+  void promise.finally(() => {
+    if (networkInflight.get(id) === promise) networkInflight.delete(id)
+  })
+  return promise
+}
+
+/**
+ * TMDB TV id for a show card, when one is known without extra lookups.
+ * Series shelves (TMDB / Cinetaro / NetMirror) + TMDB Kids shows only - anime
+ * ids are remapped at play time and movie ids would hit the wrong endpoint.
+ */
+type CardTmdbFields = Pick<
+  StreamItem,
+  | 'title'
+  | 'category'
+  | 'torrentSourceId'
+  | 'rivestreamTmdbId'
+  | 'cinetaroTmdbId'
+  | 'netmirrorTmdbId'
+  | 'url'
+  | 'detailUrl'
+  | 'releasedAt'
+>
+
+function directCardTmdbTvId(item: CardTmdbFields): string {
+  const series = item.category === 'series'
+  const kidsShow = item.category === 'kids' && item.torrentSourceId === TMDB_KIDS_SOURCE_ID
+  if (!series && !kidsShow) return ''
+  const id =
+    String(item.rivestreamTmdbId || '').trim() ||
+    String(item.cinetaroTmdbId || '').trim() ||
+    String(item.netmirrorTmdbId || '').trim() ||
+    tmdbTvIdFromUrl(item.url || '') ||
+    tmdbTvIdFromUrl(item.detailUrl || '')
+  return /^\d+$/.test(id) ? id : ''
+}
+
+/**
+ * Title -> TMDB id from series rows that already carry one, so M2Box / other
+ * id-less rows of the same show borrow it (zero requests). A title shared by
+ * different TMDB shows is ambiguous (null) unless the release year settles it.
+ */
+const tmdbTvTitleIndex = new Map<string, string | null>()
+let tmdbTvTitleIndexSource: readonly StreamItem[] | null = null
+
+function seriesTitleKey(title: string): string {
+  return normalizeTitleKey(String(title || '').replace(/\s*\((19|20)\d{2}\)\s*$/, ''))
+}
+
+function releaseYear(releasedAt: number | undefined): string {
+  if (!releasedAt || !Number.isFinite(releasedAt)) return ''
+  return String(new Date(releasedAt).getUTCFullYear())
+}
+
+function indexTitleKey(key: string, id: string): void {
+  const prev = tmdbTvTitleIndex.get(key)
+  if (prev === undefined) tmdbTvTitleIndex.set(key, id)
+  else if (prev !== id) tmdbTvTitleIndex.set(key, null)
+}
+
+/** Rebuild the title index from the catalog's series rows (cheap, no network). */
+export function indexTmdbTvTitles(items: readonly StreamItem[]): void {
+  if (items === tmdbTvTitleIndexSource) return
+  tmdbTvTitleIndexSource = items
+  tmdbTvTitleIndex.clear()
+  for (const item of items) {
+    if (item.category !== 'series') continue
+    const id = directCardTmdbTvId(item)
+    if (!id) continue
+    const key = seriesTitleKey(item.title)
+    if (!key) continue
+    indexTitleKey(key, id)
+    const year = releaseYear(item.releasedAt)
+    if (year) indexTitleKey(`${key}|${year}`, id)
+  }
+}
+
+/**
+ * TMDB TV id for a show card, when one is known without extra lookups.
+ * Series shelves (TMDB / Cinetaro / NetMirror) + TMDB Kids shows only - anime
+ * ids are remapped at play time and movie ids would hit the wrong endpoint.
+ * Series rows without an id (M2Box) borrow one from a same-title TMDB row.
+ */
+export function cardTmdbTvId(item: CardTmdbFields): string {
+  const direct = directCardTmdbTvId(item)
+  if (direct || item.category !== 'series' || tmdbTvTitleIndex.size === 0) return direct
+  const key = seriesTitleKey(item.title)
+  if (!key) return ''
+  const year = releaseYear(item.releasedAt)
+  const byYear = year ? tmdbTvTitleIndex.get(`${key}|${year}`) : undefined
+  if (byYear) return byYear
+  return tmdbTvTitleIndex.get(key) || ''
+}
+
+/**
+ * Title -> TMDB TV id for series rows with no id and no same-title TMDB row in
+ * the catalog (M2Box Popular). One `/search/tv` per show, only for cards on
+ * screen, same 2-at-a-time queue, remembered ~30 days (misses ~7 days).
+ */
+const TITLE_ID_CACHE_STORAGE_KEY = 'jiyu-tmdb-tv-title-ids-v1'
+
+type TitleIdCacheEntry = {
+  /** Saved-at (ms). */
+  a: number
+  /** TMDB TV id, '' when TMDB had no confident match. */
+  i: string
+}
+
+let titleIdCache: Map<string, TitleIdCacheEntry> | null = null
+let titleIdSaveTimer: ReturnType<typeof setTimeout> | null = null
+const titleIdInflight = new Map<string, Promise<string | undefined>>()
+const titleIdFailedAt = new Map<string, number>()
+
+function titleLookupKey(title: string, releasedAt?: number): string {
+  const key = seriesTitleKey(title)
+  if (!key) return ''
+  const year = releaseYear(releasedAt)
+  return year ? `${key}|${year}` : key
+}
+
+function loadTitleIdCache(): Map<string, TitleIdCacheEntry> {
+  if (titleIdCache) return titleIdCache
+  titleIdCache = new Map()
+  try {
+    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(TITLE_ID_CACHE_STORAGE_KEY) : null
+    if (raw) {
+      const parsed = JSON.parse(raw) as Record<string, TitleIdCacheEntry>
+      for (const [key, entry] of Object.entries(parsed || {})) {
+        if (entry && typeof entry.a === 'number' && typeof entry.i === 'string') titleIdCache.set(key, entry)
+      }
+    }
+  } catch {
+    /* corrupt cache - start fresh */
+  }
+  return titleIdCache
+}
+
+function scheduleTitleIdCacheSave(): void {
+  if (titleIdSaveTimer != null) return
+  titleIdSaveTimer = setTimeout(() => {
+    titleIdSaveTimer = null
+    const cache = loadTitleIdCache()
+    if (cache.size > NETWORK_CACHE_MAX) {
+      const sorted = [...cache.entries()].sort((x, y) => x[1].a - y[1].a)
+      for (const [key] of sorted.slice(0, cache.size - NETWORK_CACHE_MAX)) cache.delete(key)
+    }
+    try {
+      localStorage.setItem(TITLE_ID_CACHE_STORAGE_KEY, JSON.stringify(Object.fromEntries(cache)))
+    } catch {
+      /* storage full / unavailable - in-memory cache still works */
+    }
+  }, 800)
+}
+
+/**
+ * Known TMDB TV id for a show title: the id, `''` when TMDB had no confident
+ * match (recently), `undefined` when it hasn't been looked up.
+ */
+export function getCachedTmdbTvIdForTitle(title: string, releasedAt?: number): string | undefined {
+  const key = titleLookupKey(title, releasedAt)
+  if (!key) return ''
+  const entry = loadTitleIdCache().get(key)
+  if (!entry) return undefined
+  const ttl = entry.i ? NETWORK_CACHE_TTL_MS : NETWORK_EMPTY_TTL_MS
+  if (Date.now() - entry.a > ttl) return undefined
+  return entry.i
+}
+
+type TmdbTvSearchRow = { id?: number; name?: string; original_name?: string; first_air_date?: string }
+
+/** Exact (normalized) title match only; the release year breaks ties. */
+function pickTmdbTvSearchMatch(rows: TmdbTvSearchRow[], title: string, releasedAt?: number): string {
+  const key = seriesTitleKey(title)
+  const exact = rows.filter(
+    (row) =>
+      row.id &&
+      (seriesTitleKey(row.name || '') === key || seriesTitleKey(row.original_name || '') === key),
+  )
+  if (exact.length === 0) return ''
+  const year = Number(releaseYear(releasedAt))
+  if (year) {
+    const rowYear = (row: TmdbTvSearchRow) => Number(String(row.first_air_date || '').slice(0, 4)) || 0
+    const sameYear = exact.find((row) => rowYear(row) === year)
+    if (sameYear) return String(sameYear.id)
+    // M2Box dates can be a later season's: accept an earlier premiere too.
+    const earlier = exact.find((row) => rowYear(row) > 0 && rowYear(row) <= year)
+    if (earlier) return String(earlier.id)
+    return ''
+  }
+  return String(exact[0].id)
+}
+
+/** Resolve a show title to a TMDB TV id (one `/search/tv`, queued with network lookups). */
+export function resolveTmdbTvIdForTitle(
+  title: string,
+  releasedAt?: number,
+  options: { isWanted?: () => boolean } = {},
+): Promise<string | undefined> {
+  const key = titleLookupKey(title, releasedAt)
+  if (!key) return Promise.resolve('')
+  const cached = getCachedTmdbTvIdForTitle(title, releasedAt)
+  if (cached !== undefined) return Promise.resolve(cached)
+  const failedAt = titleIdFailedAt.get(key)
+  if (failedAt && Date.now() - failedAt < NETWORK_FAIL_RETRY_MS) return Promise.resolve(undefined)
+  const existing = titleIdInflight.get(key)
+  if (existing) return existing.then(() => getCachedTmdbTvIdForTitle(title, releasedAt))
+  const query = String(title || '').replace(/\s*\((19|20)\d{2}\)\s*$/, '').trim()
+  const promise = new Promise<string | undefined>((resolve) => {
+    networkQueue.push(() => {
+      void (async () => {
+        try {
+          if (options.isWanted && !options.isWanted()) {
+            resolve(undefined)
+            return
+          }
+          const fresh = getCachedTmdbTvIdForTitle(title, releasedAt)
+          if (fresh !== undefined) {
+            resolve(fresh)
+            return
+          }
+          const url =
+            `https://api.themoviedb.org/3/search/tv?api_key=${TMDB_PUBLIC_API_KEY}` +
+            `&language=en-US&include_adult=false&page=1&query=${encodeURIComponent(query)}`
+          const res = await fetchJson(url)
+          if (!res.ok || !res.data || typeof res.data !== 'object') {
+            titleIdFailedAt.set(key, Date.now())
+            resolve(undefined)
+            return
+          }
+          const rows = (res.data as { results?: TmdbTvSearchRow[] }).results || []
+          const id = pickTmdbTvSearchMatch(rows, title, releasedAt)
+          loadTitleIdCache().set(key, { a: Date.now(), i: id })
+          scheduleTitleIdCacheSave()
+          resolve(id)
+        } catch {
+          titleIdFailedAt.set(key, Date.now())
+          resolve(undefined)
+        } finally {
+          networkActive -= 1
+          runNetworkQueue()
+        }
+      })()
+    })
+    runNetworkQueue()
+  })
+  titleIdInflight.set(key, promise)
+  void promise.finally(() => {
+    if (titleIdInflight.get(key) === promise) titleIdInflight.delete(key)
+  })
+  return promise
 }
