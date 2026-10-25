@@ -22,6 +22,11 @@ export type SyncState = {
   dirty: Record<string, true>
   /** Local deletions not yet accepted: id → { at: local ms, category }. */
   deletes: Record<string, { at: number; category: string }>
+  /**
+   * Fingerprint of what the server last accepted (or sent) per title. A dirty title whose
+   * row still matches is dropped without a PUT (pause → minimise → close saves the same row).
+   */
+  pushed: Record<string, string>
 }
 
 function readJson<T>(key: string): T | null {
@@ -100,6 +105,7 @@ export function readSyncState(): SyncState {
     lastRev: Number(raw.lastRev) || 0,
     dirty: raw.dirty && typeof raw.dirty === 'object' ? raw.dirty : {},
     deletes: raw.deletes && typeof raw.deletes === 'object' ? raw.deletes : {},
+    pushed: raw.pushed && typeof raw.pushed === 'object' ? raw.pushed : {},
   }
 }
 

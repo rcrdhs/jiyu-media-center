@@ -17,7 +17,7 @@ import {
   listContinueWatching,
   type ContinueWatchingEntry,
 } from '../continueWatching'
-import { continueEntryToSyncRecord, syncRecordToContinueEntry } from './bridge'
+import { continueEntryToSyncRecord, syncFingerprint, syncRecordToContinueEntry } from './bridge'
 import { isProgressSyncConfigured } from './config'
 import { clearSyncToken, loadSyncToken, saveSyncToken } from './secretStore'
 import {
@@ -169,6 +169,10 @@ function applyRemoteRows(rows: ProgressSyncRecord[], serverNow: number) {
       stateChanged = true
     }
     if (row.deleted) {
+      if (state.pushed[row.id]) {
+        delete state.pushed[row.id]
+        stateChanged = true
+      }
       if (mine) {
         local.delete(row.id)
         changed = true
@@ -177,6 +181,12 @@ function applyRemoteRows(rows: ProgressSyncRecord[], serverNow: number) {
     }
     const incoming = syncRecordToContinueEntry({ ...row, updatedAt: localUpdatedAt })
     if (!incoming) continue
+    // The server now holds this row: a later local save of the same values needs no upload.
+    const fingerprint = syncFingerprint(continueEntryToSyncRecord(incoming))
+    if (fingerprint && state.pushed[row.id] !== fingerprint) {
+      state.pushed[row.id] = fingerprint
+      stateChanged = true
+    }
     // Echo of what this device already has (e.g. our own upload) — skip the rewrite.
     if (
       mine &&
@@ -198,8 +208,15 @@ function buildPushRows(state: SyncState) {
   const local = new Map(listContinueWatching().map((entry) => [entry.id, entry]))
   const rows: SyncPushRow[] = []
   /** id → local updatedAt (upsert) or delete time, to detect edits made while uploading. */
-  const snapshot = new Map<string, { kind: 'up' | 'del'; at: number }>()
+  const snapshot = new Map<string, { kind: 'up' | 'del'; at: number; fingerprint?: string }>()
   let pruned = false
+  // Forget fingerprints of titles no longer in Continue watching (keeps the state small).
+  for (const id of Object.keys(state.pushed)) {
+    if (!local.has(id)) {
+      delete state.pushed[id]
+      pruned = true
+    }
+  }
   for (const id of Object.keys(state.dirty)) {
     const entry = local.get(id)
     const record = entry ? continueEntryToSyncRecord(entry) : null
@@ -208,9 +225,16 @@ function buildPushRows(state: SyncState) {
       pruned = true
       continue
     }
+    const fingerprint = syncFingerprint(record)
+    if (fingerprint && state.pushed[id] === fingerprint) {
+      // Same row the server already has (only the local save time moved) — skip the PUT.
+      delete state.dirty[id]
+      pruned = true
+      continue
+    }
     const { updatedAt: _u, rev: _r, deleted: _d, ...rest } = record
     rows.push({ ...rest, ageMs: Math.max(0, now - (entry.updatedAt || now)) })
-    snapshot.set(id, { kind: 'up', at: entry.updatedAt })
+    snapshot.set(id, { kind: 'up', at: entry.updatedAt, fingerprint })
   }
   for (const [id, del] of Object.entries(state.deletes)) {
     rows.push({
@@ -248,8 +272,12 @@ async function flushOnce(options?: { keepalive?: boolean }) {
         if (!snap) continue
         if (snap.kind === 'del') {
           if (state.deletes[result.id]?.at === snap.at) delete state.deletes[result.id]
-        } else if (local.get(result.id)?.updatedAt === snap.at || !local.has(result.id)) {
-          delete state.dirty[result.id]
+          if (result.accepted) delete state.pushed[result.id]
+        } else {
+          if (local.get(result.id)?.updatedAt === snap.at || !local.has(result.id)) {
+            delete state.dirty[result.id]
+          }
+          if (result.accepted && snap.fingerprint) state.pushed[result.id] = snap.fingerprint
         }
         if (!result.accepted && result.current) {
           delete state.dirty[result.id]
@@ -401,7 +429,7 @@ async function adoptAuth(auth: SyncAuthResponse) {
   // First sign-in on this device: offer every local title once; server-side ages decide conflicts.
   const dirty: Record<string, true> = {}
   for (const entry of listContinueWatching()) if (continueEntryToSyncRecord(entry)) dirty[entry.id] = true
-  writeSyncState({ lastRev: 0, dirty, deletes: {} })
+  writeSyncState({ lastRev: 0, dirty, deletes: {}, pushed: {} })
   patchProgressSyncMeta({ lastError: null, lastPullAt: 0, lastPushAt: 0 })
   await syncProgressNow()
 }

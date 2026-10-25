@@ -40,6 +40,31 @@ export function continueEntryToSyncRecord(
   }
 }
 
+/**
+ * Stable fingerprint of the synced fields of a row (ignores save time / revision).
+ * Positions are compared to the second, like the pull-side echo check.
+ */
+export function syncFingerprint(record: ProgressSyncRecord | null | undefined): string {
+  if (!record?.id) return ''
+  return JSON.stringify([
+    record.title,
+    record.poster ?? null,
+    record.category,
+    Number(record.playlistIndex) || 0,
+    record.episodeTitle ?? null,
+    Math.round(Number(record.currentTime) || 0),
+    Math.round(Number(record.duration) || 0),
+    record.runtimeSeconds ?? null,
+    record.torrentUri ?? null,
+    record.detailUrl ?? null,
+    record.playUrl ?? null,
+    record.transport ?? null,
+    record.sourceKind ?? null,
+    record.source ?? null,
+    record.deleted ? 1 : 0,
+  ])
+}
+
 /** Convert a sync record back into a Continue watching row (skips tombstones). */
 export function syncRecordToContinueEntry(
   record: ProgressSyncRecord,
