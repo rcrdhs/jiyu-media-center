@@ -72,16 +72,34 @@ function wantsUnwrapCover(url: string): boolean {
 }
 
 /**
- * Runs in every frame. Any frame with a real playing <video> reports playing (and the top
- * frame drops its cover). The top frame otherwise keeps a black pointer-events:none cover
+ * Runs in every frame. Any frame whose <video> is really MOVING reports playing (and the
+ * top frame drops its cover). "Moving" = visible, not paused, readyState >= 2, and
+ * currentTime or decoded frames advanced on two consecutive checks - a 'playing' state
+ * alone is not enough (live HLS sits !paused on a black/buffering frame for seconds).
+ * Ads are ignored: YouTube '.ad-showing' players always, and short (< 75s) finite non-MSE
+ * clips for the first 12s of this frame's cover. MSE (blob:) streams are never skipped -
+ * hls.js live reports a small, growing finite duration. The top frame otherwise keeps a black pointer-events:none cover
  * so native taps / center clicks still reach the player underneath.
  * Results avoid words the Android bridge ranks above "playing" (installed/ready/placed).
  */
 const UNWRAP_COVER_TICK_SCRIPT = `(function(){try{
-var d=document,ID='__jiyu_unwrap_cover';
+var d=document,ID='__jiyu_unwrap_cover',now=Date.now();
+if(!window.__jiyuCoverT0)window.__jiyuCoverT0=now;
+var S=window.__jiyuMoveState||(window.__jiyuMoveState=new WeakMap());
 var vids=d.getElementsByTagName('video'),live=false;
 for(var i=0;i<vids.length;i++){var v=vids[i];var r=v.getBoundingClientRect();
-if(!v.paused&&!v.ended&&v.readyState>=2&&v.currentTime>0.05&&r.width>=120&&r.height>=68){live=true;break;}}
+if(v.paused||v.ended||v.readyState<2||r.width<120||r.height<68){S.delete(v);continue;}
+var dur=v.duration,src=String(v.currentSrc||v.src||'');
+if(v.closest&&v.closest('.ad-showing,.ad-interrupting'))continue;
+if(src.indexOf('blob:')!==0&&isFinite(dur)&&dur>0&&dur<75&&now-window.__jiyuCoverT0<12000)continue;
+var fr=0;try{var q=v.getVideoPlaybackQuality&&v.getVideoPlaybackQuality();fr=q?(q.totalVideoFrames||0):0;}catch(e){}
+if(!fr&&typeof v.webkitDecodedFrameCount==='number')fr=v.webkitDecodedFrameCount;
+var t=v.currentTime||0,p=S.get(v);
+if(!p){S.set(v,{t:t,f:fr,at:now,n:0});continue;}
+if(now-p.at<150)continue;
+var adv=(t-p.t>0.08&&t-p.t<30)||(fr-p.f>=2);
+p.n=adv?p.n+1:0;p.t=t;p.f=fr;p.at=now;
+if(p.n>=2){live=true;break;}}
 if(live){window.__jiyuUnwrapDone=true;var c0=d.getElementById(ID);if(c0&&c0.parentNode)c0.parentNode.removeChild(c0);return 'jiyu-live-playing';}
 if(window.top!==window||window.__jiyuUnwrapDone)return 'jiyu-live-idle';
 if(!d.getElementById(ID)){var root=d.body||d.documentElement;if(!root)return 'jiyu-live-idle';
