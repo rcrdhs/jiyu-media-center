@@ -872,7 +872,19 @@ const BROWSER_SEEK_OVERLAY_SCRIPT = `(() => {
       const v = pickVideo();
       if (!v) return false;
       if (!Number.isFinite(v.duration) || v.duration === Infinity) return false;
-      v.currentTime = Math.min(v.duration, Math.max(0, (Number(v.currentTime) || 0) + delta));
+      let lo = 0;
+      let hi = v.duration;
+      try {
+        // Live / sliding-window streams: stay inside the seekable window so the
+        // player does not snap back to the edge or reload the stream.
+        const s = v.seekable;
+        if (s && s.length) {
+          lo = Math.max(0, s.start(0) + 0.5);
+          hi = Math.min(v.duration, s.end(s.length - 1));
+        }
+      } catch (_) {}
+      if (!(hi > lo)) { lo = 0; hi = v.duration; }
+      v.currentTime = Math.min(hi, Math.max(lo, (Number(v.currentTime) || 0) + delta));
       try { v.play().catch(() => {}); } catch (_) {}
       return true;
     };
@@ -928,6 +940,15 @@ const BROWSER_SEEK_OVERLAY_SCRIPT = `(() => {
   }
 })();`
 
+/** Keeps a viewer's rewind on live HLS embeds (see electron/live-rewind-guard.js). */
+const BROWSER_LIVE_REWIND_GUARD_SCRIPT = (() => {
+  try {
+    return fs.readFileSync(path.join(__dirname, 'live-rewind-guard.js'), 'utf8')
+  } catch {
+    return ''
+  }
+})()
+
 async function installBrowserFrameScript(contents, script) {
   if (!contents || contents.isDestroyed()) return
   const frames = collectContentFrames(contents, { maxFrames: 10 })
@@ -948,6 +969,9 @@ async function installBrowserWheelVolume(contents) {
   )
   await installBrowserFrameScript(contents, script)
   await installBrowserFrameScript(contents, BROWSER_SEEK_OVERLAY_SCRIPT)
+  if (BROWSER_LIVE_REWIND_GUARD_SCRIPT) {
+    await installBrowserFrameScript(contents, BROWSER_LIVE_REWIND_GUARD_SCRIPT)
+  }
 }
 
 function scheduleBrowserWheelVolume(contents) {
@@ -4776,6 +4800,9 @@ function ensureWebBrowser() {
               true,
             )
             void frame.executeJavaScript(BROWSER_AD_SHIELD_SCRIPT, true)
+            if (BROWSER_LIVE_REWIND_GUARD_SCRIPT) {
+              void frame.executeJavaScript(BROWSER_LIVE_REWIND_GUARD_SCRIPT, true)
+            }
           }
         } catch {
           /* ignore */

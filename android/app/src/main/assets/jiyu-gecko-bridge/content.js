@@ -1,4 +1,20 @@
 /* Eval bridge — all frames connect so autoplay can reach cross-origin embed players. */
+/* Live rewind guard (electron/live-rewind-guard.js): page-world prototype patch so
+   hls.js live-edge sync does not undo a viewer's rewind on live embeds. */
+(function () {
+  try {
+    if (typeof JIYU_LIVE_REWIND_GUARD_SRC !== "string" || !JIYU_LIVE_REWIND_GUARD_SRC) return;
+    var root = document.documentElement || document.head || document.body;
+    if (!root) return;
+    var el = document.createElement("script");
+    el.textContent = JIYU_LIVE_REWIND_GUARD_SRC;
+    root.appendChild(el);
+    el.remove();
+  } catch (_) {
+    /* CSP / detached document */
+  }
+})();
+
 (function () {
   function runCode(code) {
     return new Promise(function (resolve) {
