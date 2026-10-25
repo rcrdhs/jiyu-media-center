@@ -4630,6 +4630,8 @@ function ensureWebBrowser() {
       frameShieldTimer = 0
       if (!webBrowserView || webBrowserView.webContents.isDestroyed()) return
       scheduleBrowserAdShield(webBrowserView.webContents)
+      // The player iframe often finishes after the top page: kick it now.
+      if (typeof webBrowserSportsAutoplayKickNow === 'function') webBrowserSportsAutoplayKickNow()
     }, 800)
   })
   try {
@@ -5245,6 +5247,8 @@ let webBrowserSportsAutoplayUrl = ''
 let webBrowserSportsAutoplayAt = 0
 /** True only after a kick confirmed <video> playing — gates the long same-URL throttle. */
 let webBrowserSportsAutoplayPlaying = false
+/** Re-run the current sports kick now (iframe finished loading); no-op once playing. */
+let webBrowserSportsAutoplayKickNow = null
 
 async function executeInWebBrowser(script) {
   if (!webBrowserView || webBrowserView.webContents.isDestroyed()) {
@@ -5340,13 +5344,19 @@ function scheduleWebBrowserSportsAutoplay(contents, options = {}) {
   webBrowserSportsAutoplayAt = now
   webBrowserSportsAutoplayPlaying = false
   clearWebBrowserSportsAutoplay()
-  let clicksLeft = 1
+  // Center clicks toggle Clappr/JW, so each is guarded by a fresh "not playing"
+  // check, the first waits until the player had a chance to mount, and the second
+  // is a late backstop spaced well apart (never a double click).
+  let clicksLeft = 2
+  let lastClickAt = 0
+  const scheduledAt = now
   let started = false
   // Live + replay: same poll window. Some live embeds mount <video> as late as
   // replays; the old live-only [900, 2800] left slower streams paused.
   // Denser early polls: most players mount within ~1-2s of dom-ready, and the
   // renderer's "Unwrapping stream…" cover stays up until this kick lands.
-  const intervals = [300, 700, 1200, 2000, 3200, 5200, 8500]
+  // Keep polling to the renderer's 20s unwrap cap: slow embeds mount late.
+  const intervals = [300, 700, 1200, 2000, 3200, 5200, 8500, 11000, 14500, 18000]
   let running = false
   const run = async () => {
     if (!webBrowserView || webBrowserView.webContents.isDestroyed()) return
@@ -5393,11 +5403,20 @@ function scheduleWebBrowserSportsAutoplay(contents, options = {}) {
     }
     // Found <video>/JW and asked it to play — keep polling until !paused. Never
     // center-click here: that toggles JW/Clappr back to a black paused frame.
-    if (kickedVideo) return
-    if (clicksLeft > 0) {
+    const elapsed = Date.now() - scheduledAt
+    // play() was accepted but the video is still paused after ~6s (player waiting
+    // for a real click): allow the guarded click below as a backstop.
+    if (kickedVideo && elapsed < 6000) return
+    if (clicksLeft > 0 && elapsed >= 1500 && (lastClickAt === 0 || Date.now() - lastClickAt >= 4500)) {
+      if (await webBrowserIsPlaying()) return
       clicksLeft -= 1
+      lastClickAt = Date.now()
       clickWebBrowserCenter(false)
     }
+  }
+  webBrowserSportsAutoplayKickNow = () => {
+    if (webBrowserSportsAutoplayUrl !== url) return
+    void run()
   }
   void run()
   for (const ms of intervals) {
@@ -6791,6 +6810,10 @@ ipcMain.handle('browser:clickCenter', async (_event, options) => {
   const points = Array.isArray(options?.points) && options.points.length > 0
     ? options.points
     : [{ x: 0.5, y: 0.42 }]
+  // Autoplay nudges: a click on a stream that is already playing pauses it.
+  if (options?.ifPaused && (await webBrowserIsPlaying())) {
+    return { ok: true, clicks: 0, skipped: 'playing' }
+  }
   const contents = webBrowserView.webContents
   try {
     contents.focus()

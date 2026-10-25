@@ -484,7 +484,44 @@
     });
   }
 
+  /** A visible <video> that is not paused (incl. buffering after play()). */
+  function realVideoPlayingHere() {
+    var live = false;
+    walkRoots(function (root) {
+      if (live) return;
+      var nodes = [];
+      try {
+        nodes = root.querySelectorAll("video");
+      } catch (_) {}
+      for (var i = 0; i < nodes.length; i++) {
+        var v = nodes[i];
+        if (!v || v.paused || v.ended) continue;
+        var r;
+        try {
+          r = v.getBoundingClientRect();
+        } catch (_) {
+          continue;
+        }
+        if (r && r.width >= 120 && r.height >= 68) {
+          live = true;
+          return;
+        }
+      }
+    });
+    return live;
+  }
+
   function measurePlayButtonRect(attempt) {
+    // Playing beats everything: JW / video.js keep a play/pause toggle in the DOM
+    // while playing, and tapping it (or the middle) pauses the stream.
+    if (realVideoPlayingHere()) {
+      return {
+        action: "playButtonRect",
+        found: false,
+        playing: true,
+        frame: window === window.top ? "top" : "child",
+      };
+    }
     if (window === window.top) {
       var mapped = mappedTopRect();
       if (mapped) return mapped;

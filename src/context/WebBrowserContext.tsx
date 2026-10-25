@@ -415,6 +415,8 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
 
   const lastNudgeUrlRef = useRef('')
   const lastNudgeAtRef = useRef(0)
+  /** Last nudge was the pre-load one: the page-stop nudge must still run. */
+  const lastNudgeEarlyRef = useRef(false)
   const cinetaroRewriteRef = useRef('')
   const navUrlForNudgeRef = useRef(nav.url || address)
   navUrlForNudgeRef.current = nav.url || address
@@ -480,7 +482,7 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
     unwrapTickRef.current = tick
   }, [execInGuest, stopUnwrapCover])
 
-  const nudgePlayback = useCallback((urlOverride?: string) => {
+  const nudgePlayback = useCallback((urlOverride?: string, opts?: { early?: boolean }) => {
     if (!desktop) return
     const runScript = (script: string) => {
       if (electron) void window.signalDesktop?.browserExecute?.(script)
@@ -503,11 +505,20 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
     // 12s execute storm on every subframe finish. Android: shorter gate so a
     // failed early kick can retry when the player finally mounts.
     const gateMs = android ? 2500 : 8000
-    if (url && url === lastNudgeUrlRef.current && now - lastNudgeAtRef.current < gateMs) {
+    // The pre-load nudge (opts.early) must not swallow the page-stop nudge: kicks that
+    // ran before the player existed are exactly the ones that need a re-run.
+    const afterEarly = lastNudgeEarlyRef.current && !opts?.early
+    if (
+      url &&
+      url === lastNudgeUrlRef.current &&
+      now - lastNudgeAtRef.current < gateMs &&
+      !afterEarly
+    ) {
       return
     }
     lastNudgeUrlRef.current = url
     lastNudgeAtRef.current = now
+    lastNudgeEarlyRef.current = Boolean(opts?.early)
     clearAutoplayTimers()
     // Live sports + Replay VODs:
     // Electron: main-process owns muted→play + one center click.
@@ -538,7 +549,8 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
     }
     const runClick = () => {
       if (isSportsOrReplay && electron) return
-      if (electron) void window.signalDesktop?.browserClickCenter?.()
+      // ifPaused: never click a stream that already started (the click pauses it).
+      if (electron) void window.signalDesktop?.browserClickCenter?.({ ifPaused: true })
       else if (android) void androidBrowserTapPlay()
     }
     const sportsKick = (aggressive = false) => {
@@ -600,16 +612,25 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
           [2600, true],
           [4200, true],
           [7000, false],
+          // Slow embeds: keep trying until the 20s unwrap cap. Each kick checks
+          // for a playing video first and is a no-op once the stream runs.
+          [10000, false],
+          [13500, true],
+          [17000, false],
         ] as const) {
           autoplayTimers.current.push(window.setTimeout(() => sportsKick(aggressive), ms))
         }
         // Native tap waits for page stop itself, then watches (400ms) until the paused
         // play control is on screen and taps it once. No fixed 3s wait.
-        autoplayTimers.current.push(
-          window.setTimeout(() => {
-            void androidBrowserTapPlay()
-          }, 600),
-        )
+        // Native keeps one watch per page (repeat calls join it) and taps only while
+        // every frame reports paused, so the backstops cannot toggle a live stream.
+        for (const ms of [600, 3000, 8000]) {
+          autoplayTimers.current.push(
+            window.setTimeout(() => {
+              void androidBrowserTapPlay()
+            }, ms),
+          )
+        }
       }
       autoplayTimers.current.push(window.setTimeout(runAds, 400))
       autoplayTimers.current.push(window.setTimeout(runAds, 800))
@@ -834,6 +855,7 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
       // Allow a fresh autoplay cycle when retrying the same embed after PiP/hide.
       lastNudgeUrlRef.current = ''
       lastNudgeAtRef.current = 0
+      lastNudgeEarlyRef.current = false
       // Always promote to full page — leftover PiP mode would open sports in the corner.
       setMode('page')
       modeRef.current = 'page'
@@ -885,12 +907,13 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
       // Embeds: wait for did-stop-loading (onBrowserNav + main-process sports kick).
       // Immediate center-clicks often land before <video> exists, then later clicks pause LIVE.
       if (!isEmbedPlayerHost(live)) {
-        nudgePlayback(live)
+        // Early (pre-load) kick; the page-stop event re-kicks once (see onNav).
+        nudgePlayback(live, { early: true })
       } else if (android) {
         // Ad-heavy sports pages can take many seconds to report page stop. Start the
         // (play-state-checked) kicks early; the stop-event nudge still runs after the gate.
         window.setTimeout(() => {
-          if (modeRef.current === 'page') nudgePlayback(live)
+          if (modeRef.current === 'page') nudgePlayback(live, { early: true })
         }, 1200)
       }
     },
@@ -1237,6 +1260,17 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
             if (modeRef.current === 'page') nudgePlayback(next.url)
             return
           }
+          // Stream page opened via openUrl (e.g. YouTube live): its kicks ran before the
+          // page finished loading. Re-kick once now (play-state-checked, no toggling).
+          if (
+            modeRef.current === 'page' &&
+            lastNudgeEarlyRef.current &&
+            next.url &&
+            next.url === lastNudgeUrlRef.current
+          ) {
+            nudgePlayback(next.url)
+            return
+          }
           if (modeRef.current === 'pip') nudgePlayback(next.url)
         }
       })
@@ -1272,6 +1306,17 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
           }
           if (next.url && isEmbedPlayerHost(next.url)) {
             if (modeRef.current === 'page') nudgePlayback(next.url)
+            return
+          }
+          // Stream page opened via openUrl (e.g. YouTube live): its kicks ran before the
+          // page finished loading. Re-kick once now (play-state-checked, no toggling).
+          if (
+            modeRef.current === 'page' &&
+            lastNudgeEarlyRef.current &&
+            next.url &&
+            next.url === lastNudgeUrlRef.current
+          ) {
+            nudgePlayback(next.url)
             return
           }
           if (modeRef.current === 'pip') nudgePlayback(next.url)

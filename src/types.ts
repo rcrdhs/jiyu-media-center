@@ -285,7 +285,9 @@ declare global {
       /** Synthetic click(s) on the native embed tile — unmutes cross-origin iframe players. */
       browserClickCenter?: (options?: {
         points?: Array<{ x: number; y: number }>
-      }) => Promise<{ ok: boolean; clicks?: number; error?: string }>
+        /** Skip when a video in the page is already playing (autoplay nudges). */
+        ifPaused?: boolean
+      }) => Promise<{ ok: boolean; clicks?: number; error?: string; skipped?: string }>
       browserGetNav?: () => Promise<BrowserNavState & { visible?: boolean }>
       browserGetVolume?: () => Promise<{ percent: number }>
       browserSetVolume?: (percent: number) => Promise<{ ok: boolean; percent: number }>

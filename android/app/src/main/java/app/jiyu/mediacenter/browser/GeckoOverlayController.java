@@ -192,11 +192,16 @@ final class GeckoOverlayController {
   void noteUserNavigation() {
     playTapsSent = false;
     playTapUrl = "";
+    playTapBudgetUrl = "";
+    playTapCount = 0;
+    playBlindTaps = 0;
+    playWatchGen = 0;
   }
 
   void tapTwice(float normX, float normY) {
+    // Only a confirmed-playing answer marks the URL done (see finishPlayButtonTap);
+    // marking it here stopped every later, play-state-checked look on this page.
     playTapsSent = true;
-    playTapUrl = currentUrl == null ? "" : currentUrl;
     dispatchTap(view, session, normX, normY);
     main.postDelayed(() -> {
       if (view == null || view.getVisibility() != View.VISIBLE) return;
@@ -756,44 +761,104 @@ final class GeckoOverlayController {
    */
   void tapPlayButton(@Nullable Runnable done) {
     if (loading) {
+      // Look once the document stops. A newer caller replaces the pending one;
+      // resolve the older callback so its promise does not hang.
+      Runnable prev = playTapAfterLoadDone;
       playTapAfterLoad = true;
       playTapAfterLoadDone = done;
+      if (prev != null && prev != done) prev.run();
       return;
     }
-    if (playTapsSent || (currentUrl != null && currentUrl.equals(playTapUrl))) {
+    String url = currentUrl == null ? "" : currentUrl;
+    // Confirmed playing on this URL: never tap again (a tap would pause it).
+    if (!url.isEmpty() && url.equals(playTapUrl)) {
       if (done != null) done.run();
       return;
     }
-    if (playTap != null && !playTap.done && playTap.doneCb != null && playTap.doneCb != done) {
-      playTap.done = true;
-      Runnable previous = playTap.doneCb;
-      playTap = null;
-      previous.run();
+    if (!url.equals(playTapBudgetUrl)) {
+      playTapBudgetUrl = url;
+      playTapCount = 0;
+      playBlindTaps = 0;
     }
-    beginPlayButtonWatch(done, 0);
+    // A watch is already running for this page: let it continue instead of
+    // restarting from attempt 0 (repeated callers used to reset the clock).
+    if (playWatchGen != 0 && url.equals(playWatchUrl)) {
+      if (done != null) done.run();
+      return;
+    }
+    int gen = ++playWatchSeq;
+    playWatchGen = gen;
+    playWatchUrl = url;
+    beginPlayButtonWatch(gen, done, 0);
   }
 
   private static final int PLAY_LOOK_INTERVAL_MS = 400;
-  /** About 20s of looking after the caller asks. The button is often late. */
+  /** About 20s+ of looking after the caller asks. The button is often late. */
   private static final int PLAY_LOOK_MAX = 50;
+  /**
+   * No play control and no paused video found by this attempt (~5-10s): tap the middle.
+   * 0.3.84 did this at attempt 3 (~1.5s after page stop) - before most players mount -
+   * and then stopped looking, so the stream sat paused (or the blind taps toggled a
+   * stream that had just started).
+   */
+  private static final int PLAY_BLIND_AT = 12;
+  /** Without a bridge port we cannot see play state: one late blind tap pair, then stop. */
+  private static final int PLAY_BLIND_NO_BRIDGE_AT = 8;
+  /** Re-check this long after a tap; tap again only if the frame still reports paused. */
+  private static final int PLAY_RETAP_DELAY_MS = 800;
+  /** Taps per page URL (button taps + blind taps). */
+  private static final int PLAY_TAP_MAX = 4;
 
-  private void beginPlayButtonWatch(@Nullable Runnable done, int attempt) {
-    if (view == null || session == null || view.getVisibility() != View.VISIBLE || attempt >= PLAY_LOOK_MAX) {
+  private void endPlayWatch(int gen, @Nullable Runnable done) {
+    if (gen == playWatchGen) playWatchGen = 0;
+    if (done != null) done.run();
+  }
+
+  private void beginPlayButtonWatch(int gen, @Nullable Runnable done, int attempt) {
+    if (gen != playWatchGen) {
       if (done != null) done.run();
       return;
     }
+    if (view == null || session == null || view.getVisibility() != View.VISIBLE || attempt >= PLAY_LOOK_MAX) {
+      endPlayWatch(gen, done);
+      return;
+    }
+    if (loading) {
+      // A new document started under us: look again once it stops.
+      playWatchGen = 0;
+      tapPlayButton(done);
+      return;
+    }
+    String url = currentUrl == null ? "" : currentUrl;
+    if (!url.equals(playWatchUrl)) {
+      playWatchGen = 0;
+      tapPlayButton(done);
+      return;
+    }
     if (bridgePorts.isEmpty()) {
-      if (attempt >= 3) {
-        tapTwice(0.5f, 0.5f);
-        if (done != null) done.run();
+      if (attempt >= PLAY_BLIND_NO_BRIDGE_AT) {
+        if (playBlindTaps == 0 && playTapCount < PLAY_TAP_MAX) {
+          playBlindTaps = 2;
+          playTapCount += 2;
+          tapTwice(0.5f, 0.5f);
+        }
+        endPlayWatch(gen, done);
         return;
       }
-      main.postDelayed(() -> beginPlayButtonWatch(done, attempt + 1), PLAY_LOOK_INTERVAL_MS);
+      main.postDelayed(() -> beginPlayButtonWatch(gen, done, attempt + 1), PLAY_LOOK_INTERVAL_MS);
       return;
+    }
+    PlayTap stale = playTap;
+    if (stale != null && !stale.done) {
+      // A superseded watch's query is still in flight: resolve its caller.
+      stale.done = true;
+      playTap = null;
+      if (stale.doneCb != null && stale.doneCb != done) stale.doneCb.run();
     }
     int id = ++playTapSeq;
     PlayTap tap = new PlayTap();
     tap.id = id;
+    tap.gen = gen;
     tap.expect = bridgePorts.size();
     tap.attempt = attempt;
     tap.doneCb = done;
@@ -809,9 +874,18 @@ final class GeckoOverlayController {
   private boolean playTapsSent;
   private boolean playTapAfterLoad;
   @Nullable private Runnable playTapAfterLoadDone;
+  /** Running play watch (0 = none) and the page it is watching. */
+  private int playWatchSeq;
+  private int playWatchGen;
+  private String playWatchUrl = "";
+  /** Tap budget for one page URL. */
+  private String playTapBudgetUrl = "";
+  private int playTapCount;
+  private int playBlindTaps;
 
   private static final class PlayTap {
     int id;
+    int gen;
     int expect;
     int got;
     int attempt;
@@ -915,26 +989,44 @@ final class GeckoOverlayController {
     tap.done = true;
     playTap = null;
     Runnable done = tap.doneCb;
-    if (tap.playing) {
-      playTapUrl = currentUrl == null ? "" : currentUrl;
+    int gen = tap.gen;
+    int next = tap.attempt + 1;
+    if (gen != playWatchGen) {
       if (done != null) done.run();
       return;
     }
-    if (!tap.have || tap.vw < 1f || tap.vh < 1f || view == null) {
-      if (view != null && tap.attempt >= 3) {
-        tapTwice(0.5f, 0.5f);
-        if (done != null) done.run();
-        return;
-      }
-      if (tap.attempt + 1 >= PLAY_LOOK_MAX || view == null) {
-        if (done != null) done.run();
-        return;
-      }
-      main.postDelayed(() -> beginPlayButtonWatch(done, tap.attempt + 1), PLAY_LOOK_INTERVAL_MS);
+    if (tap.playing) {
+      // Some frame has a real, unpaused video: done for this page, never toggle it.
+      playTapUrl = currentUrl == null ? "" : currentUrl;
+      endPlayWatch(gen, done);
       return;
     }
-    tapTwice(tap.cx / tap.vw, tap.cy / tap.vh);
-    if (done != null) done.run();
+    if (view == null || session == null) {
+      endPlayWatch(gen, done);
+      return;
+    }
+    if (tap.have && tap.vw >= 1f && tap.vh >= 1f) {
+      if (playTapCount >= PLAY_TAP_MAX) {
+        endPlayWatch(gen, done);
+        return;
+      }
+      playTapCount++;
+      playTapsSent = true;
+      dispatchTap(view, session, tap.cx / tap.vw, tap.cy / tap.vh);
+      // Some embeds ignore the first tap. Look again and tap only if still paused
+      // (the old blind second tap paused streams the first tap had started).
+      main.postDelayed(() -> beginPlayButtonWatch(gen, done, next), PLAY_RETAP_DELAY_MS);
+      return;
+    }
+    if (tap.attempt >= PLAY_BLIND_AT && playBlindTaps < 2 && playTapCount < PLAY_TAP_MAX) {
+      playBlindTaps++;
+      playTapCount++;
+      playTapsSent = true;
+      dispatchTap(view, session, 0.5f, 0.5f);
+      main.postDelayed(() -> beginPlayButtonWatch(gen, done, next), PLAY_RETAP_DELAY_MS);
+      return;
+    }
+    main.postDelayed(() -> beginPlayButtonWatch(gen, done, next), PLAY_LOOK_INTERVAL_MS);
   }
 
   /** Ask this frame for the play control's CSS-pixel box. There is no executeScript on GV 140. */
