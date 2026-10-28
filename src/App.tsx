@@ -7,6 +7,7 @@ import { EpgProvider } from './context/EpgContext'
 import { WebBrowserProvider } from './context/WebBrowserContext'
 import { Sidebar } from './components/Sidebar'
 import { KidsModeGate } from './components/KidsModeGate'
+import { BillingGate } from './components/BillingGate'
 import { GlobalPlayer } from './components/GlobalPlayer'
 import { WebBrowserPip } from './components/WebBrowserPip'
 import { NavigationPiPBridge } from './components/NavigationPiPBridge'
@@ -19,6 +20,7 @@ import { SectionPage } from './pages/SectionPage'
 import { WatchPage } from './pages/WatchPage'
 import { ShowPage } from './pages/ShowPage'
 import { LibraryPage } from './pages/LibraryPage'
+import { AccountPage } from './pages/AccountPage'
 import { BrowsePage } from './pages/BrowsePage'
 import { WebBrowserPage } from './pages/WebBrowserPage'
 import { NativeStreamPage } from './pages/NativeStreamPage'
@@ -82,20 +84,23 @@ export default function App() {
                   <Sidebar />
                   <main className="main-stage">
                     <KidsModeGate>
-                      <Routes>
-                        <Route path="/" element={<HomePage />} />
-                        <Route path="/section/:id" element={<SectionRoute />} />
-                        <Route path="/show/:id" element={<ShowPage />} />
-                        <Route path="/watch/:id" element={<WatchPage />} />
-                        <Route path="/library" element={<LibraryPage />} />
-                        <Route path="/browse" element={<BrowsePage />} />
-                        <Route path="/web" element={<WebBrowserPage />} />
-                        <Route path="/native-stream" element={<NativeStreamPage />} />
-                        <Route path="/guide" element={<Navigate to="/" replace />} />
-                        <Route path="/torrents" element={<Navigate to="/library?section=websites" replace />} />
-                        <Route path="/multiview" element={<MultiviewPage />} />
-                        <Route path="*" element={<Navigate to="/" replace />} />
-                      </Routes>
+                      <BillingGate>
+                        <Routes>
+                          <Route path="/" element={<HomePage />} />
+                          <Route path="/section/:id" element={<SectionRoute />} />
+                          <Route path="/show/:id" element={<ShowPage />} />
+                          <Route path="/watch/:id" element={<WatchPage />} />
+                          <Route path="/library" element={<LibraryPage />} />
+                          <Route path="/account" element={<AccountPage />} />
+                          <Route path="/browse" element={<BrowsePage />} />
+                          <Route path="/web" element={<WebBrowserPage />} />
+                          <Route path="/native-stream" element={<NativeStreamPage />} />
+                          <Route path="/guide" element={<Navigate to="/" replace />} />
+                          <Route path="/torrents" element={<Navigate to="/library?section=websites" replace />} />
+                          <Route path="/multiview" element={<MultiviewPage />} />
+                          <Route path="*" element={<Navigate to="/" replace />} />
+                        </Routes>
+                      </BillingGate>
                     </KidsModeGate>
                   </main>
                   <BackToTop />

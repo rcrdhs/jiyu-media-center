@@ -26,6 +26,7 @@ import {
   setRealDebridToken,
 } from '../lib/debridSettings'
 import { ProgressSyncSettings } from '../components/ProgressSyncSettings'
+import { AccountPlanLink } from '../components/AccountPlanLink'
 import { HideKeywordsSettings } from '../components/HideKeywordsSettings'
 import { SubtitleTranslateSettings } from '../components/SubtitleTranslateSettings'
 import { AnimeAudioSettings } from '../components/AnimeAudioSettings'
@@ -426,6 +427,7 @@ export function LibraryPage() {
               </a>
             </p>
             <ProgressSyncSettings />
+            <AccountPlanLink />
             <HideKeywordsSettings />
             <SubtitleTranslateSettings />
             <AnimeAudioSettings />
