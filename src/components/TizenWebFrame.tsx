@@ -8,6 +8,9 @@ import { isTizenYouTubeEmbedUrl, tizenYouTubeEmbedFor } from '../lib/tizenRelay'
  * https embed page (correct origin/referrer → no Error 153) and is driven by the
  * remote: OK / Play / Pause toggles, ◀ ▶ and Rewind / Fast-forward seek 10 s.
  * Focus stays in the app so Return keeps working (cross-origin frames would eat it).
+ * Other embeds (ppv.st …) wait for a click/Enter inside the frame: the first OK hands
+ * focus to the frame for a few seconds so the second OK reaches its player, then the
+ * app takes focus back so Return works again.
  */
 export function TizenWebFrame({ url, title }: { url: string; title?: string }) {
   const frameRef = useRef<HTMLIFrameElement>(null)
@@ -15,7 +18,9 @@ export function TizenWebFrame({ url, title }: { url: string; title?: string }) {
   const yt = tizenYouTubeEmbedFor(url)
   const src = yt || url
   const youtube = Boolean(yt && isTizenYouTubeEmbedUrl(yt))
-  const [hint, setHint] = useState(youtube ? 'OK play / pause · ◀ ▶ seek 10 s' : '')
+  const [hint, setHint] = useState(youtube ? 'OK play / pause · ◀ ▶ seek 10 s' : 'Press OK to start the player')
+  const lendUntilRef = useRef(0)
+  const lendTimerRef = useRef(0)
 
   const command = (func: string, args: unknown[] = []) => {
     try {
@@ -36,11 +41,35 @@ export function TizenWebFrame({ url, title }: { url: string; title?: string }) {
     // A cross-origin frame that grabs focus would swallow Return — take it back.
     const onBlur = () =>
       window.setTimeout(() => {
+        if (Date.now() < lendUntilRef.current) return
         if (document.activeElement === frameRef.current) hitRef.current?.focus()
       }, 0)
     window.addEventListener('blur', onBlur)
-    return () => window.removeEventListener('blur', onBlur)
+    return () => {
+      window.removeEventListener('blur', onBlur)
+      window.clearTimeout(lendTimerRef.current)
+      lendUntilRef.current = 0
+    }
   }, [src])
+
+  /** Non-YouTube: let the frame have the remote for a moment (its own Enter starts play). */
+  const lendFocusToFrame = () => {
+    const frame = frameRef.current
+    if (!frame) return
+    lendUntilRef.current = Date.now() + 4500
+    window.clearTimeout(lendTimerRef.current)
+    try {
+      frame.focus()
+      frame.contentWindow?.focus()
+    } catch {
+      /* cross-origin */
+    }
+    setHint('Press OK again to play')
+    lendTimerRef.current = window.setTimeout(() => {
+      lendUntilRef.current = 0
+      if (document.activeElement === frameRef.current || !document.hasFocus()) hitRef.current?.focus()
+    }, 4500)
+  }
 
   useEffect(() => {
     if (!youtube) return
@@ -57,7 +86,13 @@ export function TizenWebFrame({ url, title }: { url: string; title?: string }) {
   }, [youtube])
 
   const onKeyDown = (e: React.KeyboardEvent) => {
-    if (!youtube) return
+    if (!youtube) {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault()
+        lendFocusToFrame()
+      }
+      return
+    }
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault()
       command('toggle')

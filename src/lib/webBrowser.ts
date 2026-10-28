@@ -204,6 +204,8 @@ export function isWebEmbedPlaybackItem(item: {
 }): boolean {
   // Media3 path wins over streamedMatchId / source heuristics.
   if (isNativeMedia3PlaybackItem(item)) return false
+  // Samsung: stream extracted by the relay (/x) — native HLS, despite the embed source.
+  if (item.tags?.includes('relay-hls')) return false
   if (item.tags?.includes('web-embed')) return true
   if (item.tags?.includes('replay') && item.tags?.includes('livextv')) return true
   if (item.tags?.includes('replay') && item.tags?.includes('fullmatchshows')) return true
@@ -223,6 +225,7 @@ export function shouldOpenInWebBrowser(item: {
 }): boolean {
   if (!item?.url) return false
   if (isNativeMedia3PlaybackItem(item)) return false
+  if (item.tags?.includes('relay-hls')) return false
   if (isWebBrowserOnlyUrl(item.url)) return true
   if (item.tags?.includes('web-embed')) return true
   return /^(streamed|ppv\.st|livextv|fullmatchshows)$/i.test(String(item.source || ''))

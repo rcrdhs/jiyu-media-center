@@ -22,6 +22,17 @@ const RELAY_HOSTS: RegExp[] = [
   /^epgshare01\.online$/,
   /^(?:www\.)?fullmatchshows\.com$/,
   /^(?:www\.)?soccerfull\.net$/,
+  /^api\.wecollege\.net$/, // Movy seed / sources (needs the movy.sx Referer)
+]
+
+/** Mirrors IPTV_HOSTS in the worker. */
+const IPTV_HOSTS: RegExp[] = [
+  /^jmp2\.uk$/,
+  /^(?:[a-z0-9-]+\.)*pluto\.tv$/,
+  /^(?:[a-z0-9-]+\.)*plutotv\.net$/,
+  /^(?:[a-z0-9-]+\.)*amagi\.tv$/,
+  // tv5monde (ACAO locked to tv5monde.com) is not here: its Akamai edge returns
+  // 403 to Cloudflare egress, so relaying it only burns requests.
 ]
 
 /** Mirrors HLS_REFERERS in the worker. */
@@ -81,6 +92,125 @@ export function tizenHlsUrl(url: string, referrer?: string): string {
   if (!HLS_REFERERS.some((re) => re.test(origin))) return url
   if (url.startsWith(TIZEN_RELAY_ORIGIN)) return url
   return `${TIZEN_RELAY_ORIGIN}/hls?u=${encodeURIComponent(url)}&ref=${encodeURIComponent(referrer)}`
+}
+
+function isPublicIPv4(host: string): boolean {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host)
+  if (!m) return false
+  const n = m.slice(1).map(Number)
+  if (n.some((x) => x > 255)) return false
+  const [a, b] = n
+  if (a === 0 || a === 10 || a === 127 || a >= 224) return false
+  if (a === 100 && b >= 64 && b <= 127) return false
+  if (a === 169 && b === 254) return false
+  if (a === 172 && b >= 16 && b <= 31) return false
+  if (a === 192 && b === 168) return false
+  if (a === 198 && (b === 18 || b === 19)) return false
+  return true
+}
+
+function iptvRelayable(url: string): boolean {
+  const u = parse(url)
+  if (!u || !/^https?:$/.test(u.protocol)) return false
+  const host = u.hostname.toLowerCase()
+  // Bare-IP channels: Cloudflare blocks Worker fetches to raw IPs (error 1003).
+  return IPTV_HOSTS.some((re) => re.test(host))
+}
+
+function looksLikeHls(url: string): boolean {
+  return /\.m3u8?(\?|#|$)/i.test(url) || /m3u8|mpegurl|\/hls\//i.test(url)
+}
+
+/** Same rule as the worker's iptvRefererAllowed — anything else is sent without one. */
+function iptvReferer(referrer: string | undefined, url: string): string {
+  if (!referrer) return ''
+  const r = parse(referrer)
+  const t = parse(url)
+  if (!r || !t || !/^https?:$/.test(r.protocol)) return ''
+  const rh = r.hostname.toLowerCase().replace(/^www\./, '')
+  const th = t.hostname.toLowerCase()
+  if (IPTV_HOSTS.some((re) => re.test(rh)) || isPublicIPv4(rh)) return referrer
+  if (!isPublicIPv4(rh) && rh.includes('.') && (th === rh || th.endsWith(`.${rh}`))) return referrer
+  return ''
+}
+
+const corsVerdict = new Map<string, { t: number; ok: boolean }>()
+
+/** fetch() with a timeout (Chromium 76 on Tizen 6 has no AbortSignal.timeout). */
+async function probeCors(url: string, ms: number): Promise<boolean> {
+  const ctl = typeof AbortController === 'function' ? new AbortController() : null
+  const timer = ctl ? setTimeout(() => ctl.abort(), ms) : null
+  try {
+    const res = await fetch(url, { method: 'GET', credentials: 'omit', mode: 'cors', signal: ctl?.signal })
+    try {
+      await res.body?.cancel()
+    } catch {
+      /* ignore */
+    }
+    return true // any readable response (even 4xx) means CORS is not what blocks it
+  } catch (err) {
+    // TypeError = network / CORS failure; AbortError = slow host → let hls.js try it directly.
+    return !(err instanceof TypeError)
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
+/**
+ * Tizen HLS source picker. Referer-locked sources → relay (as before). Plain IPTV:
+ * direct, unless a CORS probe of the playlist fails AND the host is on the IPTV
+ * allowlist — then the relay's /hls (which leaves CORS-open segments direct).
+ * Never relays on desktop / Android, never relays a playlist that works directly.
+ */
+export async function tizenHlsSource(url: string, referrer?: string): Promise<string> {
+  const viaReferer = tizenHlsUrl(url, referrer)
+  if (viaReferer !== url || !isTizenTv()) return viaReferer
+  if (url.startsWith(TIZEN_RELAY_ORIGIN) || !looksLikeHls(url) || !iptvRelayable(url)) return url
+  const u = parse(url)
+  const key = u ? u.host : url
+  const cached = corsVerdict.get(key)
+  let ok = cached && Date.now() - cached.t < 10 * 60_000 ? cached.ok : null
+  if (ok === null) {
+    ok = await probeCors(url, 6000)
+    corsVerdict.set(key, { t: Date.now(), ok })
+  }
+  if (ok) return url
+  const ref = iptvReferer(referrer, url)
+  return `${TIZEN_RELAY_ORIGIN}/hls?u=${encodeURIComponent(url)}&ref=${encodeURIComponent(ref)}`
+}
+
+/** Sports-replay embeds whose host refuses a file:// parent frame (frame-ancestors). */
+export function isTizenFrameBlockedEmbed(url: string): boolean {
+  const u = parse(url)
+  if (!u) return false
+  const h = u.hostname.toLowerCase()
+  return /^(?:www\.)?vidaraa?\.(?:cc|to)$/.test(h) || /^(?:www\.)?playmate\.[a-z]+$/.test(h)
+}
+
+export type TizenExtracted = { ok: true; url: string; kind: 'hls' | 'mp4'; referer?: string } | { ok: false; error: string }
+
+/** Relay /x: the frame-blocked embed's own stream URL, for native playback on the TV. */
+export async function tizenExtractEmbed(url: string, timeoutMs = 12_000): Promise<TizenExtracted> {
+  if (!isTizenTv() || !isTizenFrameBlockedEmbed(url)) return { ok: false, error: 'not extractable' }
+  const ctl = typeof AbortController === 'function' ? new AbortController() : null
+  const timer = ctl ? setTimeout(() => ctl.abort(), timeoutMs) : null
+  try {
+    const res = await fetch(`${TIZEN_RELAY_ORIGIN}/x?u=${encodeURIComponent(url)}`, {
+      credentials: 'omit',
+      signal: ctl?.signal,
+    })
+    const j = (await res.json().catch(() => null)) as
+      | { ok?: boolean; url?: string; kind?: string; referer?: string; error?: string }
+      | null
+    if (j?.ok && typeof j.url === 'string' && /^https:\/\//.test(j.url)) {
+      return { ok: true, url: j.url, kind: j.kind === 'mp4' ? 'mp4' : 'hls', referer: j.referer }
+    }
+    return { ok: false, error: j?.error || `relay ${res.status}` }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : 'relay failed' }
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
 }
 
 /** https embed page hosted on the relay (correct origin/referrer → no Error 153). */
@@ -143,10 +273,19 @@ export function installTizenFetchRelay(): void {
       const url =
         typeof input === 'string' ? input : input instanceof URL ? input.href : (input as Request).url
       const method = (init?.method || (typeof input === 'object' && 'method' in input ? (input as Request).method : 'GET') || 'GET').toUpperCase()
-      if (!shouldRelayFetch(url, method)) return nativeFetch(input as RequestInfo, init)
       const headers = new Headers(
         init?.headers || (typeof input === 'object' && 'headers' in input ? (input as Request).headers : undefined),
       )
+      if (!shouldRelayFetch(url, method)) {
+        // Referer-locked HLS probes (Movy / Atlantic …): the browser drops the Referer
+        // header, so send the playlist through /hls with it instead.
+        const ref = headers.get('referer') || ''
+        if (ref && (method === 'GET' || method === 'HEAD') && looksLikeHls(url)) {
+          const relayed = tizenHlsUrl(url, ref)
+          if (relayed !== url) return nativeFetch(relayed, { method, credentials: 'omit', mode: 'cors', signal: init?.signal })
+        }
+        return nativeFetch(input as RequestInfo, init)
+      }
       moveForbiddenHeaders(headers)
       const next: RequestInit = {
         ...init,

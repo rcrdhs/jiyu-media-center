@@ -58,8 +58,9 @@ import {
 } from '../lib/livextvReplays'
 import {
   isFullmatchShowsCatalogItem,
-  resolveFullmatchShowsPlay,
+  resolveFullmatchShowsPlayForDevice,
 } from '../lib/fullmatchShows'
+import { isTizenFrameBlockedEmbed, tizenExtractEmbed } from '../lib/tizenRelay'
 import {
   isNativeMedia3PlaybackItem,
   isWebEmbedPlaybackItem,
@@ -696,7 +697,8 @@ export function WatchPage() {
 
       // FullMatchShows football replays → playmate / playmogo embeds.
       if (isFullmatchShowsCatalogItem(item!)) {
-        const resolved = await resolveFullmatchShowsPlay(item!)
+        // Tizen: frame-blocked hosts come back as native HLS (relay /x) or the next host.
+        const resolved = await resolveFullmatchShowsPlayForDevice(item!)
         if (cancelled) return
         if (!resolved.ok) {
           setError(resolved.error || 'Could not load replay')
@@ -706,6 +708,27 @@ export function WatchPage() {
         const keepOthers =
           guard.awaitingAdd || guard.slotsLen > 1 || guard.mode === 'multi'
         if (!keepOthers) clearWebSurfacesForWatch()
+        if (resolved.mode === 'hls') {
+          play(
+            {
+              ...item!,
+              url: resolved.url,
+              httpReferrer: resolved.referer,
+              // The part list holds embed pages; the native player gets just this stream.
+              playlist: undefined,
+              tags: [...new Set([...(item!.tags ?? []), 'hls', 'replay', 'relay-hls'])].filter(
+                (t) => t !== 'web-embed',
+              ),
+              transport: 'direct',
+            },
+            {
+              forceFull: true,
+              replace: !keepOthers,
+              returnTo: returnTo || '/section/sports',
+            },
+          )
+          return
+        }
         const webItem = {
           ...item!,
           url: resolved.url,
@@ -752,8 +775,16 @@ export function WatchPage() {
 
       // LiveXTV replays → unwrap soccerfull (native HLS when available, else embed).
       if (isLivextvReplayCatalogItem(item!)) {
-        const resolved = await resolveLivextvReplayPlay(item!)
+        let resolved = await resolveLivextvReplayPlay(item!)
         if (cancelled) return
+        if (resolved.ok && resolved.mode === 'embed' && isTizenTv() && isTizenFrameBlockedEmbed(resolved.url)) {
+          // Samsung: vidaraa / playmate refuse a file:// parent — play their HLS natively.
+          const x = await tizenExtractEmbed(resolved.url)
+          if (cancelled) return
+          resolved = x.ok
+            ? { ok: true, mode: 'hls', url: x.url, referer: x.referer || '' }
+            : { ok: false, error: 'This replay has no player that opens on Samsung TV' }
+        }
         if (!resolved.ok) {
           setError(resolved.error || 'Could not load replay')
           return
@@ -774,7 +805,7 @@ export function WatchPage() {
               ...item!,
               url: resolved.url,
               httpReferrer: resolved.referer,
-              tags: [...new Set([...(item!.tags ?? []), 'hls', 'replay'])].filter(
+              tags: [...new Set([...(item!.tags ?? []), 'hls', 'replay', ...(isTizenTv() ? ['relay-hls'] : [])])].filter(
                 (t) => t !== 'web-embed',
               ),
               transport: 'direct',
@@ -1142,6 +1173,12 @@ export function WatchPage() {
       // Series / anime / show cards: always rebuild the full episode playlist on continue.
       if (isTorrentPlaybackItem(item!)) {
         if (!isTorrentPlaybackAvailable()) {
+          // Samsung: no torrent engine — show / anime cards (SubsPlease …) open their
+          // episode list, which plays through Movy / Bilibili HLS instead.
+          if (isTizenTv() && wantsShowEpisodePlaylist(item!)) {
+            navigate(`/show/${item!.id}`, { replace: true, state: { from: returnTo } })
+            return
+          }
           setError('Playback needs the Jiyu desktop app or Android source engine.')
           return
         }

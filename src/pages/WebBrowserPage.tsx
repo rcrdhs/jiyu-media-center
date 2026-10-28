@@ -18,6 +18,7 @@ import type { CategoryId, StreamItem, StreamSourceKind, StreamTransport } from '
 import { VolumeSlider } from '../components/VolumeSlider'
 import { TizenWebFrame } from '../components/TizenWebFrame'
 import { isTizenTv } from '../lib/tvMode'
+import { isTizenFrameBlockedEmbed } from '../lib/tizenRelay'
 import { ANDROID_LEAVE_WEB_EMBED_EVENT, isAndroidShell } from '../lib/androidFullscreen'
 import {
   androidBrowserExecute,
@@ -458,6 +459,8 @@ export function WebBrowserPage() {
       const resolved = await resolveFullmatchShowsPlay(
         { id: continueWatch.id, url: '', playlist: info.playlist },
         index,
+        // Samsung: hosts that refuse a file:// parent frame would just stay black.
+        isTizenTv() ? { avoid: isTizenFrameBlockedEmbed } : undefined,
       )
       if (!resolved.ok) {
         setVolumeFlash('Could not open that part')

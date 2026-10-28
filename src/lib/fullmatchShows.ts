@@ -11,6 +11,8 @@ import {
   LIVEXTV_REPLAY_MAX_AGE_MS,
 } from './livextvReplays'
 import { sportsMatchPoster } from './sportsMatchPoster'
+import { isTizenTv } from './tvMode'
+import { isTizenFrameBlockedEmbed, tizenExtractEmbed } from './tizenRelay'
 
 export const FULLMATCHSHOWS_ORIGIN = 'https://fullmatchshows.com'
 export const FULLMATCHSHOWS_API = `${FULLMATCHSHOWS_ORIGIN}/wp-json/wp/v2`
@@ -448,6 +450,7 @@ export type FullmatchShowsPlayResult =
 export async function resolveFullmatchShowsPlay(
   item: Pick<StreamItem, 'url' | 'detailUrl' | 'playlist' | 'id'>,
   preferredIndex?: number,
+  opts?: { avoid?: (url: string) => boolean },
 ): Promise<FullmatchShowsPlayResult> {
   const rawPlaylist = (item.playlist || []).filter((p) => Boolean(p?.url))
   const targetKey =
@@ -465,7 +468,7 @@ export async function resolveFullmatchShowsPlay(
   const position = new Map(candidates.map((url, i) => [url, i]))
   const verified = (url: string) => (replayHostTier(url) >= VERIFIED_REPLAY_TIER ? 0 : 1)
   const playable = candidates
-    .filter((url) => replayHostTier(url) > 0)
+    .filter((url) => replayHostTier(url) > 0 && !opts?.avoid?.(url))
     .sort((a, b) => {
       if (targetKey) {
         const wantA = keyOf(a) === targetKey ? 0 : 1
@@ -509,11 +512,41 @@ export async function resolveFullmatchShowsPlay(
   }
   if (first) return done(first)
 
-  if (item.detailUrl && /fullmatchshows\.com/i.test(item.detailUrl)) {
+  if (!opts?.avoid && item.detailUrl && /fullmatchshows\.com/i.test(item.detailUrl)) {
     return { ok: true, mode: 'embed', url: item.detailUrl }
   }
 
   return { ok: false, error: 'No working FullMatchShows player for this match' }
+}
+
+export type FullmatchShowsDevicePlay =
+  | FullmatchShowsPlayResult
+  | { ok: true; mode: 'hls'; url: string; referer?: string; embedUrl: string; replayParts?: ReplayPartsInfo }
+
+/**
+ * Samsung (Tizen): vidaraa / playmate refuse a file:// parent frame (frame-ancestors),
+ * so their stream is extracted by the relay and played natively; when that fails the
+ * replay falls back to the next part / host that can be framed (e.g. vixeo) — never a
+ * blank frame. Other platforms: exactly resolveFullmatchShowsPlay.
+ */
+export async function resolveFullmatchShowsPlayForDevice(
+  item: Pick<StreamItem, 'url' | 'detailUrl' | 'playlist' | 'id'>,
+  preferredIndex?: number,
+): Promise<FullmatchShowsDevicePlay> {
+  const res = await resolveFullmatchShowsPlay(item, preferredIndex)
+  if (!isTizenTv() || !res.ok || !isTizenFrameBlockedEmbed(res.url)) {
+    if (isTizenTv() && res.ok && /fullmatchshows\.com/i.test(res.url)) {
+      return { ok: false, error: 'This replay has no player that opens on Samsung TV' }
+    }
+    return res
+  }
+  const x = await tizenExtractEmbed(res.url)
+  if (x.ok) {
+    return { ok: true, mode: 'hls', url: x.url, referer: x.referer, embedUrl: res.url, replayParts: res.replayParts }
+  }
+  const alt = await resolveFullmatchShowsPlay(item, preferredIndex, { avoid: isTizenFrameBlockedEmbed })
+  if (alt.ok) return alt
+  return { ok: false, error: 'This replay has no player that opens on Samsung TV' }
 }
 
 function isPlaymateUrl(url: string): boolean {

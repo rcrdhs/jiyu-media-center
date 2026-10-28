@@ -12,7 +12,8 @@
  * off (without caching anything) whenever Movy can't be reached.
  */
 import { checkMovyTvAvailability } from './movy'
-import { rivestreamTmdbIdFromItem } from './rivestream'
+import { resolveAnimeTmdbTvId, rivestreamTmdbIdFromItem } from './rivestream'
+import { isTizenTv } from './tvMode'
 import { isTmdbTvCatalogItem } from './tmdbTv'
 import { cleanShowDisplayTitle } from './torrents'
 import type { StreamItem } from '../types'
@@ -24,6 +25,7 @@ const DEAD_TTL_MS = 3 * 24 * 60 * 60 * 1000
 const CHECK_GAP_MS = 4_000
 /** Movy unreachable / rate-limited: wait before trying again. */
 const ERROR_BACKOFF_MS = 10 * 60 * 1000
+const TIZEN_ERROR_BACKOFF_MS = 2 * 60 * 1000
 /** Leave Movy alone while the user is opening something to watch. */
 const PLAYBACK_QUIET_MS = 90 * 1000
 const MAX_ENTRIES = 20_000
@@ -33,7 +35,7 @@ export const PLAYABILITY_CHANGED = 'jiyu:playability-changed'
 type Entry = { ok: boolean; at: number }
 
 let cache: Record<string, Entry> | null = null
-const queue: Array<{ key: string; tmdbId: string; title: string }> = []
+const queue: Array<{ key: string; tmdbId: string; title: string; anime?: boolean }> = []
 const queued = new Set<string>()
 let running = false
 let pausedUntil = 0
@@ -75,8 +77,30 @@ function emitChanged() {
   }, 1_500)
 }
 
+/**
+ * Samsung TV has no torrent engine, so SubsPlease / Nyaa anime rows only play
+ * through Movy (then Bilibili) after an AniList/TMDB title match. Those rows are
+ * hidden on Tizen until a check confirms Movy has the show — desktop / Android
+ * never get this key, so their shelves are unchanged.
+ */
+function isTizenTorrentAnime(item: StreamItem): boolean {
+  if (item.category !== 'anime') return false
+  if (!isTizenTv()) return false
+  if (item.transport === 'torrent' || item.sourceKind === 'torrent') return true
+  return /^magnet:/i.test(String(item.torrentUri || item.url || ''))
+}
+
+function animeTitleKey(item: StreamItem): string {
+  const title = (cleanShowDisplayTitle(item.title) || item.title || '').toLowerCase()
+  return title.replace(/[^a-z0-9]+/g, ' ').trim()
+}
+
 /** Cache key for rows whose only play path is Movy/Atlantic/Streamo; null = not checked. */
 export function playabilityKey(item: StreamItem): string | null {
+  if (isTizenTorrentAnime(item)) {
+    const t = animeTitleKey(item)
+    return t ? `anime:${t}` : null
+  }
   // Anime also tries Bilibili + Nyaa, so a Movy miss doesn't mean unplayable.
   if (item.category !== 'kids' && item.category !== 'series') return null
   if (!isTmdbTvCatalogItem(item)) return null
@@ -100,12 +124,15 @@ export function isKnownUnplayable(item: StreamItem): boolean {
 
 export function filterKnownPlayable(items: StreamItem[]): StreamItem[] {
   const data = load()
-  if (Object.keys(data).length === 0) return items
+  const tizen = isTizenTv()
+  if (!tizen && Object.keys(data).length === 0) return items
   const now = Date.now()
   return items.filter((item) => {
     const key = playabilityKey(item)
     if (!key) return true
     const entry = data[key]
+    // Tizen torrent anime: show only once a check found a non-torrent stream.
+    if (key.startsWith('anime:')) return fresh(entry, now) && entry.ok
     return !(fresh(entry, now) && !entry.ok)
   })
 }
@@ -138,7 +165,12 @@ export function queuePlayabilityChecks(items: StreamItem[], limit = 400) {
     const title = cleanShowDisplayTitle(item.title) || item.title
     if (!title) continue
     queued.add(key)
-    queue.push({ key, tmdbId: rivestreamTmdbIdFromItem(item), title })
+    queue.push({
+      key,
+      tmdbId: rivestreamTmdbIdFromItem(item),
+      title,
+      anime: key.startsWith('anime:'),
+    })
     added += 1
   }
   if (added > 0) void drain()
@@ -159,13 +191,22 @@ async function drain() {
       const job = queue[0]!
       let verdict: Awaited<ReturnType<typeof checkMovyTvAvailability>>
       try {
-        verdict = await checkMovyTvAvailability({ tmdbId: job.tmdbId, title: job.title })
+        let tmdbId = job.tmdbId
+        if (job.anime) {
+          // AniList/TMDB match; null = no TMDB show → nothing non-torrent can play it.
+          tmdbId = (await resolveAnimeTmdbTvId(job.title, tmdbId || null)) || ''
+        }
+        verdict = tmdbId
+          ? await checkMovyTvAvailability({ tmdbId, title: job.title })
+          : 'none'
       } catch {
         verdict = 'error'
       }
       if (verdict === 'error') {
         // Seed blocked / rate-limited — never cache, retry this job later.
-        pausedUntil = Date.now() + ERROR_BACKOFF_MS
+        // Samsung goes through the shared Cloudflare relay, whose egress IPs Movy
+        // rate-limits per minute: retry sooner there instead of idling 10 min.
+        pausedUntil = Date.now() + (isTizenTv() ? TIZEN_ERROR_BACKOFF_MS : ERROR_BACKOFF_MS)
         continue
       }
       queue.shift()

@@ -74,6 +74,7 @@ import {
   torrentStream,
 } from '../lib/torrentBridge'
 import { maskUserFacingMessage } from '../lib/sourceMask'
+import { isTizenTv } from '../lib/tvMode'
 import type { StreamItem, StreamPlaylistItem, TorrentStreamResult } from '../types'
 
 const TORRENT_CANDIDATE_TIMEOUT_MS = 28_000
@@ -1073,6 +1074,25 @@ export function ShowPage() {
       }
 
       if (!isTorrentPlaybackAvailable()) {
+        // Samsung (no torrent engine): anime episodes (SubsPlease / Nyaa shelves) play
+        // through Movy, then Bilibili, matched by TMDB id (AniList → TMDB) + episode.
+        if (
+          isTizenTv() &&
+          (shouldTryNyaaForItem(item) ||
+            item.torrentSourceId === NYAA_SEARCH_SOURCE_ID ||
+            /^(?:nyaa|subsplease)/i.test(String(item.source || item.torrentSourceId || '')))
+        ) {
+          const seMatch = /^S(\d{1,2})E(\d{1,4})$/i.exec(chosen.key)
+          const epMatch = /(?:^|\D)(\d{1,4})(?:v\d)?(?:\D*$)/.exec(chosen.key)
+          const season = seMatch ? Number(seMatch[1]) : 1
+          const episode = seMatch ? Number(seMatch[2]) : epMatch ? Number(epMatch[1]) : index + 1
+          const movyOk = await tryPlayMovyNative(season, episode)
+          if (movyOk || !stillCurrent()) return
+          const biliOk = await tryPlayBilibiliNative(season, episode)
+          if (biliOk || !stillCurrent()) return
+          setPlayError(`No Samsung TV stream for ${chosen.key || 'this episode'} yet.`)
+          return
+        }
         setPlayError('Playback needs the Jiyu desktop app or Android source engine.')
         return
       }

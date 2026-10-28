@@ -5,6 +5,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react'
@@ -56,7 +57,12 @@ import {
   indexTmdbTvTitles,
 } from '../lib/tmdbTv'
 import { ZENOX_SOURCE_ID } from '../lib/zenox'
-import { filterKnownPlayable, PLAYABILITY_CHANGED } from '../lib/playability'
+import {
+  filterKnownPlayable,
+  PLAYABILITY_CHANGED,
+  queuePlayabilityChecks,
+} from '../lib/playability'
+import { isTizenTv } from '../lib/tvMode'
 import {
   TORRENT_SCRAPER_VERSION,
   syncAllTorrentSources,
@@ -399,6 +405,35 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
     return base.filter(isSeriesWebCatalogItem)
   }, [items, torrentSourceRevision, hideKeywordsTick])
 
+  // Samsung: check torrent-only anime rows (one at a time, cached 14 d) so the
+  // Anime shelf fills with titles Movy can stream. Desktop / Android skip this.
+  // Keyed on the torrent-anime ids only — `items` changes every few seconds (live
+  // sports refresh), which would keep resetting the start timer.
+  const tizenTorrentAnime = useMemo(() => {
+    if (!isTizenTv()) return [] as StreamItem[]
+    return torrentItems.filter(
+      (item) =>
+        item.category === 'anime' &&
+        (item.transport === 'torrent' ||
+          item.sourceKind === 'torrent' ||
+          /^magnet:/i.test(String(item.torrentUri || ''))),
+    )
+  }, [torrentItems])
+  const tizenTorrentAnimeKey = useMemo(
+    () => tizenTorrentAnime.map((item) => item.id).join('|'),
+    [tizenTorrentAnime],
+  )
+  const tizenTorrentAnimeRef = useRef(tizenTorrentAnime)
+  tizenTorrentAnimeRef.current = tizenTorrentAnime
+  useEffect(() => {
+    if (!tizenTorrentAnimeKey) return
+    const timer = window.setTimeout(
+      () => queuePlayabilityChecks(tizenTorrentAnimeRef.current, 600),
+      8_000,
+    )
+    return () => window.clearTimeout(timer)
+  }, [tizenTorrentAnimeKey])
+
   const byCategory = useCallback(
     (id: CategoryId) => {
       void torrentSourceRevision
@@ -410,6 +445,8 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
       let base = items.filter((item) => item.category === id)
       base = filterShelfVisibleItems(base)
       if (id === 'kids') base = filterKnownPlayable(base)
+      // Samsung: torrent-only anime (SubsPlease / Nyaa) shows once Movy has it.
+      if (id === 'anime' && isTizenTv()) base = filterKnownPlayable(base)
       if (!englishOnly || !shouldApplyEnglishFilter(id)) return base
       // Match titles / leagues aren't "English streams" — don't hide LiveXTV Replay.
       return base.filter(

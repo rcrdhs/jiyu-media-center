@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { useNavigate } from 'react-router-dom'
 import Hls from 'hls.js'
 import mpegts from 'mpegts.js'
-import { tizenHlsUrl } from '../lib/tizenRelay'
+import { tizenHlsSource, tizenHlsUrl } from '../lib/tizenRelay'
 import { useEpg } from '../context/EpgContext'
 import { usePlayback } from '../context/PlaybackContext'
 import { PlaybackLoadingScreen } from './PlaybackLoadingScreen'
@@ -6509,7 +6509,16 @@ export function Player({
           clearNetBackoff()
         }
         // Samsung: referer-locked CDNs (Movy / Atlantic …) via the relay; no-op elsewhere.
-        hls.loadSource(tizenHlsUrl(activePlaylistItem.url, playbackHeaders.referrer))
+        const lockedSrc = tizenHlsUrl(activePlaylistItem.url, playbackHeaders.referrer)
+        if (isTizenTv() && lockedSrc === activePlaylistItem.url) {
+          // Samsung IPTV: direct unless the playlist fails CORS, then the relay (allowlist only).
+          const tizenHls = hls
+          void tizenHlsSource(activePlaylistItem.url, playbackHeaders.referrer).then((src) => {
+            if (!cancelled && hlsInstanceRef.current === tizenHls) tizenHls.loadSource(src)
+          })
+        } else {
+          hls.loadSource(lockedSrc)
+        }
         hls.attachMedia(video)
         hlsInstanceRef.current = hls
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
