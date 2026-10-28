@@ -1,0 +1,8 @@
+# Redirect-only short links (no storage, no secrets, no bindings).
+# Separate from jiyu-sync on purpose: deploying this never touches sync.
+#   https://jiyu.free-river.workers.dev/tv    -> newest TV APK (universal, Jiyu-TV.apk)
+#   https://jiyu.free-river.workers.dev/tv64  -> newest arm64 APK (same file the phone/updater uses)
+name = "jiyu"
+main = "src/index.js"
+compatibility_date = "2024-11-01"
+workers_dev = true

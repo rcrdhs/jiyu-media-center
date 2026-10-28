@@ -305,6 +305,10 @@ public class AppUpdatePlugin extends Plugin {
       int versionCode = 0;
       String path = "";
       String sha256 = "";
+      // Optional (0.3.89+ feeds): universal arm64+armv7 APK for 32-bit-only TV
+      // sticks (many Fire TV / Google TV dongles). Older apps ignore these keys.
+      String universalPath = "";
+      String universalSha256 = "";
       for (String raw : text.split("\\r?\\n")) {
         String line = raw.trim();
         if (line.isEmpty() || line.startsWith("#")) continue;
@@ -321,6 +325,8 @@ public class AppUpdatePlugin extends Plugin {
           case "versionCode" -> versionCode = parseCode(value);
           case "path" -> path = value;
           case "sha256" -> sha256 = value;
+          case "universalPath" -> universalPath = value;
+          case "universalSha256" -> universalSha256 = value;
           default -> {
             /* ignore extra keys */
           }
@@ -335,7 +341,24 @@ public class AppUpdatePlugin extends Plugin {
       if (!sha256.matches("(?i)[a-f0-9]{64}")) {
         throw new IOException("Update feed is missing a checksum");
       }
+      // The default asset is arm64-only; a device without an arm64 ABI would get
+      // "App not installed". Pick the universal asset when the feed offers one.
+      if (!supportsArm64()
+          && universalPath.matches("[A-Za-z0-9._-]{1,180}")
+          && !universalPath.contains("..")
+          && universalSha256.matches("(?i)[a-f0-9]{64}")) {
+        return new Feed(version, versionCode, universalPath, universalSha256);
+      }
       return new Feed(version, versionCode, path, sha256);
+    }
+
+    private static boolean supportsArm64() {
+      String[] abis = Build.SUPPORTED_ABIS;
+      if (abis == null) return true;
+      for (String abi : abis) {
+        if ("arm64-v8a".equals(abi)) return true;
+      }
+      return false;
     }
 
     private static int parseCode(String value) throws IOException {

@@ -12,7 +12,9 @@ When a change affects the shared app (`src/`, Capacitor web assets, or cross-pla
 1. Bump version (`package.json`, `android/.../versionName` + `versionCode`, **and** `APP_RELEASES` in `appVersion.ts` — newest first, clear one-line summary).
 2. `npm run build` → `npx cap sync android` → signed Android release APK.
 3. Windows pack (`electron-builder` / `pack:win`, `npmRebuild=false` if needed).
-4. Publish **both** to the same GitHub Release: APK + `latest-android.yml`, and Windows Setup/portable + `latest.yml`. Keep the GitHub release body aligned with `APP_RELEASES`.
+   - Then the **universal TV APK** (arm64 + armv7 for 32-bit Fire TV / Google TV sticks): `cd android && gradlew assembleRelease -PjiyuUniversal=true` → `Jiyu-<ver>-universal.apk`.
+   - Stage it: `node scripts/stage-tv-apk.mjs --version <ver>` (after the arm64 `latest-android.yml` is in `F:\Jiyu\pack-out\<ver>\upload`). It copies it to the fixed name **`Jiyu-TV.apk`** and appends `universalPath/universalSha256/universalSize` to `latest-android.yml`. Never change the arm64 `path`/`sha256` keys or rename `Jiyu-<ver>-arm64.apk`.
+4. Publish **both** to the same GitHub Release: arm64 APK + **`Jiyu-TV.apk`** + `latest-android.yml`, and Windows Setup/portable + `latest.yml`. Keep the GitHub release body aligned with `APP_RELEASES`. `Jiyu-TV.apk` must be on every release marked Latest — the short link `https://jiyu.free-river.workers.dev/tv` (Worker `workers/jiyu-get`, no redeploy needed) points at `releases/latest/download/Jiyu-TV.apk`.
 5. Tell the user the release URL and which platforms updated.
 
 ## Desktop test build (preferred while iterating)
