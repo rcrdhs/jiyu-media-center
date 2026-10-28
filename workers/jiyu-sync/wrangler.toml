@@ -29,3 +29,13 @@ namespace_id = "7202"
   [ratelimits.simple]
   limit = 60
   period = 60
+
+# Payments / entitlements scaffold (src/billing.js, docs/payments.md). OFF: every billing route
+# returns 404 and sync behaves exactly as before. Do not flip these in production until the
+# decisions in docs/payments.md are made. Provider keys are Worker secrets only, never vars:
+#   npx wrangler secret put STRIPE_SECRET_KEY   (sk_test_... only; live keys are refused in code)
+#   npx wrangler secret put STRIPE_WEBHOOK_SECRET
+[vars]
+BILLING_ENABLED = "false"
+BILLING_PROVIDER = "none"
+BILLING_TRIAL_DAYS = "7"

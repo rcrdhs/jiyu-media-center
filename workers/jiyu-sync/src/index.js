@@ -14,6 +14,8 @@
  *    device with a wrong clock can't win every conflict.
  */
 
+import { createBilling } from './billing.js'
+
 const PAIR_TTL_MS = 10 * 60 * 1000
 const PAIR_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789' // 32 symbols, no 0/O/1/I
 const MAX_DEVICES = 10
@@ -309,16 +311,22 @@ async function pushProgress(env, userId, rawEntries) {
   return { results, rev, now }
 }
 
+// Entitlements / payments scaffold. Inert unless BILLING_ENABLED = "true" (docs/payments.md).
+const billing = createBilling({ json, fail, readJson })
+
 async function revokeDevice(env, userId, deviceId) {
   const res = await env.DB.prepare('DELETE FROM devices WHERE id = ? AND user_id = ?').bind(deviceId, userId).run()
   if (!res.meta?.changes) return false
   const left = await env.DB.prepare('SELECT COUNT(*) AS n FROM devices WHERE user_id = ?').bind(userId).first()
   if (!Number(left?.n)) {
     // Last device gone: nothing can read this account any more, so remove its data.
+    // Billing off (default): exactly the original three deletes. Billing on: see billing.js.
+    const extra = await billing.lastDeviceCleanup(env, userId)
     await env.DB.batch([
       env.DB.prepare('DELETE FROM progress WHERE user_id = ?').bind(userId),
       env.DB.prepare('DELETE FROM pair_codes WHERE user_id = ?').bind(userId),
-      env.DB.prepare('DELETE FROM users WHERE id = ?').bind(userId),
+      ...extra.stmts,
+      ...(extra.keepUser ? [] : [env.DB.prepare('DELETE FROM users WHERE id = ?').bind(userId)]),
     ])
   }
   return true
@@ -370,10 +378,16 @@ async function route(request, env) {
     return json(200, { token: device.token, userId: row.user_id, deviceId: device.deviceId, label })
   }
 
+  const billingPublic = await billing.publicRoute(request, env, url, path, method)
+  if (billingPublic) return billingPublic
+
   // ---- authenticated routes
   const auth = await authDevice(request, env)
   if (!auth) return fail(401, 'Signed out — this device was removed or its sign-in is invalid')
   if (await limited(env.SYNC_LIMITER, `dev:${auth.deviceId}`)) return fail(429, 'Slow down')
+
+  const billingAuthed = await billing.authedRoute(request, env, auth, url, path, method, loopback)
+  if (billingAuthed) return billingAuthed
 
   if (method === 'POST' && path === '/v1/auth/pair-code') {
     return json(200, await issuePairCode(env, auth.userId))
