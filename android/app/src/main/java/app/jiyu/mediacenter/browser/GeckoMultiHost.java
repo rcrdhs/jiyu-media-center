@@ -614,6 +614,11 @@ final class GeckoMultiHost {
         headers.put("Accept-Language", "en-US,en;q=0.9");
         loader.additionalHeaders(headers);
       }
+      // YouTube tiles (Nationwide) need an https embedder referrer or show Error 153.
+      String ytReferer = GeckoOverlayController.youTubeEmbedderReferrer(url);
+      if (ytReferer != null) {
+        loader.referrer(ytReferer);
+      }
       session.load(loader);
     } catch (Throwable t) {
       try {

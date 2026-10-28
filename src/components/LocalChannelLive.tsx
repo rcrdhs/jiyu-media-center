@@ -14,6 +14,12 @@ import {
 
 interface LocalChannelLiveProps {
   item: StreamItem
+  /**
+   * This channel is the current PiP / player item. The card stays on Home (a
+   * failed player used to hide it until the player was closed) but skips its
+   * own muted preview so the stream isn't decoded twice.
+   */
+  playingElsewhere?: boolean
 }
 
 function SpeakerIcon({ muted }: { muted: boolean }) {
@@ -81,7 +87,7 @@ function applyYoutubeMuteParam(iframe: HTMLIFrameElement | null, muted: boolean)
   }
 }
 
-export function LocalChannelLive({ item }: LocalChannelLiveProps) {
+export function LocalChannelLive({ item, playingElsewhere = false }: LocalChannelLiveProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const youtubeRef = useRef<HTMLIFrameElement>(null)
   const hlsRef = useRef<Hls | null>(null)
@@ -131,8 +137,19 @@ export function LocalChannelLive({ item }: LocalChannelLiveProps) {
     }
   }, [item.url, youtube])
 
+  // Drop the YouTube preview while the channel plays in the corner / full player.
+  useEffect(() => {
+    if (playingElsewhere) setYoutubeEmbedReady(false)
+  }, [playingElsewhere])
+
   useEffect(() => {
     if (youtube) return
+    if (playingElsewhere) {
+      setPlaying(false)
+      setFailed(false)
+      setConnecting(false)
+      return
+    }
     const video = videoRef.current
     if (!video) return
 
@@ -228,7 +245,7 @@ export function LocalChannelLive({ item }: LocalChannelLiveProps) {
       video.removeAttribute('src')
       video.load()
     }
-  }, [item.url, youtube])
+  }, [item.url, youtube, playingElsewhere])
 
   // Another local channel took audio — mute this one.
   useEffect(() => {
@@ -277,8 +294,10 @@ export function LocalChannelLive({ item }: LocalChannelLiveProps) {
     setMuted(true)
   }
 
-  const offline = youtube ? youtubeLive === false : failed
-  const liveLabel = youtube
+  const offline = playingElsewhere ? false : youtube ? youtubeLive === false : failed
+  const liveLabel = playingElsewhere
+    ? 'Playing'
+    : youtube
     ? youtubeLive === null
       ? 'Checking…'
       : offline
@@ -289,7 +308,9 @@ export function LocalChannelLive({ item }: LocalChannelLiveProps) {
       : offline
         ? 'Offline'
         : 'Live'
-  const detail = youtube
+  const detail = playingElsewhere
+    ? 'Playing in the player now — Watch opens it full screen.'
+    : youtube
     ? offline
       ? 'Not on-air on YouTube right now — open Watch when they go live.'
       : 'Live on YouTube — Watch opens the full player (PiP on Back).'
@@ -298,8 +319,10 @@ export function LocalChannelLive({ item }: LocalChannelLiveProps) {
       : connecting
         ? 'Connecting to live stream…'
         : item.description
-  const showYoutubeEmbed = Boolean(youtube && youtubePreview && youtubeLive)
-  const showYoutubeThumb = Boolean(youtube && youtubeLive && youtubePoster && !youtubeEmbedReady)
+  const showYoutubeEmbed = Boolean(youtube && youtubePreview && youtubeLive && !playingElsewhere)
+  const showYoutubeThumb = Boolean(
+    youtube && youtubeLive && youtubePoster && (!youtubeEmbedReady || playingElsewhere),
+  )
   const audioReady = (!youtube && playing) || (showYoutubeEmbed && youtubeEmbedReady)
 
   return (
@@ -353,7 +376,7 @@ export function LocalChannelLive({ item }: LocalChannelLiveProps) {
           )}
         </Link>
         <span
-          className={`local-channel-live-badge ${offline ? 'is-offline' : ''} ${connecting && !youtube ? 'is-connecting' : ''}`}
+          className={`local-channel-live-badge ${offline ? 'is-offline' : ''} ${connecting && !youtube && !playingElsewhere ? 'is-connecting' : ''}`}
         >
           {liveLabel}
         </span>

@@ -284,23 +284,17 @@ export function HomePage() {
           <div className="section-head">
             <h2>Local channels</h2>
           </div>
-          {(tvjPlayingElsewhere || cvmPlayingElsewhere || nationwidePlayingElsewhere) && (
-            <p className="fine-print local-channel-note">
-              {(tvjPlayingElsewhere
-                ? tvjChannel.title
-                : cvmPlayingElsewhere
-                  ? cvmChannel.title
-                  : nationwideChannel.title) +
-                ' is playing in the corner — browse or search for another stream below.'}
-            </p>
-          )}
-          {(!tvjPlayingElsewhere || !cvmPlayingElsewhere || !nationwidePlayingElsewhere) && (
-            <div className="local-channel-live-row">
-              {!tvjPlayingElsewhere && <LocalChannelLive item={tvjChannel} />}
-              {!cvmPlayingElsewhere && <LocalChannelLive item={cvmChannel} />}
-              {!nationwidePlayingElsewhere && <LocalChannelLive item={nationwideChannel} />}
-            </div>
-          )}
+          {/* Always show all three cards. Hiding the playing one made a channel whose
+              player failed (e.g. Nationwide's YouTube Error 153) vanish from Home
+              until the stuck PiP was closed. */}
+          <div className="local-channel-live-row">
+            <LocalChannelLive item={tvjChannel} playingElsewhere={tvjPlayingElsewhere} />
+            <LocalChannelLive item={cvmChannel} playingElsewhere={cvmPlayingElsewhere} />
+            <LocalChannelLive
+              item={nationwideChannel}
+              playingElsewhere={nationwidePlayingElsewhere}
+            />
+          </div>
         </section>
       )}
     </div>

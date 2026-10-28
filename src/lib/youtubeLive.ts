@@ -65,6 +65,9 @@ export function extractYouTubeVideoId(html: string): string | null {
   return null
 }
 
+/** https embedder identity Jiyu sends to YouTube (electron/main.cjs + GeckoOverlayController). */
+const YOUTUBE_EMBEDDER_ORIGIN = 'https://jiyu.app'
+
 /** IFrame API rejects unmute commands when origin doesn't match the real page. */
 function youtubeEmbedOrigin(): string {
   if (typeof window !== 'undefined') {
@@ -75,7 +78,7 @@ function youtubeEmbedOrigin(): string {
       /* ignore */
     }
   }
-  return 'https://jiyu.app'
+  return YOUTUBE_EMBEDDER_ORIGIN
 }
 
 function playUrlsForVideoId(videoId: string): Omit<
@@ -83,6 +86,11 @@ function playUrlsForVideoId(videoId: string): Omit<
   'ok'
 > {
   const origin = encodeURIComponent(youtubeEmbedOrigin())
+  // embedUrl is only loaded top-level (Android Gecko player / multiview tiles),
+  // where the native side sends Referer https://jiyu.app/ — keep origin and
+  // widget_referrer on the same embedder so YouTube doesn't answer Error 153.
+  const embedder = encodeURIComponent(YOUTUBE_EMBEDDER_ORIGIN)
+  const embedderReferrer = encodeURIComponent(`${YOUTUBE_EMBEDDER_ORIGIN}/`)
   const qs =
     'autoplay=1&mute=1&controls=0&rel=0&modestbranding=1&playsinline=1&enablejsapi=1'
   return {
@@ -90,7 +98,7 @@ function playUrlsForVideoId(videoId: string): Omit<
     watchUrl: `https://www.youtube.com/watch?v=${videoId}&autoplay=1`,
     // Full Watch prefers watchUrl in WebContentsView; embed is for iframes.
     // origin= helps some embed configs; Referer is still required (Error 153).
-    embedUrl: `https://www.youtube.com/embed/${videoId}?autoplay=1&rel=0&modestbranding=1&playsinline=1&origin=${origin}`,
+    embedUrl: `https://www.youtube.com/embed/${videoId}?autoplay=1&rel=0&modestbranding=1&playsinline=1&origin=${embedder}&widget_referrer=${embedderReferrer}`,
     // Card preview: nocookie + muted autoplay (allowed after frame-src CSP).
     previewUrl: `https://www.youtube-nocookie.com/embed/${videoId}?${qs}&origin=${origin}`,
     posterUrl: `https://i.ytimg.com/vi/${videoId}/hqdefault_live.jpg`,

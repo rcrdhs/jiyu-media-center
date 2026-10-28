@@ -1513,6 +1513,14 @@ final class GeckoOverlayController {
         if (referer != null && !referer.isEmpty()) {
           headers.put("Referer", referer);
         }
+        // GeckoView drops a "Referer" in additionalHeaders (only CORS-safelisted
+        // headers pass the default filter), so YouTube embeds loaded with no
+        // embedder identity and showed Error 153. Loader.referrer() sets the real
+        // navigation referrer (Referer header + document.referrer).
+        String ytReferer = youTubeEmbedderReferrer(url);
+        if (ytReferer != null) {
+          loader.referrer(ytReferer);
+        }
       }
       loader.additionalHeaders(headers);
       session.load(loader);
@@ -1559,6 +1567,22 @@ final class GeckoOverlayController {
       return "https://rivestream.ru/";
     }
     // YouTube Error 153 / blank embed: needs an https embedder identity (not youtube.com).
+    if (
+      host.equals("youtube.com")
+      || host.endsWith(".youtube.com")
+      || host.equals("youtube-nocookie.com")
+      || host.endsWith(".youtube-nocookie.com")
+      || host.equals("youtu.be")
+    ) {
+      return "https://jiyu.app/";
+    }
+    return null;
+  }
+
+  /** https embedder identity for YouTube document loads (Error 153), else null. */
+  @Nullable
+  static String youTubeEmbedderReferrer(String url) {
+    String host = hostOf(url);
     if (
       host.equals("youtube.com")
       || host.endsWith(".youtube.com")
