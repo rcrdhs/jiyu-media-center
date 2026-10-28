@@ -1,0 +1,11 @@
+# Jiyu relay for the Samsung (Tizen) build only.
+# Separate from jiyu (short links) and jiyu-sync on purpose: deploying this never
+# touches either. No storage, no bindings. One secret: RELAY_KEY (HMAC for
+# signed HLS segment URLs) — set with `wrangler secret put RELAY_KEY`.
+#   https://jiyu-relay.free-river.workers.dev/r?u=<url>     CORS relay (allowlisted hosts)
+#   https://jiyu-relay.free-river.workers.dev/hls?u=&ref=   HLS with Referer (allowlisted referers)
+#   https://jiyu-relay.free-river.workers.dev/yt?v=<id>     https YouTube embed page
+name = "jiyu-relay"
+main = "src/index.js"
+compatibility_date = "2024-11-01"
+workers_dev = true

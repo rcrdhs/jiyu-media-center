@@ -85,6 +85,7 @@ import {
   canAndroidResolveEmbedMedia,
 } from '../lib/androidStreamResolve'
 import { isAndroidMedia3Host, media3Hide } from '../lib/androidMedia3'
+import { isTizenTv } from '../lib/tvMode'
 import type { StreamItem, StreamPlaylistItem, TorrentStreamResult } from '../types'
 
 /** Live channels / sports embeds: show "Unwrapping stream…" from tap to first frame. */
@@ -845,7 +846,7 @@ export function WatchPage() {
           setError(resolved.error || 'This channel is not live right now')
           return
         }
-        const playUrl = isAndroidInAppBrowser()
+        const playUrl = isAndroidInAppBrowser() || isTizenTv()
           ? resolved.embedUrl || resolved.watchUrl || toAutoplayUrl(item!.url)
           : resolved.watchUrl || toAutoplayUrl(item!.url)
         const webItem = {

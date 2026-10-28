@@ -16,6 +16,8 @@ import {
 } from '../lib/webBrowser'
 import type { CategoryId, StreamItem, StreamSourceKind, StreamTransport } from '../types'
 import { VolumeSlider } from '../components/VolumeSlider'
+import { TizenWebFrame } from '../components/TizenWebFrame'
+import { isTizenTv } from '../lib/tvMode'
 import { ANDROID_LEAVE_WEB_EMBED_EVENT, isAndroidShell } from '../lib/androidFullscreen'
 import {
   androidBrowserExecute,
@@ -655,7 +657,7 @@ export function WebBrowserPage() {
         </header>
       )}
 
-      {!desktop && (
+      {!desktop && !(isTizenTv() && (paramUrl || nav.url)) && (
         <div className="web-frame-banner">
           <p>In-app browser is unavailable on this build.</p>
         </div>
@@ -903,7 +905,7 @@ export function WebBrowserPage() {
         )}
       </div>
 
-      {status && (
+      {status && !(!desktop && isTizenTv() && (paramUrl || nav.url)) && (
         <div className="web-status">
           <span>{status}</span>
         </div>
@@ -936,7 +938,10 @@ export function WebBrowserPage() {
           className={`web-frame web-frame-tile ${desktop ? 'web-frame-embed-active' : ''}`}
           aria-label="Browser tile"
         >
-          {!desktop && (
+          {!desktop && isTizenTv() && (paramUrl || nav.url) ? (
+            <TizenWebFrame url={paramUrl || nav.url} title={displayTitle} />
+          ) : null}
+          {!desktop && !(isTizenTv() && (paramUrl || nav.url)) && (
             <div className="web-frame-fallback">
               <p>Loading in-app browser…</p>
             </div>

@@ -1,5 +1,8 @@
 /** Detect whether a YouTube @handle/live URL is currently on-air */
 
+import { isTizenTv } from './tvMode'
+import { tizenYouTubeEmbedUrl } from './tizenRelay'
+
 export type YouTubeLivePlayResult =
   | {
       ok: true
@@ -91,6 +94,17 @@ function playUrlsForVideoId(videoId: string): Omit<
   // widget_referrer on the same embedder so YouTube doesn't answer Error 153.
   const embedder = encodeURIComponent(YOUTUBE_EMBEDDER_ORIGIN)
   const embedderReferrer = encodeURIComponent(`${YOUTUBE_EMBEDDER_ORIGIN}/`)
+  if (isTizenTv()) {
+    // Samsung: the app runs from a widget/file origin, so YouTube's own embed
+    // answers Error 153. The relay's https page embeds it with a real origin.
+    return {
+      videoId,
+      watchUrl: `https://www.youtube.com/watch?v=${videoId}&autoplay=1`,
+      embedUrl: tizenYouTubeEmbedUrl(videoId),
+      previewUrl: tizenYouTubeEmbedUrl(videoId, { mute: true }),
+      posterUrl: `https://i.ytimg.com/vi/${videoId}/hqdefault_live.jpg`,
+    }
+  }
   const qs =
     'autoplay=1&mute=1&controls=0&rel=0&modestbranding=1&playsinline=1&enablejsapi=1'
   return {

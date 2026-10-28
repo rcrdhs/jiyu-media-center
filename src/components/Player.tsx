@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { useNavigate } from 'react-router-dom'
 import Hls from 'hls.js'
 import mpegts from 'mpegts.js'
+import { tizenHlsUrl } from '../lib/tizenRelay'
 import { useEpg } from '../context/EpgContext'
 import { usePlayback } from '../context/PlaybackContext'
 import { PlaybackLoadingScreen } from './PlaybackLoadingScreen'
@@ -6507,7 +6508,8 @@ export function Player({
           window.clearInterval(frozenWatch)
           clearNetBackoff()
         }
-        hls.loadSource(activePlaylistItem.url)
+        // Samsung: referer-locked CDNs (Movy / Atlantic …) via the relay; no-op elsewhere.
+        hls.loadSource(tizenHlsUrl(activePlaylistItem.url, playbackHeaders.referrer))
         hls.attachMedia(video)
         hlsInstanceRef.current = hls
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
