@@ -12,6 +12,11 @@ export const APP_VERSION_LABEL = `v${APP_VERSION}`
 /** Short milestone log — newest first — so progress is visible in-app. */
 export const APP_RELEASES: ReadonlyArray<{ version: string; summary: string }> = [
   {
+    version: '0.3.89',
+    summary:
+      'Nationwide plays again on Android, and a local channel on Home no longer disappears while it is playing; Jiyu now works on Android TV, Google TV and Fire TV with remote-control navigation and a bigger TV layout; a TV version for older 32-bit TV sticks can be downloaded from jiyu.free-river.workers.dev/tv; Samsung TVs get their own version (installed separately) that plays anime, sports replays and IPTV channels; the welcome guide has a new Install on your TV step',
+  },
+  {
     version: '0.3.88',
     summary:
       'Movies play in their original language, or English, instead of a foreign dub by default; when a server offers other languages, an Audio menu in the player lets you switch; Retry on a movie now tries a different server and keeps your place; a server that played the wrong language is no longer remembered for that title',
