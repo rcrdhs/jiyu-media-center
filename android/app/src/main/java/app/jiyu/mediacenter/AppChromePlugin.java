@@ -69,6 +69,25 @@ public class AppChromePlugin extends Plugin {
     });
   }
 
+  /** { tv } — Android TV / Google TV / Fire TV. The web layer gates TV mode on this. */
+  @PluginMethod
+  public void getDeviceInfo(PluginCall call) {
+    JSObject out = new JSObject();
+    boolean tv = false;
+    try {
+      tv = TvMode.isTv(getContext());
+    } catch (Throwable ignored) {}
+    out.put("tv", tv);
+    call.resolve(out);
+  }
+
+  /** TV remote media keys (play/pause, ffwd, rewind, …) → JS `mediaKey` event. */
+  public void emitMediaKey(String key) {
+    JSObject data = new JSObject();
+    data.put("key", key);
+    notifyListeners("mediaKey", data);
+  }
+
   /** When enabled, hardware Back is delivered as a `backButton` listener event. */
   @PluginMethod
   public void setBackHandling(PluginCall call) {

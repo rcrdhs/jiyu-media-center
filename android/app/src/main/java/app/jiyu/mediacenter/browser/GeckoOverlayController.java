@@ -301,6 +301,7 @@ final class GeckoOverlayController {
       );
     view.setLayoutParams(layoutParams);
     view.setVisibility(View.GONE);
+    TvPointer.prepareOverlayView(view);
     parent.addView(view);
 
     loadCover = new View(parent.getContext());

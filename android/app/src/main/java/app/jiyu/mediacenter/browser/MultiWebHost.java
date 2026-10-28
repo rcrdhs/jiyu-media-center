@@ -526,6 +526,7 @@ final class MultiWebHost {
         }
       }
     );
+    TvPointer.prepareOverlayView(view);
     parent.addView(view);
     return view;
   }

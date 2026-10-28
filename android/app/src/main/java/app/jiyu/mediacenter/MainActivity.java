@@ -5,6 +5,7 @@ import android.content.res.Configuration;
 import android.graphics.Color;
 import android.os.Build;
 import android.os.Bundle;
+import android.view.KeyEvent;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowInsetsController;
@@ -19,6 +20,7 @@ import com.getcapacitor.BridgeActivity;
 
 import app.jiyu.mediacenter.bili.BiliSessionPlugin;
 import app.jiyu.mediacenter.browser.InAppBrowserPlugin;
+import app.jiyu.mediacenter.browser.TvPointer;
 import app.jiyu.mediacenter.media3.Media3PlayerPlugin;
 import app.jiyu.mediacenter.torrent.TorrentStreamerPlugin;
 
@@ -86,6 +88,112 @@ public class MainActivity extends BridgeActivity {
         }
       }
     );
+  }
+
+  /**
+   * TV remote routing (Android TV / Google TV / Fire TV only; phones untouched):
+   * - pointer mode over a Gecko stream eats D-pad / OK / Back;
+   * - media keys go to JS as `mediaKey` events;
+   * - D-pad / OK always land in the Capacitor WebView (native surfaces such as
+   *   GeckoView / PlayerView must not steal focus), with DPAD_CENTER sent as Enter.
+   */
+  @Override
+  public boolean dispatchKeyEvent(KeyEvent event) {
+    if (!TvMode.isTv(this)) return super.dispatchKeyEvent(event);
+    try {
+      if (TvPointer.get().isCursor() && TvPointer.get().handleKey(event)) return true;
+    } catch (Throwable ignored) {}
+
+    String media = mediaKeyName(event.getKeyCode());
+    if (media != null) {
+      if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) {
+        AppChromePlugin chrome = chromePlugin();
+        if (chrome != null) chrome.emitMediaKey(media);
+      }
+      return true;
+    }
+
+    if (isNavKey(event.getKeyCode())) {
+      View web = getBridge() != null ? getBridge().getWebView() : null;
+      if (web != null) {
+        View focused = getCurrentFocus();
+        if (focused == null || focused != web && isOverlaySurface(focused)) {
+          web.requestFocus();
+        }
+        if (getCurrentFocus() == web) {
+          if (event.getKeyCode() == KeyEvent.KEYCODE_DPAD_CENTER
+            || event.getKeyCode() == KeyEvent.KEYCODE_BUTTON_A) {
+            KeyEvent enter = new KeyEvent(
+              event.getDownTime(),
+              event.getEventTime(),
+              event.getAction(),
+              KeyEvent.KEYCODE_ENTER,
+              event.getRepeatCount(),
+              event.getMetaState(),
+              event.getDeviceId(),
+              event.getScanCode(),
+              event.getFlags(),
+              event.getSource()
+            );
+            return web.dispatchKeyEvent(enter) || super.dispatchKeyEvent(event);
+          }
+        }
+      }
+    }
+    return super.dispatchKeyEvent(event);
+  }
+
+  private static boolean isNavKey(int code) {
+    switch (code) {
+      case KeyEvent.KEYCODE_DPAD_UP:
+      case KeyEvent.KEYCODE_DPAD_DOWN:
+      case KeyEvent.KEYCODE_DPAD_LEFT:
+      case KeyEvent.KEYCODE_DPAD_RIGHT:
+      case KeyEvent.KEYCODE_DPAD_CENTER:
+      case KeyEvent.KEYCODE_ENTER:
+      case KeyEvent.KEYCODE_NUMPAD_ENTER:
+      case KeyEvent.KEYCODE_BUTTON_A:
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  /** Browser / player surfaces drawn natively over the WebView. */
+  private static boolean isOverlaySurface(View v) {
+    if (v instanceof org.mozilla.geckoview.GeckoView) return true;
+    if (v instanceof androidx.media3.ui.PlayerView) return true;
+    android.view.ViewParent p = v.getParent();
+    while (p instanceof View) {
+      if (p instanceof org.mozilla.geckoview.GeckoView) return true;
+      if (p instanceof androidx.media3.ui.PlayerView) return true;
+      p = p.getParent();
+    }
+    return false;
+  }
+
+  private static String mediaKeyName(int code) {
+    switch (code) {
+      case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:
+      case KeyEvent.KEYCODE_HEADSETHOOK:
+        return "playpause";
+      case KeyEvent.KEYCODE_MEDIA_PLAY:
+        return "play";
+      case KeyEvent.KEYCODE_MEDIA_PAUSE:
+        return "pause";
+      case KeyEvent.KEYCODE_MEDIA_STOP:
+        return "stop";
+      case KeyEvent.KEYCODE_MEDIA_FAST_FORWARD:
+        return "forward";
+      case KeyEvent.KEYCODE_MEDIA_REWIND:
+        return "rewind";
+      case KeyEvent.KEYCODE_MEDIA_NEXT:
+        return "next";
+      case KeyEvent.KEYCODE_MEDIA_PREVIOUS:
+        return "previous";
+      default:
+        return null;
+    }
   }
 
   /**

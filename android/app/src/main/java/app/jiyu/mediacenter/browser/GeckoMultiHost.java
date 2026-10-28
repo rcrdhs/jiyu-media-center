@@ -262,6 +262,7 @@ final class GeckoMultiHost {
       FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(1, 1);
       lp.gravity = android.view.Gravity.NO_GRAVITY;
       tile.view.setLayoutParams(lp);
+      TvPointer.prepareOverlayView(tile.view);
       parent.addView(tile.view);
       gecko.bindTileAudio(
         tile.session,

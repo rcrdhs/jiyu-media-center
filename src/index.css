@@ -7508,3 +7508,103 @@ html.is-android .player-pip-seek input[type='range']::-webkit-slider-thumb {
   height: 1.2rem;
   margin-top: -0.46rem;
 }
+
+/* ------------------------------------------------------------------------
+   TV mode (Android TV / Google TV / Fire TV). Everything here is gated on
+   html.tv-mode (set by src/lib/tvMode.ts), so phones and desktop are untouched.
+   ------------------------------------------------------------------------ */
+html.tv-mode {
+  --tv-safe-x: 3vw;
+  --tv-safe-y: 2.5vh;
+  --tv-ring: var(--accent, #f0b429);
+  font-size: 18px;
+}
+
+/* Remote focus rings — big, inset so shelves with overflow clipping keep them. */
+html.tv-mode :is(a, button, input, select, textarea, summary, [tabindex], [role='button'], [role^='menuitem'], [role='tab'], [role='option'], [role='switch']):focus {
+  outline: 3px solid var(--tv-ring) !important;
+  outline-offset: -3px !important;
+  box-shadow:
+    0 0 0 3px rgba(240, 180, 41, 0.32),
+    0 0 22px rgba(240, 180, 41, 0.45) !important;
+}
+
+/* Native ring is drawn over Gecko — keep the DOM placeholder quiet. */
+html.tv-mode :is(.web-frame-embed-active, .web-embed-tile-stage):focus {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+/* Cards / posters lift slightly so the focused item reads from the couch. */
+html.tv-mode :is(.media-card, .continue-card, .watch-next-card):focus {
+  transform: scale(1.045);
+  transition: transform 120ms ease-out;
+}
+
+/* No hover-only affordances on TV: sticky :hover would fight the focus ring. */
+html.tv-mode * {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Overscan-safe padding (title-safe ~3–5%). */
+html.tv-mode .main-stage {
+  padding-left: max(var(--tv-safe-x), 1rem);
+  padding-right: max(var(--tv-safe-x), 1rem);
+  padding-bottom: var(--tv-safe-y);
+  scroll-padding-top: 20vh;
+  scroll-padding-bottom: 20vh;
+}
+
+html.tv-mode .sidebar {
+  padding-top: var(--tv-safe-y);
+  padding-bottom: var(--tv-safe-y);
+}
+
+/* Full player: keep controls inside the safe area and make them remote-sized. */
+html.tv-mode .player-shell:not(.player-shell-pip):not(.player-shell-tile) .player-bar {
+  padding-left: var(--tv-safe-x);
+  padding-right: var(--tv-safe-x);
+  padding-top: var(--tv-safe-y);
+}
+
+html.tv-mode .player-shell:not(.player-shell-pip):not(.player-shell-tile) .player-bottom-bar {
+  padding-left: var(--tv-safe-x);
+  padding-right: var(--tv-safe-x);
+  padding-bottom: calc(var(--tv-safe-y) + 0.25rem);
+}
+
+html.tv-mode .player-shell:not(.player-shell-pip) .control-btn,
+html.tv-mode .player-shell:not(.player-shell-pip) .player-back-btn {
+  min-height: 2.6rem;
+  min-width: 2.6rem;
+  padding-left: 0.9rem;
+  padding-right: 0.9rem;
+  font-size: 1rem;
+}
+
+html.tv-mode .player-shell:not(.player-shell-pip) input[type='range'] {
+  min-height: 1.6rem;
+}
+
+/* Web embed chrome inside the safe area. */
+html.tv-mode .web-chrome {
+  padding-left: var(--tv-safe-x);
+  padding-right: var(--tv-safe-x);
+}
+
+/* Multiview: focused tile gets the ring on its frame, not only the header. */
+html.tv-mode .player-shell-tile:focus-within {
+  outline: 3px solid var(--tv-ring);
+  outline-offset: -3px;
+}
+
+/* No text-selection flashes from long OK presses. */
+html.tv-mode body {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+html.tv-mode :is(input, textarea, [contenteditable='true']) {
+  user-select: text;
+  -webkit-user-select: text;
+}

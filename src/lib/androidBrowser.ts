@@ -75,11 +75,25 @@ type InAppBrowserPlugin = {
     url?: string
     error?: string
   }>
-  addListener: (
+  /** TV only (newer APKs): focus ring / D-pad cursor over a Gecko surface. */
+  tvPointer?: (options: {
+    mode: TvPointerMode
+    x?: number
+    y?: number
+    width?: number
+    height?: number
+  }) => Promise<{ ok?: boolean; tv?: boolean; mode?: string; error?: string }>
+  addListener(
     event: 'nav',
     listener: (nav: BrowserNavState) => void,
-  ) => Promise<PluginListenerHandle>
+  ): Promise<PluginListenerHandle>
+  addListener(
+    event: 'tvPointer',
+    listener: (data: { mode?: string }) => void,
+  ): Promise<PluginListenerHandle>
 }
+
+export type TvPointerMode = 'off' | 'focus' | 'cursor'
 
 const NativeBrowser = registerPlugin<InAppBrowserPlugin>('InAppBrowser')
 
@@ -320,5 +334,45 @@ export async function androidBrowserMultiPromote(payload: { id: string; url?: st
     return await NativeBrowser.multiPromote(payload)
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+/**
+ * TV remote pointer over the Gecko surface (focus ring / cursor). `rect` is CSS
+ * px relative to the viewport — the same space as androidBrowserSetBounds.
+ * Resolves false off TV, off Android, or on APKs without the native method.
+ */
+export async function androidBrowserTvPointer(
+  mode: TvPointerMode,
+  rect?: { x: number; y: number; width: number; height: number },
+): Promise<boolean> {
+  if (!isAndroidInAppBrowser()) return false
+  try {
+    const fn = NativeBrowser.tvPointer
+    if (typeof fn !== 'function') return false
+    const res = await fn({ mode, ...(rect || {}) })
+    return Boolean(res?.tv)
+  } catch {
+    return false
+  }
+}
+
+/** Native side left cursor mode (remote Back) or changed pointer mode. */
+export function androidBrowserOnTvPointer(listener: (mode: TvPointerMode) => void) {
+  if (!isAndroidInAppBrowser()) return () => {}
+  let handle: PluginListenerHandle | undefined
+  let removed = false
+  void NativeBrowser.addListener('tvPointer', (data) => {
+    const mode = data?.mode
+    if (mode === 'off' || mode === 'focus' || mode === 'cursor') listener(mode)
+  })
+    .then((h) => {
+      if (removed) void h.remove()
+      else handle = h
+    })
+    .catch(() => undefined)
+  return () => {
+    removed = true
+    void handle?.remove()
   }
 }

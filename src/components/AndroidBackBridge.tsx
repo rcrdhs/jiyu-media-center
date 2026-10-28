@@ -12,6 +12,8 @@ import {
 } from '../lib/androidFullscreen'
 import { exitOsFullscreen, getFullscreenOwner } from '../lib/fullscreenSession'
 import { dismissTopOverlay } from '../lib/overlayDismiss'
+import { closeOpenTvPopup } from '../lib/tvNav'
+import { isTvMode } from '../lib/tvMode'
 
 const EXIT_CONFIRM_MS = 2500
 
@@ -111,7 +113,14 @@ export function AndroidBackBridge() {
         const s = snap.current
         const now = Date.now()
 
-        // 0) Added today / sections menu / other overlays.
+        // 0) TV remote: an open popup menu (player audio, …) closes first.
+        if (isTvMode() && closeOpenTvPopup()) {
+          exitArmedUntil.current = 0
+          setExitHint(null)
+          return
+        }
+
+        // 0b) Added today / sections menu / other overlays.
         if (dismissTopOverlay()) {
           exitArmedUntil.current = 0
           setExitHint(null)

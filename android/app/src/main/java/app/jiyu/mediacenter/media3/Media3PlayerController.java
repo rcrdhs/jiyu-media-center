@@ -71,6 +71,7 @@ final class Media3PlayerController {
       );
     view.setLayoutParams(layoutParams);
     view.setVisibility(View.GONE);
+    app.jiyu.mediacenter.browser.TvPointer.prepareOverlayView(view);
     parent.addView(view);
   }
 

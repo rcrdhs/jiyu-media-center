@@ -28,6 +28,7 @@ import { ensurePerformanceProfile } from './lib/deviceProfile'
 import { startProgressSync } from './lib/progressSync'
 import { FavoriteMatchAlerts } from './components/FavoriteMatchAlerts'
 import { WelcomeTour } from './components/WelcomeTour'
+import { TvNavBridge } from './components/TvNavBridge'
 
 function SectionRoute() {
   const { id } = useParams()
@@ -75,6 +76,7 @@ export default function App() {
                 <NavigationPiPBridge />
                 <MinimizeToPipBridge />
                 <AndroidBackBridge />
+                <TvNavBridge />
                 <SystemPipBridge />
                 <div className="app-shell">
                   <Sidebar />

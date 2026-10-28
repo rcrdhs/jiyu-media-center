@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { Capacitor } from '@capacitor/core'
 import './index.css'
 import App from './App'
+import { initTvMode } from './lib/tvMode'
 
 try {
   if (Capacitor.isNativePlatform()) {
@@ -13,6 +14,13 @@ try {
   }
 } catch {
   /* browser / desktop Vite */
+}
+
+// Android TV / Google TV / Fire TV → html.tv-mode (no-op on phones & desktop).
+try {
+  initTvMode()
+} catch {
+  /* ignore */
 }
 
 createRoot(document.getElementById('root')!).render(

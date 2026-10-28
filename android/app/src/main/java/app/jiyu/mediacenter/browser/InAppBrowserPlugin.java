@@ -166,6 +166,7 @@ public class InAppBrowserPlugin extends Plugin {
         }
       }
       gecko.setVisibility(View.GONE);
+      tvPointerOff();
       call.resolve(ok());
     });
   }
@@ -1368,6 +1369,7 @@ public class InAppBrowserPlugin extends Plugin {
         geckoMultiActive = false;
         ensureGeckoMulti().hideAll(gecko);
         if (multi != null) multi.hideAll(blank, destroy);
+        tvPointerOff();
       } else {
         ensureGeckoMulti().hide(gecko, id.trim());
         if (!ensureGeckoMulti().isActive()) geckoMultiActive = false;
@@ -1455,8 +1457,64 @@ public class InAppBrowserPlugin extends Plugin {
       geckoMultiActive = false;
       ensureGeckoMulti().hideAll(gecko);
       if (multi != null) multi.hideAll(blank, blank);
+      tvPointerOff();
       call.resolve(ok());
     });
+  }
+
+  /**
+   * TV remote pointer over the browser surface. mode: off | focus | cursor.
+   * Bounds (x, y, width, height) are CSS px like setBounds. No-op off TV.
+   */
+  @PluginMethod
+  public void tvPointer(PluginCall call) {
+    String modeName = call.getString("mode", "off");
+    Double x = call.getDouble("x");
+    Double y = call.getDouble("y");
+    Double w = call.getDouble("width");
+    Double h = call.getDouble("height");
+    main.post(() -> {
+      JSObject out = ok();
+      try {
+        if (!app.jiyu.mediacenter.TvMode.isTv(getContext())) {
+          out.put("tv", false);
+          call.resolve(out);
+          return;
+        }
+        TvPointer pointer = TvPointer.get();
+        pointer.attach(contentHost(), mode -> {
+          JSObject ev = new JSObject();
+          ev.put("mode", mode);
+          notifyListeners("tvPointer", ev);
+        });
+        int next = "cursor".equals(modeName)
+          ? TvPointer.CURSOR
+          : "focus".equals(modeName) ? TvPointer.FOCUS : TvPointer.OFF;
+        float density = getContext().getResources().getDisplayMetrics().density;
+        pointer.setMode(
+          next,
+          x == null ? 0f : x.floatValue(),
+          y == null ? 0f : y.floatValue(),
+          w == null ? 0f : w.floatValue(),
+          h == null ? 0f : h.floatValue(),
+          density,
+          false
+        );
+        out.put("tv", true);
+        out.put("mode", modeName);
+      } catch (Throwable t) {
+        out.put("ok", false);
+        out.put("error", t.getMessage() != null ? t.getMessage() : "tvPointer failed");
+      }
+      call.resolve(out);
+    });
+  }
+
+  /** Leaving the browser surface always drops the TV pointer. */
+  private void tvPointerOff() {
+    try {
+      TvPointer.get().off();
+    } catch (Throwable ignored) {}
   }
 
   @PluginMethod

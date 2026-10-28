@@ -1,5 +1,10 @@
 apply plugin: 'com.android.application'
 
+// Opt-in 32-bit + 64-bit build for TV sticks with a 32-bit userland
+// (many Fire TV / Google TV / Android TV boxes). Default stays arm64-only:
+//   gradlew assembleRelease -PjiyuUniversal=true
+def jiyuUniversal = (project.findProperty('jiyuUniversal') ?: 'false').toString() == 'true'
+
 android {
     namespace = "app.jiyu.mediacenter"
     compileSdk = rootProject.ext.compileSdkVersion
@@ -13,7 +18,11 @@ android {
         // 16 KB page-size devices (Android 15+): only ship 64-bit natives.
         // libtorrent4j 32-bit builds are still 4 KB-aligned.
         ndk {
-            abiFilters 'arm64-v8a'
+            if (jiyuUniversal) {
+                abiFilters 'arm64-v8a', 'armeabi-v7a'
+            } else {
+                abiFilters 'arm64-v8a'
+            }
         }
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -49,7 +58,7 @@ android {
         onVariants(selector().all()) { variant ->
             variant.outputs.each { output ->
                 def version = output.versionName.get()
-                output.outputFileName.set("Jiyu-${version}-arm64.apk")
+                output.outputFileName.set(jiyuUniversal ? "Jiyu-${version}-universal.apk" : "Jiyu-${version}-arm64.apk")
             }
         }
     }
@@ -109,6 +118,9 @@ dependencies {
     def libtorrent4j = '2.1.0-39'
     implementation "org.libtorrent4j:libtorrent4j:$libtorrent4j"
     implementation "org.libtorrent4j:libtorrent4j-android-arm64:$libtorrent4j"
+    if (jiyuUniversal) {
+        implementation "org.libtorrent4j:libtorrent4j-android-arm:$libtorrent4j"
+    }
     implementation 'org.nanohttpd:nanohttpd:2.3.1'
     // Remux torrent MKV/HEVC/AC3 into fragmented MP4 the WebView can play.
     // Same job desktop does with ffmpeg. https build can read the local HTTP file.
