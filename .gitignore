@@ -9,6 +9,7 @@ lerna-debug.log*
 
 node_modules
 dist
+dist-tizen
 dist-ssr
 release
 *.wgt
@@ -19,6 +20,7 @@ tizen/*
 !tizen/.project
 !tizen/.tproject
 !tizen/tizen.js
+!tizen/polyfills.js
 !tizen/icon.png
 *.local
 

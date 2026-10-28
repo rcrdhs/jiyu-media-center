@@ -64,6 +64,7 @@ import {
   type SubtitleCue,
 } from '../lib/subtitles'
 import { getPerformanceKnobs } from '../lib/deviceProfile'
+import { isTizenTv } from '../lib/tvMode'
 import { hasRealDebridToken } from '../lib/debridSettings'
 import {
   cleanShowDisplayTitle,
@@ -547,6 +548,30 @@ function pickEngines(url: string): Engine[] {
   }
   engines.push('native')
   return [...new Set(engines)]
+}
+
+/**
+ * Samsung Tizen only: can script read this URL (CORS)? hls.js loads playlists
+ * and segments with XHR, which most stream CDNs don't allow cross-origin; the
+ * TV's own <video> HLS player is not bound by CORS. Only headers are needed.
+ */
+async function tizenCorsReadable(url: string): Promise<boolean> {
+  if (!/^https?:/i.test(url)) return true
+  const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null
+  const timer = window.setTimeout(() => ctrl?.abort(), 5000)
+  try {
+    await fetch(url, { method: 'GET', credentials: 'omit', signal: ctrl?.signal })
+    try {
+      ctrl?.abort()
+    } catch {
+      /* ignore */
+    }
+    return true
+  } catch {
+    return false
+  } finally {
+    window.clearTimeout(timer)
+  }
 }
 
 /** Sports / IPTV / tagged live — drive HLS liveMode + mpegts live stash. */
@@ -6937,7 +6962,15 @@ export function Player({
         }
       }
 
-      const engines = pickEngines(activePlaylistItem.url)
+      let engines = pickEngines(activePlaylistItem.url)
+      // Samsung Tizen: native <video> HLS first when CORS blocks hls.js.
+      if (
+        isTizenTv() &&
+        engines.includes('hls') &&
+        !(await tizenCorsReadable(activePlaylistItem.url))
+      ) {
+        engines = ['native', ...engines.filter((e) => e !== 'native')]
+      }
       let lastError = 'Playback failed.'
       let hlsError: string | null = null
       for (const engine of engines) {

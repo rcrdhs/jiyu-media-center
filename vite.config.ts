@@ -29,6 +29,15 @@ function resolveSyncUrl(mode: string): string {
   }
 }
 
+/**
+ * `vite build --mode tizen` (npm run build:tizen): Samsung TV .wgt bundle.
+ * Tizen loads the app from the package filesystem, where `type="module"` scripts
+ * are refused, and 2020-2022 sets run Chromium 69-85. So: one classic IIFE
+ * file (no code splitting, no modulepreload) lowered to chrome69, in dist-tizen/.
+ * Desktop / Android builds never take this path.
+ */
+const TIZEN_TARGET = 'chrome69'
+
 export default defineConfig(({ mode }) => ({
   plugins: [react()],
   base: './',
@@ -61,6 +70,7 @@ export default defineConfig(({ mode }) => ({
         '**/release/**',
         '**/release-pack/**',
         '**/dist/**',
+        '**/dist-tizen/**',
         // Worker sources / wrangler output are not part of the app bundle; atomic-replace
         // temp files must not trip the watcher either (dev server exit 1 at 11:50 on 2026-10-20).
         '**/workers/**',
@@ -68,12 +78,30 @@ export default defineConfig(({ mode }) => ({
       ],
     },
   },
-  build: {
-    outDir: 'dist',
-    commonjsOptions: {
-      include: [/vendor/, /node_modules/],
-    },
-  },
+  build:
+    mode === 'tizen'
+      ? {
+          outDir: 'dist-tizen',
+          target: TIZEN_TARGET,
+          cssTarget: TIZEN_TARGET,
+          modulePreload: false,
+          chunkSizeWarningLimit: 20_000,
+          commonjsOptions: {
+            include: [/vendor/, /node_modules/],
+          },
+          rolldownOptions: {
+            output: {
+              format: 'iife' as const,
+              inlineDynamicImports: true,
+            },
+          },
+        }
+      : {
+          outDir: 'dist',
+          commonjsOptions: {
+            include: [/vendor/, /node_modules/],
+          },
+        },
   optimizeDeps: {
     include: ['mpegts.js'],
   },

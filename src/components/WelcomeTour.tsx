@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react'
+import { pushOverlayDismiss } from '../lib/overlayDismiss'
+import { isTizenTv } from '../lib/tvMode'
 
 const SEEN_KEY = 'jiyu.welcome.seen'
 export const OPEN_FEATURE_GUIDE_EVENT = 'jiyu:open-feature-guide'
@@ -43,6 +45,10 @@ const STEPS = [
   {
     title: 'Live streams',
     body: 'Live channels and match streams start on their own — the Unwrapping stream cover stays until the video is actually moving. Pop-ups and ads on stream pages are blocked, and streams keep playing in PiP. Most live streams only keep the last 20-30 seconds or so, so rewinding is limited: a short notice tells you when you reach the limit, and on PC the rewind button grays out.',
+  },
+  {
+    title: 'Install on your TV',
+    body: 'Google TV, Android TV, and Fire TV: install the free Downloader app on the TV, then type jiyu.free-river.workers.dev/tv and open the file it downloads. That link always gets the newest TV version, and Jiyu updates itself from the menu after that. The remote works everywhere: arrows to move, OK to select, Back to go back.',
   },
   {
     title: 'Player tips',
@@ -90,6 +96,16 @@ export function WelcomeTour() {
     window.addEventListener(OPEN_FEATURE_GUIDE_EVENT, onOpen)
     return () => window.removeEventListener(OPEN_FEATURE_GUIDE_EVENT, onOpen)
   }, [])
+
+  // Samsung Tizen: the remote's Return key closes the guide (Back ladder overlay).
+  useEffect(() => {
+    if (!open || !isTizenTv()) return
+    return pushOverlayDismiss(() => {
+      markWelcomeSeen()
+      setFromHelp(false)
+      setOpen(false)
+    })
+  }, [open])
 
   if (!open) return null
 

@@ -13,7 +13,7 @@ import {
 import { exitOsFullscreen, getFullscreenOwner } from '../lib/fullscreenSession'
 import { dismissTopOverlay } from '../lib/overlayDismiss'
 import { closeOpenTvPopup } from '../lib/tvNav'
-import { isTvMode } from '../lib/tvMode'
+import { isTizenTv, isTvMode, onTizenBackKey, tizenExitApp } from '../lib/tvMode'
 
 const EXIT_CONFIRM_MS = 2500
 
@@ -65,7 +65,7 @@ function carryFrom(dest: string, routeFrom: string | null): { from: string } | u
 }
 
 /**
- * Hardware Back on Android — finite ladder:
+ * Hardware Back on Android (and the Samsung Tizen Return key) — finite ladder:
  * overlay → leave watch/embed → section → home → “press again to exit” → exit.
  */
 export function AndroidBackBridge() {
@@ -105,11 +105,13 @@ export function AndroidBackBridge() {
   }, [exitHint])
 
   useEffect(() => {
-    if (!isAndroidShell()) return
+    const tizen = !isAndroidShell() && isTizenTv()
+    if (!isAndroidShell() && !tizen) return
     let stopListen: (() => void) | undefined
     let cancelled = false
+    const onBack = tizen ? onTizenBackKey : onAndroidBackButton
     void (async () => {
-      stopListen = onAndroidBackButton(() => {
+      stopListen = onBack(() => {
         const s = snap.current
         const now = Date.now()
 
@@ -205,7 +207,8 @@ export function AndroidBackBridge() {
         if (now <= exitArmedUntil.current) {
           exitArmedUntil.current = 0
           setExitHint(null)
-          void androidExitApp()
+          if (tizen) tizenExitApp()
+          else void androidExitApp()
           return
         }
         exitArmedUntil.current = now + EXIT_CONFIRM_MS

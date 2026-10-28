@@ -1,9 +1,11 @@
 /**
- * TV mode (Android TV / Google TV / Fire TV). Adds `tv-mode` to <html>.
+ * TV mode (Android TV / Google TV / Fire TV / Samsung Tizen). Adds `tv-mode` to <html>.
  * Everything TV-specific — remote navigation, focus rings, 10-foot layout —
  * is gated on this class, so phones and desktop keep their current behaviour.
  *
  * Native truth: AppChrome.getDeviceInfo() (UiModeManager / FEATURE_LEANBACK).
+ * Samsung: the .wgt boot script (tizen/tizen.js) tags <html class="is-tizen">,
+ * and the TV's `window.tizen` / UA say Tizen — always TV.
  * The last answer is cached so the class lands before first paint next launch.
  * Dev override (desktop / browser testing): `?tv=1` / `?tv=0` in the URL, or
  * localStorage `jiyu.tvMode.force` = '1' | '0'.
@@ -42,6 +44,41 @@ function writeStorage(key: string, value: string | null) {
     else window.localStorage.setItem(key, value)
   } catch {
     /* private mode */
+  }
+}
+
+/** Samsung Tizen TV web app (tizen/tizen.js boot, or a real Tizen runtime). */
+export function isTizenTv(): boolean {
+  try {
+    if (document.documentElement.classList.contains('is-tizen')) return true
+    if (typeof (window as unknown as { tizen?: unknown }).tizen === 'object') return true
+    return /\bTizen\b/i.test(navigator.userAgent || '')
+  } catch {
+    return false
+  }
+}
+
+/** tizen/tizen.js → app: Samsung Return (10009) and remote media keys. */
+export const TIZEN_BACK_EVENT = 'jiyu:tizen-back'
+export const TIZEN_MEDIA_KEY_EVENT = 'jiyu:tizen-media-key'
+
+/** Samsung Return key. No-op off Tizen. */
+export function onTizenBackKey(listener: () => void): () => void {
+  if (!isTizenTv()) return () => {}
+  const handler = () => listener()
+  window.addEventListener(TIZEN_BACK_EVENT, handler)
+  return () => window.removeEventListener(TIZEN_BACK_EVENT, handler)
+}
+
+/** Close the Samsung app (Back at home after the confirm toast). */
+export function tizenExitApp(): void {
+  try {
+    const tz = (window as unknown as {
+      tizen?: { application?: { getCurrentApplication?: () => { exit?: () => void } } }
+    }).tizen
+    tz?.application?.getCurrentApplication?.()?.exit?.()
+  } catch {
+    /* not a real TV (desktop test of the .wgt build) */
   }
 }
 
@@ -111,6 +148,10 @@ export function initTvMode(): void {
     apply(force)
     return
   }
+  if (isTizenTv()) {
+    apply(true)
+    return
+  }
   if (!isAndroidNative()) {
     apply(false)
     return
@@ -132,8 +173,16 @@ export function initTvMode(): void {
   })()
 }
 
-/** TV remote media keys from MainActivity (play/pause, rewind, forward, …). */
+/** TV remote media keys from MainActivity / tizen.js (play/pause, rewind, forward, …). */
 export function onTvMediaKey(listener: (key: string) => void): () => void {
+  if (isTizenTv()) {
+    const handler = (e: Event) => {
+      const key = (e as CustomEvent<{ key?: string }>).detail?.key
+      if (key) listener(String(key))
+    }
+    window.addEventListener(TIZEN_MEDIA_KEY_EVENT, handler)
+    return () => window.removeEventListener(TIZEN_MEDIA_KEY_EVENT, handler)
+  }
   if (!isAndroidNative()) return () => {}
   let handle: PluginListenerHandle | undefined
   let removed = false
