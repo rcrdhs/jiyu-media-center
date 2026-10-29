@@ -392,6 +392,15 @@ export type TmdbTvNetworkInfo = {
   logoUrl?: string
 }
 
+/** True when a TMDB episode's air_date (YYYY-MM-DD) is today or earlier (UTC). */
+function tmdbEpisodeHasAired(airDate: string | null | undefined, seasonHasDates: boolean): boolean {
+  const raw = String(airDate || '').trim()
+  if (!raw) return !seasonHasDates
+  const t = Date.parse(`${raw.slice(0, 10)}T00:00:00Z`)
+  if (!Number.isFinite(t)) return true
+  return t <= Date.now()
+}
+
 export async function fetchTmdbTvEpisodeList(
   tmdbId: string,
 ): Promise<{
@@ -474,13 +483,19 @@ export async function fetchTmdbTvEpisodeList(
 
   for (const { season, seasonJson } of seasonResults) {
     if (!seasonJson.ok || !seasonJson.data || typeof seasonJson.data !== 'object') continue
-    const eps = (seasonJson.data as { episodes?: Array<{ episode_number?: number; name?: string }> })
-      .episodes
+    const eps = (
+      seasonJson.data as { episodes?: Array<{ episode_number?: number; name?: string; air_date?: string | null }> }
+    ).episodes
     if (!Array.isArray(eps) || eps.length === 0) continue
     fetchedSeasons.add(season)
+    // Unaired episodes have no stream anywhere yet; listing them only gives
+    // "Could not find a stream". A missing air_date means "TBA" when the
+    // season has dated episodes; keep undated rows only for fully undated seasons.
+    const seasonHasDates = eps.some((ep) => Boolean(ep.air_date))
     for (const ep of eps) {
       const episode = Number(ep.episode_number)
       if (!Number.isFinite(episode) || episode < 1) continue
+      if (!tmdbEpisodeHasAired(ep.air_date, seasonHasDates)) continue
       const key = `S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`
       byKey.set(key, {
         key,
