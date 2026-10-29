@@ -9,7 +9,7 @@ Client side: `src/lib/tizenRelay.ts` (every helper is a no-op unless `isTizenTv(
 
 | Route | What |
 | --- | --- |
-| `GET/POST /r?u=<url>` | CORS relay. **Allowlisted hosts only** (`DATA_HOSTS`): streamed.pk, ppv.st, subsplease.org, livextv(-backend), i.mjh.nz, epgshare01, fullmatchshows, soccerfull, and YouTube `/@x/live` + `youtubei/v1/{navigation/resolve_url,player}` (the only POSTs). 12 MB cap, cookies dropped, cached 45 s–15 min, ~240 req/min/IP. `X-Relay-Referer` / `X-Relay-UA` carry the headers a browser can't set. |
+| `GET/POST /r?u=<url>` | CORS relay. **Allowlisted hosts only** (`DATA_HOSTS`): streamed.pk, ppv.st, subsplease.org, livextv(-backend), i.mjh.nz, epgshare01, fullmatchshows, soccerfull, and YouTube `/@x/live` + `youtubei/v1/{navigation/resolve_url,player}` (the only POSTs). 12 MB cap, cookies dropped, cached 45 s–15 min, ~240 req/min/IP. `X-Relay-Referer` / `X-Relay-UA` carry the headers a browser can't set. Movy `api.wecollege.net` is **not** relayed here (CF egress is rate-limited / seed-IP-bound) — Samsung uses the LAN `roku-hls` `/api/movy` bridge instead; HLS playlists still use `/hls` below. |
 | `GET /hls?u=&ref=` | HLS playlist fetched with Referer/Origin `ref`. Only allowlisted referers (`HLS_REFERERS`: Movy, Atlantic, Bilibili, Rivestream, streamed embeds). With an Atlantic referer the entry playlist host must be a Helios/Aphrodite host (ATLANTIC_HLS_HOSTS). Response must be an m3u8; every URI is rewritten to a signed `/seg` URL. |
 | `GET /seg?u=&ref=&s=` | HMAC-signed segment/key/sub-playlist, streamed through. Unsigned or tampered URLs are 403, so this is not a free-form video proxy. |
 | `GET /hls?u=<iptv>[&ref=]` (IPTV mode) | Only for `IPTV_HOSTS` (jmp2.uk/Pluto, amagi). Not relayable, so left direct: raw-IP streams (Cloudflare blocks Worker fetches to bare IPs, error 1003) and tv5monde (its Akamai edge 403s Cloudflare egress). The client only uses it on Tizen after a direct CORS probe fails. `ref` must be empty, an IPTV host, or the same site as the stream. Media segments stay **direct** when their CDN already sends `ACAO: *` (Pluto, amagi); otherwise they go through signed `/seg?…&m=i`. Edge-cached: live playlists 3 s, VOD 300 s, segments 120 s (≤25 MB), so several TVs on one channel share fetches. |
@@ -53,7 +53,8 @@ Separate Worker on purpose — deploying it never touches `jiyu` (short links) o
   egress IPs.
 - `/hls` flattens a nested master (a variant that is itself a master, e.g. the
   transcode.cfd proxy behind Atlantic/Helios) — hls.js would otherwise loop on it.
-- Movy's seed endpoint (needs a movy Referer, so Tizen fetches it through the
-  Worker) rate-limits per egress IP. Cloudflare egress is shared, so `429` for
-  ~60 s is common; the app backs off 2 min on Tizen and tries again. Seeds are
-  bound to the IP that fetched them, so they can't be edge-cached.
+- Movy seed/sources must not use this Worker: Cloudflare egress is permanently
+  rate-limited by api.wecollege.net, and seeds are bound to the minting IP.
+  Samsung resolves Movy via `roku-hls` `GET /api/movy?u=…` on the LAN PC (same
+  bridge as Roku football). Playlists/segments still use `/hls` + `/seg` with
+  the movy.sx Referer.

@@ -39,7 +39,8 @@ const DATA_HOSTS = [
   /^(?:www\.)?fullmatchshows\.com$/,
   /^(?:www\.)?soccerfull\.net$/,
   /^www\.youtube\.com$/,
-  /^api\.wecollege\.net$/, // Movy seed / sources API (403 without the movy.sx Referer)
+  // Movy api.wecollege.net is NOT here: CF egress is rate-limited and seeds are
+  // IP-bound. Samsung resolves Movy via the LAN PC bridge (roku-hls /api/movy).
 ]
 
 /** IPTV CDNs whose playlists fail CORS for a file:// (Tizen) page. Public IPv4 literals too. */
@@ -201,7 +202,6 @@ function ttlFor(url) {
   if (h === 'subsplease.org') return 300
   if (/livextv/.test(h)) return 600
   if (h === 'www.youtube.com') return 45
-  if (h === 'api.wecollege.net') return /^\/seed\b/.test(url.pathname) ? 0 : 120 // seed is per-request
   return 60 // streamed.pk / ppv live lists
 }
 

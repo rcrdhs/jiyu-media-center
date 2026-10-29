@@ -2,6 +2,10 @@
  * Samsung (Tizen) only: route CORS-blocked scraper fetches, referer-locked HLS and
  * YouTube embeds through the jiyu-relay Worker (workers/jiyu-relay).
  *
+ * Movy seed/sources are special: api.wecollege.net rate-limits Cloudflare egress
+ * and binds seeds to the minting IP, so those go through the LAN PC bridge
+ * (roku-hls `/api/movy`) — same box that already bridges Roku football.
+ *
  * Desktop uses Electron IPC and Android uses CapacitorHttp — neither ever calls
  * this: every export is a no-op unless isTizenTv().
  */
@@ -9,7 +13,10 @@ import { isTizenTv } from './tvMode'
 
 export const TIZEN_RELAY_ORIGIN = 'https://jiyu-relay.free-river.workers.dev'
 
-/** Must mirror DATA_HOSTS in workers/jiyu-relay/src/index.js. */
+/** localStorage override; pack-tizen stamps window.__JIYU_LAN_BRIDGE__. */
+export const TIZEN_LAN_BRIDGE_KEY = 'jiyu.tizen.lanBridge'
+
+/** Must mirror DATA_HOSTS in workers/jiyu-relay/src/index.js (except Movy API). */
 const RELAY_HOSTS: RegExp[] = [
   /^(?:[a-z0-9-]+\.)*streamed\.pk$/,
   /^(?:[a-z0-9-]+\.)*streamed\.su$/,
@@ -22,7 +29,6 @@ const RELAY_HOSTS: RegExp[] = [
   /^epgshare01\.online$/,
   /^(?:www\.)?fullmatchshows\.com$/,
   /^(?:www\.)?soccerfull\.net$/,
-  /^api\.wecollege\.net$/, // Movy seed / sources (needs the movy.sx Referer)
 ]
 
 /** Mirrors IPTV_HOSTS in the worker. */
@@ -66,20 +72,57 @@ function youtubeRelayable(u: URL, method: string): boolean {
   return /^\/(?:@[^/]+|channel\/[^/]+|c\/[^/]+|user\/[^/]+)\/live\/?$/.test(u.pathname)
 }
 
-/** True when this request should go through /r on this device. */
+/** Movy seed + /{city}/sources — needs Referer and a non-CF egress IP. */
+export function isMovyApiUrl(url: string): boolean {
+  const u = parse(url)
+  if (!u || u.hostname.toLowerCase() !== 'api.wecollege.net') return false
+  return /^\/(?:seed\b|[a-z0-9_-]+\/sources\b)/i.test(u.pathname)
+}
+
+/**
+ * PC bridge base (roku-hls), e.g. http://192.168.1.10:8791.
+ * Override anytime: localStorage.setItem('jiyu.tizen.lanBridge', 'http://…:8791')
+ */
+export function getTizenLanBridge(): string {
+  if (!isTizenTv()) return ''
+  try {
+    const fromLs = String(window.localStorage.getItem(TIZEN_LAN_BRIDGE_KEY) || '').trim()
+    if (/^https?:\/\//i.test(fromLs)) return fromLs.replace(/\/$/, '')
+  } catch {
+    /* private mode */
+  }
+  try {
+    const stamped = String(
+      (window as unknown as { __JIYU_LAN_BRIDGE__?: string }).__JIYU_LAN_BRIDGE__ || '',
+    ).trim()
+    if (/^https?:\/\//i.test(stamped)) return stamped.replace(/\/$/, '')
+  } catch {
+    /* ignore */
+  }
+  return ''
+}
+
+/** True when this request should go through /r (or the LAN Movy bridge) on this device. */
 export function shouldRelayFetch(url: string, method = 'GET'): boolean {
   if (!isTizenTv()) return false
   const u = parse(url)
   if (!u || !/^https?:$/.test(u.protocol)) return false
   if (u.origin === TIZEN_RELAY_ORIGIN) return false
+  const bridge = getTizenLanBridge()
+  if (bridge && url.startsWith(`${bridge}/`)) return false
   const m = method.toUpperCase()
   if (youtubeRelayable(u, m)) return true
   if (m !== 'GET' && m !== 'HEAD') return false
+  if (isMovyApiUrl(url)) return Boolean(bridge)
   const host = u.hostname.toLowerCase()
   return RELAY_HOSTS.some((re) => re.test(host))
 }
 
 export function tizenRelayUrl(url: string): string {
+  if (isMovyApiUrl(url)) {
+    const bridge = getTizenLanBridge()
+    if (bridge) return `${bridge}/api/movy?u=${encodeURIComponent(url)}`
+  }
   const u = parse(url)
   const target = u && u.hostname === 'youtube.com' ? url.replace('://youtube.com', '://www.youtube.com') : url
   return `${TIZEN_RELAY_ORIGIN}/r?u=${encodeURIComponent(target)}`

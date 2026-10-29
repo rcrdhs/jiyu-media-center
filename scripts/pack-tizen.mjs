@@ -7,23 +7,69 @@
  *    polyfills.js, icon.png), loads polyfills.js + tizen.js first, turns the
  *    bundle tag into a plain deferred script (Tizen refuses type="module" from
  *    the package), and stamps package.json's version into config.xml.
- * 3. `--wgt [--profile NAME]`: also runs the Tizen Studio CLI (build-web +
+ * 3. Stamps this PC's LAN IP into bridge-config.js so Movy seed/sources can use
+ *    roku-hls `/api/movy` (Cloudflare cannot — seeds are IP-bound / rate-limited).
+ *    Override: TIZEN_LAN_BRIDGE=http://192.168.1.10:8791 (or ROKU_HLS_BASE).
+ * 4. `--wgt [--profile NAME]`: also runs the Tizen Studio CLI (build-web +
  *    package) with that security profile. Without a Samsung distributor
  *    certificate that holds the TV's DUID, the .wgt only installs on the
  *    emulator; see docs/install-tvs.md.
  */
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 
 const root = path.resolve(import.meta.dirname, '..')
 const tizenDir = path.join(root, 'tizen')
 const distDir = path.join(root, 'dist-tizen')
-const keep = new Set(['config.xml', '.project', '.tproject', 'tizen.js', 'polyfills.js', 'icon.png'])
+const keep = new Set([
+  'config.xml',
+  '.project',
+  '.tproject',
+  'tizen.js',
+  'polyfills.js',
+  'bridge-config.js',
+  'icon.png',
+])
 const args = process.argv.slice(2)
 const argValue = (name) => {
   const i = args.indexOf(name)
   return i >= 0 ? args[i + 1] : undefined
+}
+const ROKU_PORT = Number(process.env.ROKU_HLS_PORT || 8791)
+
+function lanIPv4() {
+  const nets = os.networkInterfaces()
+  const preferred = []
+  const rest = []
+  for (const list of Object.values(nets)) {
+    if (!list) continue
+    for (const n of list) {
+      if (n.family !== 'IPv4' && n.family !== 4) continue
+      if (n.internal) continue
+      if (n.address.startsWith('169.254.')) continue
+      if (n.address.startsWith('192.168.') || n.address.startsWith('10.')) {
+        preferred.push(n.address)
+      } else {
+        rest.push(n.address)
+      }
+    }
+  }
+  return preferred[0] || rest[0] || '127.0.0.1'
+}
+
+function stampLanBridge() {
+  const base =
+    String(process.env.TIZEN_LAN_BRIDGE || process.env.ROKU_HLS_BASE || '').trim() ||
+    `http://${lanIPv4()}:${ROKU_PORT}`
+  const body = `/* Stamped by npm run pack:tizen — ${new Date().toISOString()}
+ * Movy API bridge (roku-hls). Override: localStorage jiyu.tizen.lanBridge
+ */
+window.__JIYU_LAN_BRIDGE__ = ${JSON.stringify(base)};
+`
+  fs.writeFileSync(path.join(tizenDir, 'bridge-config.js'), body)
+  return base
 }
 
 const csp = [
@@ -86,10 +132,11 @@ const head = fs.readFileSync(bundlePath, 'utf8').slice(0, 4000)
 if (/^\s*import[\s{*]/m.test(head) || /\bexport\s*\{/.test(head.slice(0, 200))) {
   fail('Bundle still looks like an ES module; check the tizen build mode in vite.config.ts.')
 }
+const lanBridge = stampLanBridge()
 // Classic scripts, in order. The bundle is deferred so #root exists when it runs.
 html = html.replace(
   '</head>',
-  `    <script src="./polyfills.js"></script>\n    <script src="./tizen.js"></script>\n    <script defer src="${bundles[0]}"></script>\n  </head>`,
+  `    <script src="./polyfills.js"></script>\n    <script src="./bridge-config.js"></script>\n    <script src="./tizen.js"></script>\n    <script defer src="${bundles[0]}"></script>\n  </head>`,
 )
 fs.writeFileSync(indexPath, html)
 
@@ -101,6 +148,7 @@ config = config.replace(/(<widget\b[^>]*\bversion=")[^"]*(")/, `$1${version}$2`)
 fs.writeFileSync(configPath, config)
 
 console.log(`Tizen web app ${version} is in tizen/ (bundle ${bundles[0]}).`)
+console.log(`[pack:tizen] LAN Movy bridge = ${lanBridge}  (leave npm run roku-hls running)`)
 
 if (!args.includes('--wgt')) {
   console.log('Open tizen/ in Tizen Studio and build a signed .wgt, or run: npm run pack:tizen:wgt')

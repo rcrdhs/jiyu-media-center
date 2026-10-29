@@ -7046,13 +7046,19 @@ export function Player({
       }
 
       let engines = pickEngines(activePlaylistItem.url)
-      // Samsung Tizen: native <video> HLS first when CORS blocks hls.js.
+      // Samsung Tizen: native <video> HLS first when CORS blocks hls.js —
+      // except referer-locked sources (Movy / Atlantic): native can't send
+      // Referer, so keep hls.js + the relay playlist first.
       if (
         isTizenTv() &&
         engines.includes('hls') &&
         !(await tizenCorsReadable(activePlaylistItem.url))
       ) {
-        engines = ['native', ...engines.filter((e) => e !== 'native')]
+        const ref = activePlaybackReferrerRef.current || item.httpReferrer || ''
+        const locked = tizenHlsUrl(activePlaylistItem.url, ref)
+        if (locked === activePlaylistItem.url) {
+          engines = ['native', ...engines.filter((e) => e !== 'native')]
+        }
       }
       let lastError = 'Playback failed.'
       let hlsError: string | null = null
