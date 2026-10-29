@@ -14,6 +14,7 @@ import {
 import { getViewingQuality, resolveRequestedQuality } from './viewingQuality'
 import { normalizeLanguageCode } from './language'
 import { tizenHlsSource } from './tizenRelay'
+import { isTizenTv } from './tvMode'
 
 export const MOVY_STREAM_ORIGIN = 'https://api.wecollege.net'
 export const MOVY_PLAY_REFERER = 'https://www.movy.sx/'
@@ -39,6 +40,8 @@ const MOVY_TV_PROVIDERS = [
 
 const MOVY_SOURCES_TIMEOUT_MS = 8_000
 const MOVY_DURATION_TIMEOUT_MS = 4_000
+/** Samsung: how long to wait for Helios when Movy only offered fMP4. */
+const MOVY_TIZEN_HELIOS_WAIT_MS = 8_000
 /** After the first live English city, wait briefly for a peer (duration vote) then pick. */
 const MOVY_EARLY_PEER_GRACE_MS = 750
 /** Same-episode renditions differ by under a minute; a different file is far off. */
@@ -837,6 +840,9 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
     }
   }
 
+  /** Set by pickFromPool: on Samsung every Movy city answered with fMP4 only. */
+  let tizenMovyFmp4Only = false
+
   const resolveMovyCities = async (): Promise<MovyPlayResult | null> => {
     type AliveCity = {
       provider: string
@@ -877,6 +883,17 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
       // Spoken language first: original / English audio beats a faster dub.
       const minRank = Math.min(...englishAlive.map((c) => c.languageRank))
       let pool = englishAlive.filter((c) => c.languageRank === minRank)
+      // Samsung: muxed fMP4 (#EXT-X-MAP, e.g. goldenkite) buffers but never decodes
+      // in Tizen MSE (readyState stays 1). Prefer TS cities when any answered.
+      let tizenAllFmp4 = false
+      if (isTizenTv()) {
+        const fmp4 = await Promise.all(
+          pool.map((c) => withTimeoutOr(isFmp4Hls(c.best.url), MOVY_DURATION_TIMEOUT_MS, false)),
+        )
+        const ts = pool.filter((_, i) => !fmp4[i])
+        if (ts.length > 0) pool = ts
+        else tizenAllFmp4 = true
+      }
       // Prefer website-fast Auto CDNs (majorplay ~200ms) over paleoak (~6s masters
       // + 9s segments) that buffer/stall anime on desktop and Android.
       const fast = pool.filter((c) => c.probeMs > 0 && c.probeMs <= 2_000)
@@ -914,6 +931,7 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
           }
         })
       }
+      tizenMovyFmp4Only = tizenAllFmp4
       return buildResult(pick)
     }
 
@@ -1063,6 +1081,11 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
   }
 
   const movy = await resolveMovyCities()
+  if (movy && tizenMovyFmp4Only && options.preferBackend !== 'atlantic') {
+    // Samsung: Movy only had fMP4 (stalls on Tizen), so try Helios before it.
+    const alt = await withTimeoutOr(atlanticFallback, MOVY_TIZEN_HELIOS_WAIT_MS, null)
+    if (alt) return withSession(alt)
+  }
   if (movy) return withSession(movy)
 
   if (options.preferBackend !== 'atlantic') {
@@ -1087,6 +1110,22 @@ function withTimeoutOr<T>(promise: Promise<T>, ms: number, fallback: T): Promise
       },
     )
   })
+}
+
+/** True when the stream's first media playlist is fMP4 (#EXT-X-MAP init segment). */
+async function isFmp4Hls(url: string): Promise<boolean> {
+  let res = await fetchText(url)
+  if (!res.ok) return false
+  if (/#EXT-X-STREAM-INF/i.test(res.text)) {
+    const variant = res.text
+      .split('\n')
+      .map((l) => l.trim())
+      .find((l) => l && !l.startsWith('#'))
+    if (!variant) return false
+    res = await fetchText(new URL(variant, url).href)
+    if (!res.ok) return false
+  }
+  return /#EXT-X-MAP/i.test(res.text)
 }
 
 /** Total #EXTINF seconds of an HLS stream (first variant of a master). 0 if unknown. */
