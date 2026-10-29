@@ -192,7 +192,12 @@ async function fetchJson<T>(url: string): Promise<T> {
         Origin: 'https://www.movy.sx',
       },
     })
-    if (!r.ok || r.data == null) throw new Error(r.error || 'Source JSON failed')
+    if (!r.ok || r.data == null) {
+      // An HTTP status (429 / 403 ...) is the answer: a second plain fetch of the
+      // same URL only doubles the request count against Movy's rate limit.
+      const msg = r.error || ''
+      throw new Error(/^HTTP \d+/.test(msg) ? `Source ${msg}` : msg || 'Source JSON failed')
+    }
     return r.data
   } catch (err) {
     if (err instanceof Error && /Source|Movy|JSON/.test(err.message)) throw err
@@ -214,9 +219,15 @@ export async function fetchMovySeed(mediaId: string | number): Promise<string> {
   const now = Date.now()
   const hit = seedCache.get(cacheKey)
   if (hit && hit.expiresAt - 5000 > now) return hit.seed
-  const data = await fetchJson<{ seed: string; ttlMs?: number }>(
-    `${MOVY_STREAM_ORIGIN}/seed?mediaId=${encodeURIComponent(id)}`,
-  )
+  let data: { seed: string; ttlMs?: number }
+  try {
+    data = await fetchJson<{ seed: string; ttlMs?: number }>(
+      `${MOVY_STREAM_ORIGIN}/seed?mediaId=${encodeURIComponent(id)}`,
+    )
+  } catch (err) {
+    if (err instanceof Error && /\b429\b/.test(err.message)) movyRateLimitedAt = Date.now()
+    throw err
+  }
   const seed = String(data.seed || '').trim()
   if (!seed) throw new Error('Source seed missing')
   seedCache.set(cacheKey, { seed, expiresAt: now + (data.ttlMs ?? 30_000) })
@@ -1131,6 +1142,11 @@ export type MovyAvailability = 'ok' | 'none' | 'error'
 
 /** Last time a Movy city answered 429 — lets checks tell "rate-limited" from "nothing". */
 let movyRateLimitedAt = 0
+
+/** True when a Movy seed / city answered 429 at or after `since` (ms epoch). */
+export function movyRateLimitedSince(since: number): boolean {
+  return movyRateLimitedAt >= since
+}
 
 type HlsVerdict = 'ok' | 'dead' | 'limited'
 

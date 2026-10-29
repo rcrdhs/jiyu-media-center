@@ -44,7 +44,7 @@ import {
   rivestreamTmdbIdFromItem,
   shouldPreferRivestreamJapaneseAudio,
 } from '../lib/rivestream'
-import { resolveMovyPlay } from '../lib/movy'
+import { movyRateLimitedSince, resolveMovyPlay } from '../lib/movy'
 import { normalizeLanguageCode } from '../lib/language'
 import { BILIBILI_TV_PLAY_REFERER } from '../lib/bilibiliTv'
 import { resolveDonghuaPlay } from '../lib/donghuaResolve'
@@ -845,6 +845,7 @@ export function ShowPage() {
           if (!item.rivestreamTmdbId) {
             void upsertTorrentItems([{ ...item, ...tmdbPatch }])
           }
+          const movyStarted = Date.now()
           const movyOk = await tryPlayMovyNative(season, episode, tmdbId)
           if (movyOk) return
           const biliOk = await tryPlayBilibiliNative(season, episode, tmdbId)
@@ -855,7 +856,11 @@ export function ShowPage() {
           }
           // TMDB series/anime/kids: Movy + Bilibili + Nyaa (no Zenox embed).
           if (isTmdbTvCatalogItem(item)) {
-            setPlayError(`Could not find a stream for ${chosen.key || 'this episode'}.`)
+            setPlayError(
+              movyRateLimitedSince(movyStarted)
+                ? `Could not find a stream for ${chosen.key || 'this episode'}: the main source is rate-limiting this device right now. Try again in a few minutes.`
+                : `Could not find a stream for ${chosen.key || 'this episode'}.`,
+            )
             return
           }
         } else if (shouldTryNyaaForItem(item)) {
