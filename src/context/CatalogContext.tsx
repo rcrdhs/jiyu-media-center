@@ -129,6 +129,14 @@ function setSyncProgressMessage(message: string, percent: number | null): void {
 }
 import type { CategoryId, StreamItem } from '../types'
 
+/** Samsung TV has no torrent engine — a torrent movie row (YTS …) can never play there. */
+function isTizenTorrentOnlyMovie(item: StreamItem): boolean {
+  if (item.category !== 'movies') return false
+  if (item.transport === 'torrent' || item.sourceKind === 'torrent') return true
+  if (item.torrentSourceId === 'builtin-yts') return true
+  return /^magnet:/i.test(String(item.torrentUri || item.url || ''))
+}
+
 export interface AddPlaylistInput {
   kind: PlaylistKind
   label: string
@@ -380,7 +388,10 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
       ...torrentItems,
       ...imported,
     ]
-    const deduped = hideDuplicates ? dedupeStreams(merged) : merged
+    // Samsung: drop torrent-only movie rows (YTS …) before dedupe, so a same-title
+    // non-torrent row (TMDB / web source) is the one that survives.
+    const playable = isTizenTv() ? merged.filter((item) => !isTizenTorrentOnlyMovie(item)) : merged
+    const deduped = hideDuplicates ? dedupeStreams(playable) : playable
     if (!kidsMode) return deduped
     return deduped.filter((item) => item.category === 'kids')
   }, [
