@@ -540,13 +540,90 @@ export async function resolveFullmatchShowsPlayForDevice(
     }
     return res
   }
-  const x = await tizenExtractEmbed(res.url)
-  if (x.ok) {
-    return { ok: true, mode: 'hls', url: x.url, referer: x.referer, embedUrl: res.url, replayParts: res.replayParts }
+  const info = res.replayParts
+  const playlist = info?.playlist ?? sortReplayLinks((item.playlist || []).filter((p) => Boolean(p?.url)))
+  const keyOf = (url: string) =>
+    replayPartKey(playlist.find((p) => toMinimalReplayEmbedUrl(p.url) === toMinimalReplayEmbedUrl(url))?.title)
+  const wantKey = keyOf(res.url)
+  const extractable = (rows: StreamPlaylistItem[]) =>
+    rows
+      .filter((row) => row?.url && isTizenFrameBlockedEmbed(row.url))
+      .sort((a, b) => replayHostTier(b.url) - replayHostTier(a.url))
+      .map((row) => toMinimalReplayEmbedUrl(row.url))
+  const samePart = [res.url, ...extractable(playlist.filter((row) => replayPartKey(row.title) === wantKey))]
+  // Default open (no part picked): other non-highlight parts may stand in for the full
+  // match (e.g. "Full Match in En" hands back a dead .mkv while "Full Match" is HLS).
+  const otherParts =
+    preferredIndex == null
+      ? extractable(playlist.filter((row) => replayPartKey(row.title) !== wantKey && replayPartRank(row.title) < 90))
+      : []
+  const highlights =
+    preferredIndex == null
+      ? extractable(playlist.filter((row) => replayPartKey(row.title) !== wantKey && replayPartRank(row.title) >= 90))
+      : []
+  const partInfo = (url: string): ReplayPartsInfo | undefined => {
+    if (!info) return undefined
+    const key = keyOf(url)
+    const part = info.parts.find((p) => replayPartKey(p.title) === key)
+    return part ? { ...info, index: part.index } : info
   }
+  let mkv: { url: string; referer?: string; embedUrl: string } | null = null
+  const tried = new Set<string>()
+  const tryNative = async (urls: string[], budget: number) => {
+    for (const url of urls) {
+      if (tried.has(url) || tried.size >= budget) continue
+      tried.add(url)
+      const x = await tizenExtractEmbed(url)
+      if (!x.ok) continue
+      if (!isTizenNativeFriendlyStream(x.url)) {
+        if (!mkv) mkv = { url: x.url, referer: x.referer, embedUrl: url }
+        continue
+      }
+      return {
+        ok: true as const,
+        mode: 'hls' as const,
+        url: x.url,
+        referer: x.referer,
+        embedUrl: url,
+        replayParts: partInfo(url),
+      }
+    }
+    return null
+  }
+  const native = (await tryNative(samePart, 3)) || (await tryNative(otherParts, 6))
+  if (native) return native
   const alt = await resolveFullmatchShowsPlay(item, preferredIndex, { avoid: isTizenFrameBlockedEmbed })
-  if (alt.ok) return alt
+  if (alt.ok && !/fullmatchshows\.com/i.test(alt.url)) return alt
+  const late = await tryNative(highlights, 8)
+  if (late) return late
+  const lastResort = mkv as { url: string; referer?: string; embedUrl: string } | null
+  if (lastResort) {
+    return { ok: true, mode: 'hls', ...lastResort, replayParts: partInfo(lastResort.embedUrl) }
+  }
   return { ok: false, error: 'This replay has no player that opens on Samsung TV' }
+}
+
+/**
+ * Samsung native player wants HLS or MP4. vidaraa sometimes hands back a raw .mkv
+ * file instead (often dead or without audio on the TV) - only a last resort.
+ */
+export function isTizenNativeFriendlyStream(url: string): boolean {
+  return !/\.(?:mkv|avi|wmv|flv)(?:[?#]|$)/i.test(String(url || ''))
+}
+
+/** A part the TV can open in a frame (vixeo etc.), when the relay cannot extract it. */
+function tizenFrameablePartHost(info: ReplayPartsInfo, partIndex: number): string {
+  const key = replayPartKey(info.playlist[partIndex]?.title)
+  const row = info.playlist
+    .filter(
+      (r) =>
+        r?.url &&
+        replayPartKey(r.title) === key &&
+        !isTizenFrameBlockedEmbed(r.url) &&
+        replayHostTier(r.url) >= VERIFIED_REPLAY_TIER,
+    )
+    .sort((a, b) => replayHostTier(b.url) - replayHostTier(a.url))[0]
+  return row ? toMinimalReplayEmbedUrl(row.url) : ''
 }
 
 /** Link lists of the replays now playing natively on Samsung, by catalog item id. */
@@ -570,11 +647,17 @@ export function tizenNativeReplayRows(
       (row) => row?.url && replayPartKey(row.title) === key && isTizenFrameBlockedEmbed(row.url),
     )
   }
-  const parts = info.parts.filter((p) => p.index === info.index || extractable(p.index))
+  // A part without a vidaraa / playmate host stays when a frameable verified host
+  // (vixeo) plays it; only parts nothing on the TV can open are hidden.
+  const parts = info.parts.filter(
+    (p) => p.index === info.index || extractable(p.index) || Boolean(tizenFrameablePartHost(info, p.index)),
+  )
   if (parts.length < 2 || !parts.some((p) => p.index === info.index)) return undefined
   tizenReplayParts.set(itemId, info)
   return parts.map((p) => {
-    const embed = toMinimalReplayEmbedUrl(info.playlist[p.index]?.url || '')
+    const embed = extractable(p.index)
+      ? toMinimalReplayEmbedUrl(info.playlist[p.index]?.url || '')
+      : tizenFrameablePartHost(info, p.index)
     return {
       title: p.title,
       url: p.index === info.index ? current.url : embed,
@@ -592,23 +675,38 @@ export async function resolveTizenReplayPart(
   itemId: string,
   partIndex: number,
   embedUrl?: string,
-): Promise<{ ok: true; url: string; referer?: string } | { ok: false; error: string }> {
+): Promise<
+  | { ok: true; url: string; referer?: string }
+  | { ok: true; mode: 'embed'; url: string; replayParts: ReplayPartsInfo }
+  | { ok: false; error: string }
+> {
   const info = tizenReplayParts.get(itemId)
   const key = info ? replayPartKey(info.playlist[partIndex]?.title) : ''
   const hosts = info
     ? info.playlist
         .filter((row) => row?.url && replayPartKey(row.title) === key && isTizenFrameBlockedEmbed(row.url))
+        .sort((a, b) => replayHostTier(b.url) - replayHostTier(a.url))
         .map((row) => toMinimalReplayEmbedUrl(row.url))
     : []
   if (embedUrl && isTizenFrameBlockedEmbed(embedUrl) && !hosts.includes(embedUrl)) hosts.push(embedUrl)
+  let mkv: { url: string; referer?: string } | null = null
   for (const url of [...new Set(hosts)]) {
     const x = await tizenExtractEmbed(url)
-    if (x.ok) return { ok: true, url: x.url, referer: x.referer }
+    if (!x.ok) continue
+    // HLS / MP4 first; a raw .mkv only when nothing else opens.
+    if (!isTizenNativeFriendlyStream(x.url)) {
+      if (!mkv) mkv = { url: x.url, referer: x.referer }
+      continue
+    }
+    return { ok: true, url: x.url, referer: x.referer }
   }
+  const framed = info ? tizenFrameablePartHost(info, partIndex) : ''
+  if (info && framed) return { ok: true, mode: 'embed', url: framed, replayParts: { ...info, index: partIndex } }
+  if (mkv) return { ok: true, ...(mkv as { url: string; referer?: string }) }
   return {
     ok: false,
     error: hosts.length
-      ? 'This part did not open — try again in a moment'
+      ? 'This part did not open \u2014 try again in a moment'
       : 'This part has no player that opens on Samsung TV',
   }
 }

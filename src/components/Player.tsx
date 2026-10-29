@@ -841,7 +841,7 @@ export function Player({
   effectiveMutedRef.current = effectiveMuted
   isPrimaryRef.current = isPrimary
   const { nowNextFor } = useEpg()
-  const { awaitingAdd, armMultiviewAdd, cancelMultiviewAdd, slots } = usePlayback()
+  const { awaitingAdd, armMultiviewAdd, cancelMultiviewAdd, slots, play: playInContext } = usePlayback()
   const epg = !isPip && !isTile ? nowNextFor(item) : {}
   const inMultiview = slots.length > 1
   const playlist =
@@ -3099,6 +3099,43 @@ export function Player({
         setEpisodeLoading(false)
         setLoadingPlaylistIndex(null)
         flash(part.error)
+        return
+      }
+      if ('mode' in part) {
+        // Part without a vidaraa / playmate host: its frameable host (vixeo) on /web,
+        // keeping the part picker there.
+        setEpisodeLoading(false)
+        setLoadingPlaylistIndex(null)
+        const webItem: StreamItem = {
+          ...item,
+          url: part.url,
+          playlist: undefined,
+          tags: [...new Set([...(item.tags ?? []), 'web-embed', 'replay'])].filter(
+            (t) => t !== 'relay-hls' && t !== 'hls',
+          ),
+        }
+        navigate(`/web?url=${encodeURIComponent(part.url)}`, {
+          replace: true,
+          state: {
+            from: '/section/sports',
+            playerMode: 'embed',
+            pipOnBack: true,
+            continueWatch: {
+              id: item.id,
+              title: item.title,
+              poster: item.poster,
+              category: item.category,
+              playlistIndex: part.replayParts.index,
+              detailUrl: item.detailUrl || item.url,
+              playUrl: part.url,
+              replayParts: part.replayParts,
+              transport: item.transport,
+              sourceKind: item.sourceKind,
+              source: item.source,
+            },
+          },
+        })
+        playInContext(webItem, { forceFull: true, replace: true, returnTo: '/section/sports' })
         return
       }
       setMediaReady(false)
