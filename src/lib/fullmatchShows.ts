@@ -549,6 +549,70 @@ export async function resolveFullmatchShowsPlayForDevice(
   return { ok: false, error: 'This replay has no player that opens on Samsung TV' }
 }
 
+/** Link lists of the replays now playing natively on Samsung, by catalog item id. */
+const tizenReplayParts = new Map<string, ReplayPartsInfo>()
+
+/**
+ * Samsung native replay part picker: one playlist row per part that has a host the
+ * relay can extract (vidaraa / playmate). The row playing now carries the stream;
+ * the others carry their embed page and are extracted when picked. Undefined when
+ * there is nothing to pick (not Tizen, or fewer than two such parts).
+ */
+export function tizenNativeReplayRows(
+  itemId: string,
+  info: ReplayPartsInfo | undefined,
+  current: { url: string },
+): StreamPlaylistItem[] | undefined {
+  if (!isTizenTv() || !info || info.parts.length < 2) return undefined
+  const extractable = (partIndex: number) => {
+    const key = replayPartKey(info.playlist[partIndex]?.title)
+    return info.playlist.some(
+      (row) => row?.url && replayPartKey(row.title) === key && isTizenFrameBlockedEmbed(row.url),
+    )
+  }
+  const parts = info.parts.filter((p) => p.index === info.index || extractable(p.index))
+  if (parts.length < 2 || !parts.some((p) => p.index === info.index)) return undefined
+  tizenReplayParts.set(itemId, info)
+  return parts.map((p) => {
+    const embed = toMinimalReplayEmbedUrl(info.playlist[p.index]?.url || '')
+    return {
+      title: p.title,
+      url: p.index === info.index ? current.url : embed,
+      replayPartIndex: p.index,
+      replayEmbedUrl: embed,
+    }
+  })
+}
+
+/**
+ * Samsung: extract one replay part for the native player — that part's
+ * frame-blocked hosts in tier order (Playmate, then vidaraa), each via relay /x.
+ */
+export async function resolveTizenReplayPart(
+  itemId: string,
+  partIndex: number,
+  embedUrl?: string,
+): Promise<{ ok: true; url: string; referer?: string } | { ok: false; error: string }> {
+  const info = tizenReplayParts.get(itemId)
+  const key = info ? replayPartKey(info.playlist[partIndex]?.title) : ''
+  const hosts = info
+    ? info.playlist
+        .filter((row) => row?.url && replayPartKey(row.title) === key && isTizenFrameBlockedEmbed(row.url))
+        .map((row) => toMinimalReplayEmbedUrl(row.url))
+    : []
+  if (embedUrl && isTizenFrameBlockedEmbed(embedUrl) && !hosts.includes(embedUrl)) hosts.push(embedUrl)
+  for (const url of [...new Set(hosts)]) {
+    const x = await tizenExtractEmbed(url)
+    if (x.ok) return { ok: true, url: x.url, referer: x.referer }
+  }
+  return {
+    ok: false,
+    error: hosts.length
+      ? 'This part did not open — try again in a moment'
+      : 'This part has no player that opens on Samsung TV',
+  }
+}
+
 function isPlaymateUrl(url: string): boolean {
   try {
     const host = new URL(url).hostname.replace(/^www\./, '').toLowerCase()

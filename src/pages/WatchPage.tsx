@@ -59,6 +59,7 @@ import {
 import {
   isFullmatchShowsCatalogItem,
   resolveFullmatchShowsPlayForDevice,
+  tizenNativeReplayRows,
 } from '../lib/fullmatchShows'
 import { isTizenFrameBlockedEmbed, tizenExtractEmbed } from '../lib/tizenRelay'
 import {
@@ -714,8 +715,9 @@ export function WatchPage() {
               ...item!,
               url: resolved.url,
               httpReferrer: resolved.referer,
-              // The part list holds embed pages; the native player gets just this stream.
-              playlist: undefined,
+              // Part picker: each row is extracted (relay /x) when picked; the row
+              // playing now holds this stream. Full match is the default part.
+              playlist: tizenNativeReplayRows(item!.id, resolved.replayParts, { url: resolved.url }),
               tags: [...new Set([...(item!.tags ?? []), 'hls', 'replay', 'relay-hls'])].filter(
                 (t) => t !== 'web-embed',
               ),
@@ -777,10 +779,13 @@ export function WatchPage() {
       if (isLivextvReplayCatalogItem(item!)) {
         let resolved = await resolveLivextvReplayPlay(item!)
         if (cancelled) return
+        let nativeParts: StreamPlaylistItem[] | undefined
         if (resolved.ok && resolved.mode === 'embed' && isTizenTv() && isTizenFrameBlockedEmbed(resolved.url)) {
           // Samsung: vidaraa / playmate refuse a file:// parent — play their HLS natively.
+          const parts = resolved.replayParts
           const x = await tizenExtractEmbed(resolved.url)
           if (cancelled) return
+          if (x.ok) nativeParts = tizenNativeReplayRows(item!.id, parts, { url: x.url })
           resolved = x.ok
             ? { ok: true, mode: 'hls', url: x.url, referer: x.referer || '' }
             : { ok: false, error: 'This replay has no player that opens on Samsung TV' }
@@ -805,6 +810,7 @@ export function WatchPage() {
               ...item!,
               url: resolved.url,
               httpReferrer: resolved.referer,
+              ...(nativeParts ? { playlist: nativeParts } : {}),
               tags: [...new Set([...(item!.tags ?? []), 'hls', 'replay', ...(isTizenTv() ? ['relay-hls'] : [])])].filter(
                 (t) => t !== 'web-embed',
               ),

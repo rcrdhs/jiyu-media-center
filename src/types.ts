@@ -124,6 +124,13 @@ export interface StreamPlaylistItem {
   torrentAlternates?: string[]
   /** Stable episode token for chrome (e.g. S01E02). */
   episodeKey?: string
+  /**
+   * Samsung native sports replay part (Full match / halves / Highlights): index of
+   * the part in the replay's link list. The Player re-extracts it (relay /x) on pick.
+   */
+  replayPartIndex?: number
+  /** That part's best embed page (fallback when the link list isn't in memory). */
+  replayEmbedUrl?: string
 }
 
 export interface CategoryMeta {

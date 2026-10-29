@@ -66,6 +66,7 @@ import {
 } from '../lib/subtitles'
 import { getPerformanceKnobs } from '../lib/deviceProfile'
 import { isTizenTv } from '../lib/tvMode'
+import { resolveTizenReplayPart } from '../lib/fullmatchShows'
 import { hasRealDebridToken } from '../lib/debridSettings'
 import {
   cleanShowDisplayTitle,
@@ -937,10 +938,19 @@ export function Player({
     if (show && uiEpisodeKey) return `${show} · ${uiEpisodeKey}`
     return show || seeded || 'Loading…'
   })()
-  const episodesChipLabel = uiEpisodeKey
-    ? `Episodes · ${uiEpisodeKey} · ${uiPlaylistIndex + 1}/${playlist.length}`
-    : `Episodes · ${uiPlaylistIndex + 1}/${playlist.length}`
   const hasPlaylist = playlist.length > 1
+  // Samsung native sports replay: the "episodes" are its parts (Full match, halves,
+  // Highlights) — no auto-advance into the next part, "Parts" in chrome.
+  const replayPartsMode =
+    hasPlaylist &&
+    isTizenTv() &&
+    Boolean(item.tags?.includes('relay-hls')) &&
+    playlist.some((row) => row.replayPartIndex != null)
+  const episodesChipLabel = replayPartsMode
+    ? `Parts · ${uiPlaylistItem.title || `Part ${uiPlaylistIndex + 1}`} · ${uiPlaylistIndex + 1}/${playlist.length}`
+    : uiEpisodeKey
+      ? `Episodes · ${uiEpisodeKey} · ${uiPlaylistIndex + 1}/${playlist.length}`
+      : `Episodes · ${uiPlaylistIndex + 1}/${playlist.length}`
   activeUrlRef.current = activePlaylistItem.url || ''
   // Audio menu: only when the Movy city that is playing lists 2+ language streams.
   const movyAudioSession = getMovyPlaySession(activePlaylistItem.url)
@@ -3075,7 +3085,31 @@ export function Player({
       setStatus(userMessage)
     }
 
-    if (needsM2Box) {
+    const replayPartIndex =
+      isTizenTv() && item.tags?.includes('relay-hls') ? entry.replayPartIndex : undefined
+    if (replayPartIndex != null) {
+      // Samsung replay part picker: extract this part's stream (relay /x) and play it natively.
+      // The current part keeps playing while the next one is extracted.
+      setEpisodeLoading(true)
+      setStatus('Opening part…')
+      const part = await resolveTizenReplayPart(item.id, replayPartIndex, entry.replayEmbedUrl)
+      if (episodeFailGenRef.current !== failGen) return
+      if (!part.ok) {
+        // Stay on the part that plays — its row still holds a stream, the picked one doesn't.
+        setEpisodeLoading(false)
+        setLoadingPlaylistIndex(null)
+        flash(part.error)
+        return
+      }
+      setMediaReady(false)
+      setError(null)
+      activePlaybackReferrerRef.current = part.referer || ''
+      setLocalPlaylist((prev) => {
+        const base = prev ?? item.playlist ?? []
+        return base.map((row, i) => (i === index ? { ...row, url: part.url } : row))
+      })
+      setEpisodeLoading(false)
+    } else if (needsM2Box) {
       setEpisodeLoading(true)
       setMediaReady(false)
       setStatus('Loading episode…')
@@ -5929,6 +5963,7 @@ export function Player({
 
     const advanceToNextEpisodeOrWatchNext = () => {
       if (cancelled || autoAdvanceLockRef.current) return
+      if (replayPartsMode) return
       if (playlistIndex < playlist.length - 1) {
         autoAdvanceLockRef.current = true
         setStatus('Next episode…')
@@ -7616,7 +7651,15 @@ export function Player({
                 onClick={togglePlaylist}
                 aria-expanded={playlistOpen}
                 aria-controls="player-episode-strip"
-                title={playlistOpen ? 'Hide episodes' : 'Show episodes'}
+                title={
+                  replayPartsMode
+                    ? playlistOpen
+                      ? 'Hide parts'
+                      : 'Show parts'
+                    : playlistOpen
+                      ? 'Hide episodes'
+                      : 'Show episodes'
+                }
               >
                 {episodesChipLabel}
                 <span aria-hidden>{playlistOpen ? ' ▴' : ' ▾'}</span>
