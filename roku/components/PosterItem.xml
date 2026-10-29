@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<component name="PosterItem" extends="Group">
+  <script type="text/brightscript" uri="PosterItem.brs" />
+  <interface>
+    <field id="itemContent" type="node" onChange="onContentSet" />
+    <field id="focusPercent" type="float" onChange="onFocusPercent" />
+  </interface>
+  <children>
+    <!-- Focus ring sits outside the poster so movement is visible -->
+    <Rectangle
+      id="focusRing"
+      width="332"
+      height="192"
+      translation="[-6,-6]"
+      color="0x1A1F2700"
+    />
+    <Rectangle
+      id="frame"
+      width="320"
+      height="180"
+      color="0x1A1F27FF"
+    />
+    <Poster
+      id="poster"
+      width="320"
+      height="180"
+      loadDisplayMode="scaleToZoom"
+      failedBitmapUri=""
+    />
+    <Rectangle
+      id="labelBg"
+      width="320"
+      height="48"
+      translation="[0,132]"
+      color="0x000000CC"
+    />
+    <Label
+      id="title"
+      translation="[12,140]"
+      width="296"
+      height="36"
+      font="font:SmallBoldSystemFont"
+      color="0xF8FAFCFF"
+      horizAlign="left"
+      vertAlign="center"
+      wrap="false"
+      ellipsizeOnBoundary="true"
+    />
+  </children>
+</component>

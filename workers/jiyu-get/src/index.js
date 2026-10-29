@@ -7,6 +7,7 @@
  *   /tv64   newest arm64 APK (path from latest-android.yml).
  *   /apk    alias of /tv64 (phones).
  *   /win    newest Windows installer (path from latest.yml).
+ *   /nnn    Nationwide live HLS (jiyu-nnn Worker) for Roku in-channel play.
  *   /       tiny HTML page with the links.
  *
  * Every target is a GitHub "releases/latest/download/<asset>" URL, so publishing a
@@ -70,6 +71,7 @@ function page() {
 <li><a href="/tv">TV APK</a> &mdash; Google TV / Android TV / Fire TV (type <code>jiyu.free-river.workers.dev/tv</code> in the Downloader app)</li>
 <li><a href="/apk">Android phone APK</a> (arm64)</li>
 <li><a href="/win">Windows installer</a></li>
+<li><a href="/nnn">Nationwide live (Roku HLS)</a></li>
 <li><a href="${RELEASES}">All files on GitHub</a></li>
 </ul>`
   return new Response(html, {
@@ -96,6 +98,9 @@ export default {
     if (path === '/win' || path === '/windows') {
       const exe = await feedPath('latest.yml', ctx)
       return go(exe ? LATEST + exe : RELEASES)
+    }
+    if (path === '/nnn' || path === '/nationwide') {
+      return go('https://jiyu-nnn.free-river.workers.dev/live.m3u8')
     }
     if (path === '/releases') return go(RELEASES)
     return new Response('Not found', { status: 404 })

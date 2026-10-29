@@ -21,6 +21,8 @@
     "build:tizen": "node scripts/sync-ad-block-list.cjs && tsc -b && vite build --mode tizen",
     "pack:tizen": "npm run build:tizen && node scripts/pack-tizen.mjs",
     "pack:tizen:wgt": "npm run build:tizen && node scripts/pack-tizen.mjs --wgt",
+    "pack:roku": "node scripts/pack-roku.mjs",
+    "roku-hls": "node services/roku-hls/server.mjs",
     "release:win": "npm run build && electron-builder --win nsis portable --publish always",
     "release:linux": "npm run build && electron-builder --linux AppImage deb --publish always",
     "test:progress-sync": "node scripts/progress-sync-sandbox.cjs",

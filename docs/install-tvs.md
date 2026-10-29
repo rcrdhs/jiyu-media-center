@@ -44,7 +44,7 @@ Look at **Settings → About** (or **System → About**) on the set. The system 
 | LG | webOS | No |
 | Vizio | SmartCast | No |
 | Pioneer | No shared smart-TV system. Check About | Only if About says Android TV or Google TV |
-| Roku TVs (TCL, Hisense, Sharp, RCA, and others when the home screen is Roku) | Roku OS | No |
+| Roku TVs (TCL, Hisense, Sharp, RCA, and others when the home screen is Roku) | Roku OS | No APK — use the Roku first-slice `.zip` below |
 
 If the home screen is Roku, Fire TV, Tizen, webOS, VIDAA, or SmartCast, do not follow the Google TV steps.
 
@@ -151,13 +151,13 @@ Works (checked in Chrome at 1920×1080 with a Tizen user agent, file:// and CORS
 - Remote focus navigation, Return key ladder, media keys.
 - Direct HLS / MP4 streams and IPTV channels. When a stream's server blocks cross-origin script reads, Jiyu plays it with the TV's own `<video>` HLS player instead of hls.js.
 
-Does not work on Samsung yet:
+Samsung notes:
 
-- Sources that scrape other sites (most Movies/Series/Anime/Sports finders: streamed.pk, SubsPlease, NetMirror-type catalogs, the default IPTV guide list, YouTube live lookups). The TV enforces CORS and those sites send no CORS headers. They need a small relay server. Not built or deployed yet.
-- Streams that need a Referer or custom headers (the browser cannot set them).
-- YouTube embeds. YouTube refuses embeds from a packaged app with no web origin (Error 153). They need an https-hosted embed page.
-- Anything that needs Android or Electron: the Gecko web player/ad-blocked embeds, torrents and ffmpeg remux, Multi-view, PiP, in-app self-update (reinstall the `.wgt` instead).
-- Real-TV testing: not done yet. 2018–2019 sets (Chrome 56–63) are probably too old for this build.
+- **Movy** (anime / series Direct HLS): the TV cannot mint Movy seeds through Cloudflare (rate-limited + IP-bound). Leave `npm run roku-hls` running on the PC (same Wi‑Fi); `pack:tizen` stamps that PC's LAN IP into `bridge-config.js`. Override on the TV: `localStorage.setItem('jiyu.tizen.lanBridge','http://PC_IP:8791')`. Playlists still use the Cloudflare `/hls` relay.
+- Scraper catalogs (streamed.pk, SubsPlease, IPTV lists, YouTube live lookups) go through `jiyu-relay`.
+- YouTube embeds use the relay `/yt` page (fixes Error 153).
+- Torrents, Gecko embeds, Multi-view, PiP, and in-app self-update still need Android/desktop (reinstall the `.wgt` for updates).
+- 2018–2019 sets (Chrome 56–63) are probably too old for this build.
 
 Sets from before Tizen (Orsay, mostly 2015 and earlier) cannot open Developer mode this way.
 
@@ -169,6 +169,49 @@ LG has a separate **Developer Mode** app in the LG Content Store, and installs g
 
 ---
 
-## Roku, Vizio, and VIDAA
+## Roku (TCL / Hisense / Sharp Roku TV) — first slice
 
-Roku (including Roku-branded TCL, Hisense, and Sharp), Vizio SmartCast, and Hisense VIDAA do not sideload Android apps or Tizen packages. Jiyu has no package for them.
+Roku cannot run the Android APK or the Samsung `.wgt`. This repo has a **separate** BrightScript channel under `roku/` for a first slice:
+
+| Works on Roku | Does not (yet) |
+| --- | --- |
+| **TVJ** — native HLS in the channel | CVM (needs a fresh Vimeo token) |
+| **Nationwide** — resolves live id and opens the **YouTube** app | Torrents, Gecko embeds, Multiview, Movy |
+| **Live football** — PPV.st cards; video via the PC **roku-hls** bridge (captures real P2P/MSE media; first play can take ~30s) | Football with the bridge off |
+
+### Football video (roku-hls bridge)
+
+Roku cannot run web embeds. On the **PC** (same Wi‑Fi as the TV), leave this running:
+
+```powershell
+cd D:\app
+npm run roku-hls
+```
+
+Then pack so the channel points at this PC’s LAN IP (Windows Firewall: allow Node on private networks):
+
+```powershell
+npm run pack:roku
+```
+
+That writes `D:\app\release\jiyu-roku.zip` with `roku/source/config.brs` stamped to `http://YOUR_LAN_IP:8791`.
+
+### Enable developer mode on the TCL
+
+1. On the Roku home screen, press: **Home** three times, **Up** twice, then **Right, Left, Right, Left, Right**.
+2. Turn **Developer mode** on, note the TV’s IP / URL, set a password, reboot when asked.
+3. On the PC browser open `http://TV_IP` (user `rokudev`, your password).
+4. **Upload** → choose `release\jiyu-roku.zip`, then click **Install with zip** (Upload alone only picks the file). Only one sideloaded app is kept at a time.
+5. If the page goes blank, install from PowerShell instead (digest auth; the page is JS-rendered):
+
+```powershell
+cd D:\app
+npm run pack:roku
+curl.exe -sS --digest -u "rokudev:YOUR_DEV_PASSWORD" -F "mysubmit=Install" -F "archive=@release\jiyu-roku.zip;type=application/zip" "http://TV_IP/plugin_install" | Select-String -Pattern "Install Success|Install Failure|Application Received"
+```
+
+Remote: arrows move, OK selects, Back leaves the player and returns to the rows.
+
+### Vizio and VIDAA
+
+Vizio SmartCast and Hisense VIDAA still have no Jiyu package.
