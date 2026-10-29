@@ -7,7 +7,6 @@
 import { Capacitor } from '@capacitor/core'
 import { resolveAtlanticPlay } from './atlanticHls'
 import { getPerformanceKnobs } from './deviceProfile'
-import { resolveStreamoPlay } from './streamo'
 import {
   getLearnedStreamScore,
   recordStreamProbeResult,
@@ -235,7 +234,7 @@ export async function fetchMovySeed(mediaId: string | number): Promise<string> {
 }
 
 export type MovyMediaType = 'movie' | 'tv'
-export type MovyBackend = 'movy' | 'atlantic' | 'streamo'
+export type MovyBackend = 'movy' | 'atlantic'
 
 export interface MovyResolveOptions {
   tmdbId: string | number
@@ -262,7 +261,7 @@ export interface MovyResolveOptions {
   avoidProvider?: string
   /**
    * Only ask these cities (Audio menu re-resolve on the current city). Skips the
-   * Atlantic / Streamo fallbacks, which have no language choice.
+   * Atlantic fallback, which have no language choice.
    */
   providers?: string[]
 }
@@ -304,7 +303,7 @@ export type MovyPlayResult =
       quality?: string
       subtitleUrl?: string
       subtitleKind?: 'file'
-      /** movy city providers vs Atlantic (hls.lol) / Streamo (ShowBox) fallbacks. */
+      /** movy city providers vs the Atlantic (hls.lol) fallback. */
       backend?: MovyBackend
       /** Audio key of the chosen Movy source (see MovyAudioOption.key). */
       language?: string
@@ -838,29 +837,6 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
     }
   }
 
-  const tryStreamoFallback = async (): Promise<MovyPlayResult | null> => {
-    const started = Date.now()
-    try {
-      const alt = await resolveStreamoPlay({ tmdbId, mediaType: options.mediaType, season, episode })
-      recordStreamProbeResult('streamo', alt.ok, Date.now() - started)
-      if (!alt.ok) return null
-      return {
-        ok: true,
-        mode: 'hls',
-        url: alt.url,
-        referer: alt.referer,
-        provider: alt.provider,
-        tmdbId,
-        season,
-        episode,
-        backend: 'streamo',
-      }
-    } catch {
-      recordStreamProbeResult('streamo', false, Date.now() - started)
-      return null
-    }
-  }
-
   const resolveMovyCities = async (): Promise<MovyPlayResult | null> => {
     type AliveCity = {
       provider: string
@@ -968,7 +944,7 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
             clearTimeout(graceTimer)
             graceTimer = null
           }
-          // Skip French-dub-only answers so Atlantic/Streamo can try English.
+          // Skip French-dub-only answers so Atlantic can try English.
           resolve(await pickFromPool(englishAlive))
         }
 
@@ -1078,26 +1054,19 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
     return movy ? withSession(movy) : { ok: false, error: 'No streams for this title' }
   }
 
-  // Kick fallbacks immediately — Streamo alone needs ~9s for its provider lookup.
-  const fallbacks = {
-    atlantic: tryAtlanticFallback(),
-    streamo: tryStreamoFallback(),
-  }
-  const fallbackOrder: Array<keyof typeof fallbacks> =
-    options.preferBackend === 'streamo' ? ['streamo', 'atlantic'] : ['atlantic', 'streamo']
+  // Kick the Atlantic fallback immediately so it overlaps the Movy city lookups.
+  const atlanticFallback = tryAtlanticFallback()
 
-  const preferred = options.preferBackend
-  if (preferred === 'atlantic' || preferred === 'streamo') {
-    const first = await fallbacks[preferred]
+  if (options.preferBackend === 'atlantic') {
+    const first = await atlanticFallback
     if (first) return withSession(first)
   }
 
   const movy = await resolveMovyCities()
   if (movy) return withSession(movy)
 
-  for (const key of fallbackOrder) {
-    if (key === preferred) continue
-    const alt = await fallbacks[key]
+  if (options.preferBackend !== 'atlantic') {
+    const alt = await atlanticFallback
     if (alt) return withSession(alt)
   }
 
@@ -1230,8 +1199,7 @@ async function verifyTizenHlsPlayable(url: string, referer?: string): Promise<Hl
 
 /**
  * Samsung (Tizen) shelf check: resolve S1E1 exactly like playback does
- * (resolveMovyPlay — probed, language-acceptable cities, then Atlantic /
- * Streamo) and load the stream through the relay. Titles that only *list*
+ * (resolveMovyPlay — probed, language-acceptable cities, then Atlantic) * and load the stream through the relay. Titles that only *list*
  * sources (French-dub-only cities, "please wait" CDNs, relay-blocked
  * segments) come back 'none'. Rate limits / Movy outages → 'error' (not cached).
  */
@@ -1276,7 +1244,7 @@ export async function checkMovyTvPlayable(opts: {
       limited = true
       break
     }
-    // Dead stream: one more pass avoiding that Movy city (Atlantic / Streamo
+    // Dead stream: one more pass avoiding that Movy city (Atlantic
     // answers have no city to rotate away from).
     if ((play.backend ?? 'movy') !== 'movy' || !play.provider || tried.has(play.provider)) break
     tried.add(play.provider)
@@ -1288,7 +1256,7 @@ export async function checkMovyTvPlayable(opts: {
 /**
  * Cheap "does any backend list this episode?" check for catalog playability.
  * Asks every Movy city for sources (no HLS probe / duration vote), then the
- * Atlantic + Streamo fallbacks. Returns 'error' when Movy itself is unreachable
+ * Atlantic fallback. Returns 'error' when Movy itself is unreachable
  * (seed failed) so a blocked network never marks a title dead.
  */
 export async function checkMovyTvAvailability(opts: {
@@ -1332,17 +1300,10 @@ export async function checkMovyTvAvailability(opts: {
     }
   })
   if (anyCity) return 'ok'
-  const [atlantic, streamo] = await Promise.all([
-    withTimeoutOr(
-      resolveAtlanticPlay({ tmdbId, mediaType: 'tv', season: resolveOpts.season, episode: resolveOpts.episode, title }).catch(() => null),
-      12_000,
-      null,
-    ),
-    withTimeoutOr(
-      resolveStreamoPlay({ tmdbId, mediaType: 'tv', season: resolveOpts.season, episode: resolveOpts.episode }).catch(() => null),
-      15_000,
-      null,
-    ),
-  ])
-  return atlantic?.ok || streamo?.ok ? 'ok' : 'none'
+  const atlantic = await withTimeoutOr(
+    resolveAtlanticPlay({ tmdbId, mediaType: 'tv', season: resolveOpts.season, episode: resolveOpts.episode, title }).catch(() => null),
+    12_000,
+    null,
+  )
+  return atlantic?.ok ? 'ok' : 'none'
 }

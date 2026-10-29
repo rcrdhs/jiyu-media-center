@@ -109,7 +109,6 @@ const HLS_REFERERS = [
   /^https:\/\/(?:[a-z0-9-]+\.)*bilibili\.tv$/,
   /^https:\/\/(?:[a-z0-9-]+\.)*biliintl\.com$/,
   /^https:\/\/(?:[a-z0-9-]+\.)*rivestream\.[a-z]+$/,
-  /^https:\/\/(?:[a-z0-9-]+\.)*streamo\.pro$/,
   /^https:\/\/(?:[a-z0-9-]+\.)*(?:embedsports|embedme|streamed)\.[a-z]+$/,
 ]
 
@@ -162,6 +161,29 @@ function parseTarget(raw, anyPort = false) {
 
 function hostAllowed(host) {
   return DATA_HOSTS.some((re) => re.test(host.toLowerCase()))
+}
+
+/**
+ * Atlantic (Helios / Aphrodite) entry playlists: only these hosts may be opened
+ * with an atlantic.st Referer. Variant/segment URLs inside the playlist are
+ * reached through HMAC-signed /seg links, so the relay never becomes an open proxy.
+ */
+const ATLANTIC_REF = /^https:\/\/(?:[a-z0-9-]+\.)*atlantic[a-z0-9-]*\.[a-z.]+$/
+const ATLANTIC_HLS_HOSTS = [
+  /^(?:stream|cdn)\.hls\.lol$/,
+  /^(?:[a-z0-9-]+\.)*transcode\.cfd$/,
+  /^(?:[a-z0-9-]+\.)*totallyacdn\.org$/,
+]
+
+function refererTargetAllowed(ref, target) {
+  try {
+    const o = new URL(ref).origin.toLowerCase()
+    if (!ATLANTIC_REF.test(o)) return true
+    const h = target.hostname.toLowerCase()
+    return ATLANTIC_HLS_HOSTS.some((re) => re.test(h))
+  } catch {
+    return false
+  }
 }
 
 function refererAllowed(ref) {
@@ -411,6 +433,7 @@ async function relayHls(request, env, ctx, signed) {
   if (!signed) {
     if (mode === 'r') {
       if (target.port && target.port !== '443' && target.port !== '80') return reply('Bad url', 400)
+      if (!refererTargetAllowed(ref, target)) return reply('Host not allowed', 403)
     } else if (!iptvHostAllowed(target.hostname)) {
       return reply('Host not allowed', 403)
     } else if (!iptvRefererAllowed(ref, target)) {

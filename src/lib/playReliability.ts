@@ -155,9 +155,10 @@ export function preferredHlsBackendOrder(
 /** resolveMovyPlay `preferBackend` from the remembered pipe. */
 export function preferredResolveBackend(
   last: LastGoodPlay | null,
-): 'movy' | 'atlantic' | 'streamo' | undefined {
+): 'movy' | 'atlantic' | undefined {
   const pipe = last?.pipe
-  return pipe === 'movy' || pipe === 'atlantic' || pipe === 'streamo' ? pipe : undefined
+  // 'streamo' (streamo.pro) is gone; old history falls back to the default order.
+  return pipe === 'movy' || pipe === 'atlantic' ? pipe : undefined
 }
 
 /** Infer pipe from a live playback URL / referrer. */

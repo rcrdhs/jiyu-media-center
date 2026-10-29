@@ -42,10 +42,16 @@ const HLS_REFERERS: RegExp[] = [
   /^https:\/\/(?:[a-z0-9-]+\.)*bilibili\.tv$/,
   /^https:\/\/(?:[a-z0-9-]+\.)*biliintl\.com$/,
   /^https:\/\/(?:[a-z0-9-]+\.)*rivestream\.[a-z]+$/,
-  /^https:\/\/(?:[a-z0-9-]+\.)*streamo\.pro$/,
   /^https:\/\/(?:[a-z0-9-]+\.)*(?:embedsports|embedme|streamed)\.[a-z]+$/,
 ]
 
+/** Mirrors ATLANTIC_HLS_HOSTS in the worker: Helios / Aphrodite entry playlist hosts. */
+const ATLANTIC_REF = /^https:\/\/(?:[a-z0-9-]+\.)*atlantic[a-z0-9-]*\.[a-z.]+$/
+const ATLANTIC_HLS_HOSTS: RegExp[] = [
+  /^(?:stream|cdn)\.hls\.lol$/,
+  /^(?:[a-z0-9-]+\.)*transcode\.cfd$/,
+  /^(?:[a-z0-9-]+\.)*totallyacdn\.org$/,
+]
 function parse(url: string): URL | null {
   try {
     return new URL(url)
@@ -90,6 +96,10 @@ export function tizenHlsUrl(url: string, referrer?: string): string {
     return url
   }
   if (!HLS_REFERERS.some((re) => re.test(origin))) return url
+  if (ATLANTIC_REF.test(origin)) {
+    const host = parse(url)?.hostname.toLowerCase() || ''
+    if (!ATLANTIC_HLS_HOSTS.some((re) => re.test(host))) return url
+  }
   if (url.startsWith(TIZEN_RELAY_ORIGIN)) return url
   return `${TIZEN_RELAY_ORIGIN}/hls?u=${encodeURIComponent(url)}&ref=${encodeURIComponent(referrer)}`
 }
