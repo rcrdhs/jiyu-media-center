@@ -854,6 +854,8 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
       abrMaster: boolean
       /** movyLanguageRank of best (0 = wanted audio). */
       languageRank: number
+      /** Samsung: fMP4 playlist (#EXT-X-MAP), which stalls in Tizen MSE. */
+      fmp4: boolean
     }
 
     const buildResult = (pick: AliveCity): MovyPlayResult => {
@@ -881,19 +883,13 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
     const pickFromPool = async (englishAlive: AliveCity[]): Promise<MovyPlayResult | null> => {
       if (englishAlive.length === 0) return null
       // Spoken language first: original / English audio beats a faster dub.
-      const minRank = Math.min(...englishAlive.map((c) => c.languageRank))
-      let pool = englishAlive.filter((c) => c.languageRank === minRank)
       // Samsung: muxed fMP4 (#EXT-X-MAP, e.g. goldenkite) buffers but never decodes
-      // in Tizen MSE (readyState stays 1). Prefer TS cities when any answered.
-      let tizenAllFmp4 = false
-      if (isTizenTv()) {
-        const fmp4 = await Promise.all(
-          pool.map((c) => withTimeoutOr(isFmp4Hls(c.best.url), MOVY_DURATION_TIMEOUT_MS, false)),
-        )
-        const ts = pool.filter((_, i) => !fmp4[i])
-        if (ts.length > 0) pool = ts
-        else tizenAllFmp4 = true
-      }
+      // in Tizen MSE (readyState stays 1), so any acceptable TS city beats it.
+      const tsAlive = englishAlive.filter((c) => !c.fmp4)
+      const tizenAllFmp4 = isTizenTv() && tsAlive.length === 0
+      const candidates = isTizenTv() && tsAlive.length > 0 ? tsAlive : englishAlive
+      const minRank = Math.min(...candidates.map((c) => c.languageRank))
+      let pool = candidates.filter((c) => c.languageRank === minRank)
       // Prefer website-fast Auto CDNs (majorplay ~200ms) over paleoak (~6s masters
       // + 9s segments) that buffer/stall anime on desktop and Android.
       const fast = pool.filter((c) => c.probeMs > 0 && c.probeMs <= 2_000)
@@ -1010,6 +1006,14 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
               settleOne()
               return
             }
+            const fmp4 =
+              probe.ok && isTizenTv()
+                ? await withTimeoutOr(isFmp4Hls(best.url), MOVY_DURATION_TIMEOUT_MS, false)
+                : false
+            if (finished) {
+              settleOne()
+              return
+            }
             const languageRank = movyLanguageRank(best, pref)
             // A city whose best source is still another language's dub (austin
             // listing only Hindi/Tamil...) counts like paris: never auto-picked.
@@ -1029,14 +1033,17 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
                 probeMs: probe.ms,
                 abrMaster: Boolean(probe.abrMaster),
                 languageRank,
+                fmp4,
               })
               // Two English cities: pick now (duration vote). One live city: short
               // grace so a peer can join, then pick without waiting on 500/hung cities.
-              if (englishAlive.length >= 2 && satisfied()) {
+              // Samsung: fMP4 cities don't count; wait for a TS one (or all to settle).
+              const live = englishAlive.filter((c) => !c.fmp4)
+              if (live.length >= 2 && satisfied()) {
                 void finalize()
                 return
               }
-              armEarlyPick()
+              if (live.length > 0) armEarlyPick()
             }
             settleOne()
           })()
