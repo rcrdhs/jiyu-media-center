@@ -10,8 +10,14 @@
  * city is empty) per title, once per OK_TTL / DEAD_TTL. Movy rate-limits the
  * seed endpoint, so the queue runs one check at a time, spaced out, and backs
  * off (without caching anything) whenever Movy can't be reached.
+ *
+ * Samsung TV is stricter (checkMovyTvPlayable): it resolves S1E1 the way
+ * playback does and loads the master, first variant and first segment through
+ * the relay, so titles that only *list* sources (dub-only cities, "please
+ * wait" CDNs, relay-blocked segments) stay hidden. Those answers carry v: 2;
+ * older "ok" entries stay visible but are re-checked first.
  */
-import { checkMovyTvAvailability } from './movy'
+import { checkMovyTvAvailability, checkMovyTvPlayable } from './movy'
 import { resolveAnimeTmdbTvId, rivestreamTmdbIdFromItem } from './rivestream'
 import { isTizenTv } from './tvMode'
 import { isTmdbTvCatalogItem } from './tmdbTv'
@@ -32,10 +38,22 @@ const MAX_ENTRIES = 20_000
 
 export const PLAYABILITY_CHANGED = 'jiyu:playability-changed'
 
-type Entry = { ok: boolean; at: number }
+/** v: 2 = Samsung real-playback check (or a real Samsung playback). */
+type Entry = { ok: boolean; at: number; v?: number }
+
+const TIZEN_VERIFIED = 2
+/** A job that keeps erroring (timeouts) goes to the back of the queue after this many tries. */
+const MAX_JOB_ERRORS = 3
 
 let cache: Record<string, Entry> | null = null
-const queue: Array<{ key: string; tmdbId: string; title: string; anime?: boolean }> = []
+const queue: Array<{
+  key: string
+  tmdbId: string
+  title: string
+  anime?: boolean
+  originalLanguage?: string
+  errors?: number
+}> = []
 const queued = new Set<string>()
 let running = false
 let pausedUntil = 0
@@ -114,6 +132,12 @@ function fresh(entry: Entry | undefined, now = Date.now()): entry is Entry {
   return now - entry.at < (entry.ok ? OK_TTL_MS : DEAD_TTL_MS)
 }
 
+/** Needs a (re)check: no fresh answer, or (Samsung) an "ok" from the old list-only check. */
+function needsCheck(entry: Entry | undefined, tizen: boolean, now = Date.now()): boolean {
+  if (!fresh(entry, now)) return true
+  return tizen && entry.ok && entry.v !== TIZEN_VERIFIED
+}
+
 /** True only when a recent check found no source for this title. */
 export function isKnownUnplayable(item: StreamItem): boolean {
   const key = playabilityKey(item)
@@ -143,7 +167,7 @@ export function notePlayable(item: StreamItem) {
   if (!key) return
   const data = load()
   const was = data[key]
-  data[key] = { ok: true, at: Date.now() }
+  data[key] = isTizenTv() ? { ok: true, at: Date.now(), v: TIZEN_VERIFIED } : { ok: true, at: Date.now() }
   save()
   if (was && !was.ok) emitChanged()
 }
@@ -157,22 +181,29 @@ export function notePlaybackActivity() {
 export function queuePlayabilityChecks(items: StreamItem[], limit = 400) {
   const data = load()
   const now = Date.now()
+  const tizen = isTizenTv()
   let added = 0
+  const recheck: typeof queue = []
   for (const item of items) {
     if (added >= limit) break
     const key = playabilityKey(item)
-    if (!key || queued.has(key) || fresh(data[key], now)) continue
+    if (!key || queued.has(key) || !needsCheck(data[key], tizen, now)) continue
     const title = cleanShowDisplayTitle(item.title) || item.title
     if (!title) continue
     queued.add(key)
-    queue.push({
+    const job = {
       key,
       tmdbId: rivestreamTmdbIdFromItem(item),
       title,
       anime: key.startsWith('anime:'),
-    })
+      originalLanguage: item.originalLanguage,
+    }
+    // Samsung: shown-but-unverified titles first (they may be the ones that won't play).
+    if (tizen && fresh(data[key], now)) recheck.push(job)
+    else queue.push(job)
     added += 1
   }
+  if (recheck.length) queue.unshift(...recheck)
   if (added > 0) void drain()
 }
 
@@ -189,6 +220,7 @@ async function drain() {
         continue
       }
       const job = queue[0]!
+      const tizen = isTizenTv()
       let verdict: Awaited<ReturnType<typeof checkMovyTvAvailability>>
       try {
         let tmdbId = job.tmdbId
@@ -196,9 +228,15 @@ async function drain() {
           // AniList/TMDB match; null = no TMDB show → nothing non-torrent can play it.
           tmdbId = (await resolveAnimeTmdbTvId(job.title, tmdbId || null)) || ''
         }
-        verdict = tmdbId
-          ? await checkMovyTvAvailability({ tmdbId, title: job.title })
-          : 'none'
+        verdict = !tmdbId
+          ? 'none'
+          : tizen
+            ? await checkMovyTvPlayable({
+                tmdbId,
+                title: job.title,
+                originalLanguage: job.originalLanguage || (job.anime ? 'ja' : undefined),
+              })
+            : await checkMovyTvAvailability({ tmdbId, title: job.title })
       } catch {
         verdict = 'error'
       }
@@ -206,14 +244,23 @@ async function drain() {
         // Seed blocked / rate-limited — never cache, retry this job later.
         // Samsung goes through the shared Cloudflare relay, whose egress IPs Movy
         // rate-limits per minute: retry sooner there instead of idling 10 min.
-        pausedUntil = Date.now() + (isTizenTv() ? TIZEN_ERROR_BACKOFF_MS : ERROR_BACKOFF_MS)
+        pausedUntil = Date.now() + (tizen ? TIZEN_ERROR_BACKOFF_MS : ERROR_BACKOFF_MS)
+        job.errors = (job.errors ?? 0) + 1
+        // One title that always times out must not block the rest of the queue.
+        if (job.errors >= MAX_JOB_ERRORS && queue.length > 1) {
+          queue.shift()
+          job.errors = 0
+          queue.push(job)
+        }
         continue
       }
       queue.shift()
       queued.delete(job.key)
       const data = load()
       const prev = data[job.key]
-      data[job.key] = { ok: verdict === 'ok', at: Date.now() }
+      data[job.key] = tizen
+        ? { ok: verdict === 'ok', at: Date.now(), v: TIZEN_VERIFIED }
+        : { ok: verdict === 'ok', at: Date.now() }
       save()
       if (!prev || prev.ok !== (verdict === 'ok')) emitChanged()
       await sleep(CHECK_GAP_MS)

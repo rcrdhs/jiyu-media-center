@@ -14,6 +14,7 @@ import {
 } from './streamLearning'
 import { getViewingQuality, resolveRequestedQuality } from './viewingQuality'
 import { normalizeLanguageCode } from './language'
+import { tizenHlsSource } from './tizenRelay'
 
 export const MOVY_STREAM_ORIGIN = 'https://api.wecollege.net'
 export const MOVY_PLAY_REFERER = 'https://www.movy.sx/'
@@ -615,6 +616,7 @@ async function fetchProviderSources(
     seedCache.delete(`${MOVY_STREAM_ORIGIN}|${opts.tmdbId}`)
     return null
   }
+  if (res.status === 429) movyRateLimitedAt = Date.now()
   if (!res.ok || !res.text.trim()) return null
   try {
     const json = decryptMovySources(res.text.trim(), seed, opts.tmdbId)
@@ -1126,6 +1128,146 @@ async function fetchHlsDurationSec(url: string): Promise<number> {
 }
 
 export type MovyAvailability = 'ok' | 'none' | 'error'
+
+/** Last time a Movy city answered 429 — lets checks tell "rate-limited" from "nothing". */
+let movyRateLimitedAt = 0
+
+type HlsVerdict = 'ok' | 'dead' | 'limited'
+
+async function fetchHead(
+  url: string,
+  ms: number,
+  firstChunkOnly = false,
+): Promise<{ status: number; url: string; type: string; text: string; bytes: number }> {
+  const ctl = new AbortController()
+  const timer = setTimeout(() => ctl.abort(), ms)
+  try {
+    const res = await fetch(url, { signal: ctl.signal })
+    const type = String(res.headers.get('content-type') || '')
+    if (!firstChunkOnly) {
+      const text = res.ok ? await res.text() : ''
+      return { status: res.status, url: res.url || url, type, text, bytes: text.length }
+    }
+    let bytes = 0
+    let head = ''
+    const reader = res.ok && res.body ? res.body.getReader() : null
+    if (reader) {
+      const chunk = await reader.read()
+      const value = chunk.value
+      if (value && value.length) {
+        bytes = value.length
+        head = String.fromCharCode(...Array.from(value.subarray(0, 64)))
+      }
+      void reader.cancel().catch(() => {})
+    } else if (res.ok) {
+      const buf = new Uint8Array(await res.arrayBuffer())
+      bytes = buf.length
+      head = String.fromCharCode(...Array.from(buf.subarray(0, 64)))
+    }
+    ctl.abort()
+    return { status: res.status, url: res.url || url, type, text: head, bytes }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+function firstUri(playlist: string): string {
+  return (
+    playlist
+      .split('\n')
+      .map((l) => l.trim())
+      .find((l) => l && !l.startsWith('#')) || ''
+  )
+}
+
+/**
+ * Samsung only: load an HLS stream the way the TV player does (relay /hls for
+ * Referer-locked hosts) — master, first variant, first bytes of the first
+ * segment. A listed source whose CDN answers "please wait", 403s through the
+ * relay or serves an HTML error page instead of media counts as dead.
+ */
+async function verifyTizenHlsPlayable(url: string, referer?: string): Promise<HlsVerdict> {
+  try {
+    const src = await tizenHlsSource(url, referer)
+    let pl = await fetchHead(src, 9_000)
+    if (pl.status === 429) return 'limited'
+    if (!classifyMovyPlaylistBody(pl.text).ok) return 'dead'
+    if (/#EXT-X-STREAM-INF/i.test(pl.text)) {
+      const variant = firstUri(pl.text)
+      if (!variant) return 'dead'
+      pl = await fetchHead(new URL(variant, pl.url).href, 9_000)
+      if (pl.status === 429) return 'limited'
+      if (!classifyMovyPlaylistBody(pl.text).ok) return 'dead'
+    }
+    if (!/#EXTINF/i.test(pl.text)) return 'dead'
+    const segment = firstUri(pl.text)
+    if (!segment) return 'dead'
+    const seg = await fetchHead(new URL(segment, pl.url).href, 12_000, true)
+    if (seg.status === 429) return 'limited'
+    if (seg.status < 200 || seg.status >= 300 || seg.bytes === 0) return 'dead'
+    if (/text\/html/i.test(seg.type) || /^\s*(<|\{|please wait)/i.test(seg.text)) return 'dead'
+    return 'ok'
+  } catch {
+    return 'dead'
+  }
+}
+
+/**
+ * Samsung (Tizen) shelf check: resolve S1E1 exactly like playback does
+ * (resolveMovyPlay — probed, language-acceptable cities, then Atlantic /
+ * Streamo) and load the stream through the relay. Titles that only *list*
+ * sources (French-dub-only cities, "please wait" CDNs, relay-blocked
+ * segments) come back 'none'. Rate limits / Movy outages → 'error' (not cached).
+ */
+export async function checkMovyTvPlayable(opts: {
+  tmdbId: string
+  title: string
+  season?: number
+  episode?: number
+  originalLanguage?: string
+}): Promise<MovyAvailability> {
+  const tmdbId = String(opts.tmdbId || '').trim()
+  const title = String(opts.title || '').trim()
+  if (!tmdbId || !title) return 'none'
+  const started = Date.now()
+  try {
+    await fetchMovySeed(tmdbId)
+  } catch {
+    return 'error'
+  }
+  const base: MovyResolveOptions = {
+    tmdbId,
+    title,
+    mediaType: 'tv',
+    season: Math.max(1, opts.season || 1),
+    episode: Math.max(1, opts.episode || 1),
+    originalLanguage: opts.originalLanguage || undefined,
+  }
+  const tried = new Set<string>()
+  let limited = false
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const avoid = [...tried].pop()
+    const play = await withTimeoutOr(
+      resolveMovyPlay(avoid ? { ...base, avoidProvider: avoid } : base).catch(() => null),
+      45_000,
+      null,
+    )
+    if (!play) return 'error'
+    if (!play.ok) break
+    const verdict = await verifyTizenHlsPlayable(play.url, play.referer)
+    if (verdict === 'ok') return 'ok'
+    if (verdict === 'limited') {
+      limited = true
+      break
+    }
+    // Dead stream: one more pass avoiding that Movy city (Atlantic / Streamo
+    // answers have no city to rotate away from).
+    if ((play.backend ?? 'movy') !== 'movy' || !play.provider || tried.has(play.provider)) break
+    tried.add(play.provider)
+  }
+  if (limited || movyRateLimitedAt >= started) return 'error'
+  return 'none'
+}
 
 /**
  * Cheap "does any backend list this episode?" check for catalog playability.
