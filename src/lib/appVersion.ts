@@ -12,6 +12,11 @@ export const APP_VERSION_LABEL = `v${APP_VERSION}`
 /** Short milestone log — newest first — so progress is visible in-app. */
 export const APP_RELEASES: ReadonlyArray<{ version: string; summary: string }> = [
   {
+    version: '0.3.90',
+    summary:
+      'Series no longer list episodes that have not aired yet; the Streamo source, which had stopped working, is removed; Samsung TVs hide movies they cannot play, check that a show really plays before putting it on a shelf, get a Full match / halves / Highlights picker for football replays, and play Movy anime and series through the Jiyu PC on the same Wi-Fi (leave npm run roku-hls running); a first Roku channel (installed separately) plays TVJ, Nationwide and live football through the PC',
+  },
+  {
     version: '0.3.89',
     summary:
       'Nationwide plays again on Android, and a local channel on Home no longer disappears while it is playing; Jiyu now works on Android TV, Google TV and Fire TV with remote-control navigation and a bigger TV layout; a TV version for older 32-bit TV sticks can be downloaded from jiyu.free-river.workers.dev/tv; Samsung TVs get their own version (installed separately) that plays anime, sports replays and IPTV channels; the welcome guide has a new Install on your TV step',
