@@ -1,4 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
+
+/** Media3 must report 'playing' within this window, else open the embed. */
+const NATIVE_STREAM_START_TIMEOUT_MS = 20_000
 import { useLocation, useNavigate } from 'react-router-dom'
 import { VolumeSlider } from '../components/VolumeSlider'
 import { usePlayback } from '../context/PlaybackContext'
@@ -69,6 +72,8 @@ export function NativeStreamPage() {
     let cancelled = false
     let played = false
     let remove: { remove: () => Promise<void> } | null = null
+    let fellBack = false
+    let startTimer = 0
 
     const syncBounds = () => {
       const b = boundsFromElement(stageRef.current)
@@ -76,8 +81,11 @@ export function NativeStreamPage() {
     }
 
     const openEmbedFallback = () => {
+      if (fellBack) return true
       const embed = String(state.referrer || '').trim()
       if (!embed) return false
+      fellBack = true
+      window.clearTimeout(startTimer)
       void media3Hide({ stop: true })
       navigate(`/web?url=${encodeURIComponent(embed)}`, {
         replace: true,
@@ -86,11 +94,22 @@ export function NativeStreamPage() {
       return true
     }
 
+    // Media3 can sit in loading/buffering forever (dead or header-locked HLS) and
+    // never emit 'error' - fall back to the Gecko embed if it hasn't started.
+    startTimer = window.setTimeout(() => {
+      if (cancelled || played) return
+      console.warn('[jiyu] media3 start timeout - opening embed fallback')
+      if (openEmbedFallback()) return
+      setStatus('Error')
+      setError('Stream did not start')
+    }, NATIVE_STREAM_START_TIMEOUT_MS)
+
     void (async () => {
       const handle = await media3OnPlayback((ev) => {
         if (cancelled) return
         if (ev.state === 'playing') {
           played = true
+          window.clearTimeout(startTimer)
           setStatus('Playing')
         } else if (ev.state === 'buffering' || ev.state === 'loading') {
           setStatus(played ? 'Buffering\u2026' : 'Unwrapping stream\u2026')
@@ -143,6 +162,7 @@ export function NativeStreamPage() {
 
     return () => {
       cancelled = true
+      window.clearTimeout(startTimer)
       window.removeEventListener('resize', onResize)
       window.removeEventListener('orientationchange', onOrient)
       for (const id of orientTimers) window.clearTimeout(id)

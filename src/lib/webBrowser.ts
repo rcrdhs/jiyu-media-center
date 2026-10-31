@@ -150,7 +150,7 @@ export function isWebBrowserOnlyUrl(url: string): boolean {
 
 /** PPV.st / Streamed iframe mirrors: /embed/{slug} on rotating domains. */
 export function isRotatingSportsEmbedPath(pathname: string): boolean {
-  return /^\/embed\/[a-z0-9][\w.-]{2,}/i.test(String(pathname || ''))
+  return /^\/embed\/[a-z0-9](?:[\w.-]{2,}|[\w.-]*\/[\w.-]+)/i.test(String(pathname || ''))
 }
 
 /**

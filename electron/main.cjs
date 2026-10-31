@@ -1313,7 +1313,7 @@ function isAllowedSportsPlayerHost(host) {
     .toLowerCase()
   if (!h) return false
   if (h.includes('strmd')) return true
-  return /(^|\.)(embed\.st|embedhd\.st|embedindia\.st|streamed\.pk|ppv\.st|ppvservices\.st|b-cdn\.net|jsdelivr\.net|unpkg\.com|clappr\.io|jwpcdn\.com|jwplatform\.com|cloudfront\.net|akamaized\.net|akamaihd\.net|fastly\.net|videodelivery\.net|mux\.com|googleapis\.com|gstatic\.com|swarmcloud|hlsjs|cloudflare\.com)$/i.test(
+  return /(^|\.)(embed\.st|embedhd\.st|embedindia\.st|streamed\.pk|ppv\.st|ppvservices\.st|b-cdn\.net|jsdelivr\.net|unpkg\.com|clappr\.io|jwpcdn\.com|jwplatform\.com|jwplayer\.com|cloudfront\.net|akamaized\.net|akamaihd\.net|fastly\.net|videodelivery\.net|mux\.com|googleapis\.com|gstatic\.com|swarmcloud|hlsjs|cloudflare\.com)$/i.test(
     h,
   )
 }
@@ -1601,7 +1601,7 @@ function isAllowedPlayerNav(fromUrl, toUrl) {
     const host = u.hostname.replace(/^www\./i, '').toLowerCase()
     const path = u.pathname.toLowerCase()
     if (
-      /(^|\.)(b-cdn\.net|cloudfront\.net|akamaized\.net|akamaihd\.net|fastly\.net|jsdelivr\.net|unpkg\.com|clappr\.io|jwpcdn\.com|jwplatform\.com|strmd\.|cdn\.streamed|ppvservices\.st|embed\.ppv\.st|videodelivery\.net|mux\.com)$/i.test(
+      /(^|\.)(b-cdn\.net|cloudfront\.net|akamaized\.net|akamaihd\.net|fastly\.net|jsdelivr\.net|unpkg\.com|clappr\.io|jwpcdn\.com|jwplatform\.com|jwplayer\.com|strmd\.|cdn\.streamed|ppvservices\.st|embed\.ppv\.st|videodelivery\.net|mux\.com)$/i.test(
         host,
       )
     ) {
@@ -1755,7 +1755,7 @@ function installWebSessionDownloadGuard(ses) {
 }
 
 function isRotatingSportsEmbedPath(pathname) {
-  return /^\/embed\/[a-z0-9][\w.-]{2,}/i.test(String(pathname || ''))
+  return /^\/embed\/[a-z0-9](?:[\w.-]{2,}|[\w.-]*\/[\w.-]+)/i.test(String(pathname || ''))
 }
 
 function isSportsEmbedHost(url) {
@@ -1939,7 +1939,7 @@ const BROWSER_AD_SHIELD_SCRIPT = `(() => {
       /(^|\\.)playmate\\.to$/i.test(host) ||
       /(^|\\.)playmogo\\.com$/i.test(host) ||
       /^\\/[de]\\/[a-z0-9]{6,}/i.test(path) ||
-      /^\\/embed\\/[a-z0-9][\\w.-]{2,}/i.test(path);
+      /^\\/embed\\/[a-z0-9](?:[\\w.-]{2,}|[\\w.-]*\\/[\\w.-]+)/i.test(path);
     // Always re-assert — early-return must not skip FS block on later injects.
     try {
       if (!window.__jiyuFsBlocked) {

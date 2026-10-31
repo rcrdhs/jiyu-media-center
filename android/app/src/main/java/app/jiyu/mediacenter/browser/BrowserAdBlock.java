@@ -188,6 +188,9 @@ final class BrowserAdBlock {
     try {
       String path = new java.net.URI(url).getPath();
       if (path != null && path.matches("(?i)^/[de]/[a-z0-9]{6,}.*")) return true;
+      // PPV/Streamed iframe mirrors rotate off embed.st (e.g. taifood-blog.asia/embed/...);
+      // mirrors electron/main.cjs isRotatingSportsEmbedPath.
+      if (path != null && path.matches("(?i)^/embed/[a-z0-9](?:[\\w.-]{2,}|[\\w.-]*/[\\w.-]+).*")) return true;
     } catch (Throwable ignored) {}
     return false;
   }
