@@ -165,7 +165,7 @@ async function fetchStreamsPayload(): Promise<JsonResult<{ streams?: StreamFreeS
   return { ok: false, error: lastError }
 }
 
-/** 24/7 channels (RedZone, Sky Sports, Willow, DAZN…) — not matches. */
+/** 24/7 channels (RedZone, Sky Sports, Willow, DAZN…) — shown as always-live feeds. */
 const CHANNEL_NAME_RE =
   /\b(red\s*zone|sky\s*sports?|willow|dazn|espn\s*\d?|tnt\s*sports?|bein|24\s*\/\s*7|channel|network)\b/i
 const CHANNEL_LEAGUE_RE = /^(sky|dazn|willow|redzone|24\s*\/\s*7|tv|channels?)$/i
@@ -174,7 +174,9 @@ const CHANNEL_MIN_AGE_SEC = 24 * 60 * 60
 
 /**
  * Single events (UFC cards, boxing, F1 races, tennis/cricket matches) often
- * come without team1/team2 — keep them; only always-on channel feeds drop.
+ * come without team1/team2 — those are events. Always-on channel feeds are
+ * kept too (Ricardo, Oct 31 2026: StreamFree-only exception to the no-IPTV
+ * rule) but shown as always-live with no kickoff time.
  */
 export function isStreamFreeChannel(stream: StreamFreeStream, nowSec = unixSecondsNow()): boolean {
   const name = String(stream.name || '').trim()
@@ -252,10 +254,11 @@ export function streamFreeStreamToItem(
   const key = String(stream?.stream_key || stream?.id || '').trim()
   const title = String(stream?.name || '').trim()
   if (!key || !title) return null
-  if (isStreamFreeChannel(stream, nowSec)) return null
+  const alwaysLive = isStreamFreeChannel(stream, nowSec)
 
-  const live = Array.isArray(stream.live_sources) && stream.live_sources.length > 0
-  const startSec = Number(stream.match_timestamp) || 0
+  const live = alwaysLive || (Array.isArray(stream.live_sources) && stream.live_sources.length > 0)
+  // Channel feeds carry a months-old "start" — not a kickoff, so ignore it.
+  const startSec = alwaysLive ? 0 : Number(stream.match_timestamp) || 0
   if (!live) {
     if (startSec > 0 && startSec < nowSec - STALE_AFTER_START_SEC) return null
     if (startSec > nowSec + UPCOMING_WINDOW_SEC) return null
@@ -292,14 +295,21 @@ export function streamFreeStreamToItem(
   return {
     id: streamFreeItemId(key),
     title,
-    description: [eventSport, 'StreamFree', when].filter(Boolean).join(' · '),
+    description: [eventSport, 'StreamFree', alwaysLive ? '24/7' : when].filter(Boolean).join(' · '),
     category: 'sports',
     url: sources[0].url,
     detailUrl: `${STREAMFREE_ORIGIN}/`,
     poster: thumb || homeBadgeUrl || awayBadgeUrl,
     homeBadgeUrl,
     awayBadgeUrl,
-    tags: ['live', 'streamfree', 'web-embed', sportTag, live ? 'live-now' : 'upcoming'],
+    tags: [
+      'live',
+      'streamfree',
+      'web-embed',
+      sportTag,
+      ...(alwaysLive ? ['always-live'] : []),
+      live ? 'live-now' : 'upcoming',
+    ],
     source: 'StreamFree',
     sourceKind: 'builtin',
     transport: 'direct',
