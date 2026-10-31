@@ -2,6 +2,11 @@
  * Streamed (streamed.pk) — free sports match API.
  * Catalog: live matches → Sports shelf. Play: embed.st URL in Jiyu Web Browser
  * (no stable native HLS from the public API).
+ *
+ * RETIRED (Oct 2026): streamed.pk shut down. The fetchers below answer with
+ * empty lists without touching the network, so the Sports shelf shows no
+ * Streamed errors / retry storms. StreamFree (./streamFree) replaced it and is
+ * merged into the PPV.st schedule. Flip STREAMED_RETIRED to re-enable.
  */
 
 import type { StreamItem } from '../types'
@@ -10,6 +15,8 @@ import { rankSourcesWithLearning, recordStreamProbeResult } from './streamLearni
 
 export const STREAMED_API_ORIGIN = 'https://streamed.pk'
 export const STREAMED_ID_PREFIX = 'streamed-'
+/** streamed.pk is gone — skip its API entirely. */
+export const STREAMED_RETIRED = true
 
 export interface StreamedMatchSource {
   source: string
@@ -131,6 +138,7 @@ export interface StreamedSport {
 export async function fetchStreamedSports(): Promise<
   { ok: true; sports: StreamedSport[] } | { ok: false; error: string }
 > {
+  if (STREAMED_RETIRED) return { ok: true, sports: [] }
   const result = await fetchJson<StreamedSport[]>('/api/sports')
   if (!result.ok) return result
   if (!Array.isArray(result.data)) return { ok: false, error: 'Invalid sports response' }
@@ -149,6 +157,7 @@ export async function fetchStreamedSports(): Promise<
 export async function fetchStreamedLiveMatches(
   popularOnly = false,
 ): Promise<{ ok: true; matches: StreamedMatch[] } | { ok: false; error: string }> {
+  if (STREAMED_RETIRED) return { ok: true, matches: [] }
   const path = popularOnly ? '/api/matches/live/popular' : '/api/matches/live'
   const result = await fetchJson<StreamedMatch[]>(path)
   if (!result.ok) return result
@@ -160,6 +169,7 @@ export async function fetchStreamedLiveMatches(
 export async function fetchStreamedAllMatches(): Promise<
   { ok: true; matches: StreamedMatch[] } | { ok: false; error: string }
 > {
+  if (STREAMED_RETIRED) return { ok: true, matches: [] }
   const result = await fetchJson<StreamedMatch[]>('/api/matches/all')
   if (!result.ok) return result
   if (!Array.isArray(result.data)) return { ok: false, error: 'Invalid matches response' }
@@ -364,6 +374,9 @@ function rankStreamedSources(
 export async function resolveStreamedPlay(
   item: Pick<StreamItem, 'streamedMatchId' | 'streamedSources' | 'title'>,
 ): Promise<StreamedPlayResult> {
+  if (STREAMED_RETIRED) {
+    return { ok: false, error: 'Streamed.pk has shut down — pick a PPV.st or StreamFree match' }
+  }
   let sources = (item.streamedSources || []).filter((s) => s.source && s.id)
 
   // Always refresh from live API when possible — catalog rows go stale and

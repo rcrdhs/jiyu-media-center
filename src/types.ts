@@ -67,6 +67,8 @@ export interface StreamItem {
   streamedMatchId?: string
   /** Streamed.pk source handles used to resolve embed URLs at play time */
   streamedSources?: Array<{ source: string; id: string }>
+  /** Extra embed players for the same live match (e.g. StreamFree FHD/SD alongside PPV.st). */
+  sportsAltSources?: Array<{ label: string; url: string }>
   /** Event start (Unix ms) — Sports countdown / Live badge */
   eventStartsAt?: number
   /** Event end (Unix ms) when known */
