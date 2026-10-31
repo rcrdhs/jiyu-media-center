@@ -12,6 +12,7 @@ import {
   isPlaceholderBrowserTitle,
   isSportsOrReplayEmbedUrl,
   toAutoplayUrl,
+  WEB_GUEST_ACTIVITY_EVENT,
   type WebSearchKind,
 } from '../lib/webBrowser'
 import type { CategoryId, StreamItem, StreamSourceKind, StreamTransport } from '../types'
@@ -629,6 +630,16 @@ export function WebBrowserPage() {
   const zenoxEmbed =
     embedPlayer &&
     isZenoxUrl(nav.url || address || continueWatch?.playUrl || paramUrl || '')
+
+  // Desktop Full: input over the native view never reaches this div, so the guest
+  // page reports it (WebBrowserContext poll) and the bar comes back.
+  const revealChromeRef = useRef<() => void>(() => {})
+  revealChromeRef.current = revealChrome
+  useEffect(() => {
+    const onActivity = () => revealChromeRef.current()
+    window.addEventListener(WEB_GUEST_ACTIVITY_EVENT, onActivity)
+    return () => window.removeEventListener(WEB_GUEST_ACTIVITY_EVENT, onActivity)
+  }, [])
 
   function revealChrome() {
     if (!embedPlayer || isAndroidShell()) return

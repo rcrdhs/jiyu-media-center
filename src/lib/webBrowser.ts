@@ -1041,7 +1041,11 @@ export const EMBED_UNMUTE_OVERLAY_SCRIPT = `(() => {
  */
 export const BLOCK_GUEST_FULLSCREEN_SCRIPT = `(() => {
   try {
-    const reject = () => Promise.reject(new DOMException('Fullscreen blocked in Jiyu', 'NotAllowedError'));
+    const reject = () => {
+      // Count the request so Jiyu can treat the embed's own Full button as its Full.
+      try { window.__jiyuFsReq = (window.__jiyuFsReq || 0) + 1; } catch (_) {}
+      return Promise.reject(new DOMException('Fullscreen blocked in Jiyu', 'NotAllowedError'));
+    };
     const patch = (proto, key) => {
       try {
         if (proto && typeof proto[key] === 'function') proto[key] = reject;
@@ -1059,6 +1063,65 @@ export const BLOCK_GUEST_FULLSCREEN_SCRIPT = `(() => {
     return 'blocked';
   } catch (_) {
     return 'error';
+  }
+})();`
+
+/** Window event: the guest page saw mouse / key / touch input (desktop only). */
+export const WEB_GUEST_ACTIVITY_EVENT = 'jiyu:web-guest-activity'
+
+/**
+ * Desktop in-app browser: the native WebContentsView swallows mouse and keys, so
+ * the HTML top bar can't see them. Count input inside each guest frame and count
+ * the page's own fullscreen requests (blocked here, mapped to Jiyu's Full).
+ * Idempotent; returns "jiyu-act:<input count>:<fullscreen requests>".
+ */
+export const GUEST_ACTIVITY_SCRIPT = `(() => {
+  try {
+    const w = window;
+    if (!w.__jiyuActInstalled) {
+      w.__jiyuActInstalled = true;
+      w.__jiyuAct = w.__jiyuAct || 0;
+      let last = 0;
+      const bump = () => {
+        const now = Date.now();
+        if (now - last < 150) return;
+        last = now;
+        w.__jiyuAct = (w.__jiyuAct || 0) + 1;
+      };
+      ['mousemove', 'pointerdown', 'keydown', 'wheel', 'touchstart'].forEach((type) => {
+        try { w.addEventListener(type, bump, { capture: true, passive: true }); } catch (_) {}
+      });
+      w.__jiyuFsRequest = () => {
+        try { w.__jiyuFsReq = (w.__jiyuFsReq || 0) + 1; } catch (_) {}
+        return Promise.reject(new DOMException('Fullscreen handled by Jiyu', 'NotAllowedError'));
+      };
+      // A request that slipped past the patch: undo it and still map it to Full.
+      document.addEventListener('fullscreenchange', () => {
+        try {
+          if (!document.fullscreenElement) return;
+          w.__jiyuFsReq = (w.__jiyuFsReq || 0) + 1;
+          const p = document.exitFullscreen();
+          if (p && typeof p.catch === 'function') p.catch(() => {});
+        } catch (_) {}
+      }, true);
+    }
+    // Re-assert every call: other injected guards swap in a reject that doesn't count.
+    const request = w.__jiyuFsRequest;
+    [
+      [Element.prototype, 'requestFullscreen'],
+      [Element.prototype, 'webkitRequestFullscreen'],
+      [Element.prototype, 'webkitRequestFullScreen'],
+      [HTMLElement.prototype, 'webkitRequestFullScreen'],
+      [HTMLVideoElement.prototype, 'webkitEnterFullscreen'],
+      [HTMLVideoElement.prototype, 'webkitEnterFullScreen'],
+    ].forEach(([proto, key]) => {
+      try {
+        if (request && proto && typeof proto[key] === 'function' && proto[key] !== request) proto[key] = request;
+      } catch (_) {}
+    });
+    return 'jiyu-act:' + (w.__jiyuAct || 0) + ':' + (w.__jiyuFsReq || 0);
+  } catch (_) {
+    return 'jiyu-act:0:0';
   }
 })();`
 

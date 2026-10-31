@@ -15,6 +15,7 @@ import {
   EMBED_AD_HIDE_SCRIPT,
   EMBED_STRIP_SANDBOX_SCRIPT,
   EMBED_UNMUTE_OVERLAY_SCRIPT,
+  GUEST_ACTIVITY_SCRIPT,
   RIVESTREAM_HIDE_SERVER_CHROME_SCRIPT,
   RIVESTREAM_PREFER_DIRECT_SCRIPT,
   RIVESTREAM_PREFER_ENGLISH_AUDIO_SCRIPT,
@@ -28,6 +29,7 @@ import {
   isStreamFreeEmbedUrl,
   sameBrowserPageUrl,
   toAutoplayUrl,
+  WEB_GUEST_ACTIVITY_EVENT,
 } from '../lib/webBrowser'
 import { takePromotedEmbed } from '../lib/multiviewCollapse'
 import { RIVESTREAM_EMBED_AUTO_SCRIPT } from '../lib/rivestreamEmbedAuto'
@@ -329,6 +331,18 @@ function fullscreenBounds(opts?: { fullBleed?: boolean }): BrowserBounds {
     y: top,
     width: Math.max(1, Math.round(window.innerWidth)),
     height: Math.max(1, Math.round(window.innerHeight - top)),
+  }
+}
+
+/**
+ * Desktop Full goes edge-to-edge only while the /web top bar is auto-hidden. The
+ * native view paints over HTML, so a full-bleed view would bury Back / Exit.
+ */
+function webChromeHidden(): boolean {
+  try {
+    return Boolean(document.querySelector('.web-browser-page.chrome-hidden'))
+  } catch {
+    return false
   }
 }
 
@@ -836,7 +850,7 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
       await showAt(pipFullscreenBounds())
       return
     }
-    await showAt(fullscreenBounds({ fullBleed: true }))
+    await showAt(fullscreenBounds({ fullBleed: webChromeHidden() }))
   }, [android, showAt])
 
   const attachFrame = useCallback(
@@ -854,7 +868,7 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
             void showAt(letterboxedFullscreenBounds(embedAspectRef.current))
           } else {
             void showAt(
-              modeRef.current === 'pip' ? pipFullscreenBounds() : fullscreenBounds({ fullBleed: true }),
+              modeRef.current === 'pip' ? pipFullscreenBounds() : fullscreenBounds({ fullBleed: webChromeHidden() }),
             )
           }
           return
@@ -1283,7 +1297,7 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
         void showAt(pipFullscreenBounds())
         return
       }
-      void showAt(fullscreenBounds({ fullBleed: true }))
+      void showAt(fullscreenBounds({ fullBleed: webChromeHidden() }))
       return
     }
     if (modeRef.current === 'pip') {
@@ -1292,6 +1306,59 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
     }
     if (frameRef.current) void showAt(boundsFromElement(frameRef.current))
   }, [android, desktop, fullscreen, showAt])
+
+  const toggleFullscreenRef = useRef(toggleFullscreen)
+  toggleFullscreenRef.current = toggleFullscreen
+
+  // Desktop: mouse / keys over the native view never reach the HTML top bar, and the
+  // embed's own Full button is blocked. Poll counters kept inside the guest frames:
+  // input reveals the bar, a fullscreen request toggles Jiyu's Full.
+  useEffect(() => {
+    if (!electron || mode !== 'page') return
+    let stopped = false
+    let busy = false
+    let seeded = false
+    let prev = new Map<string, { act: number; fs: number }>()
+    const tick = async () => {
+      if (stopped || busy) return
+      busy = true
+      try {
+        const res = (await execInGuest(GUEST_ACTIVITY_SCRIPT)) as {
+          frameResults?: Array<{ ok?: boolean; url?: string; result?: unknown }>
+        } | null
+        if (stopped || !res || !Array.isArray(res.frameResults)) return
+        const next = new Map<string, { act: number; fs: number }>()
+        let activity = false
+        let fsRequest = false
+        for (const entry of res.frameResults) {
+          const m = entry?.ok ? String(entry.result ?? '').match(/^jiyu-act:(\d+):(\d+)$/) : null
+          if (!m) continue
+          let key = String(entry.url || '')
+          while (next.has(key)) key += '#'
+          const cur = { act: Number(m[1]), fs: Number(m[2]) }
+          next.set(key, cur)
+          const before = prev.get(key)
+          if (!seeded || !before) continue
+          if (cur.act > before.act) activity = true
+          if (cur.fs > before.fs) fsRequest = true
+        }
+        // A frame that timed out this round keeps its last counts (no false trigger later).
+        for (const [key, value] of prev) if (!next.has(key)) next.set(key, value)
+        prev = next
+        seeded = true
+        if (activity) window.dispatchEvent(new Event(WEB_GUEST_ACTIVITY_EVENT))
+        if (fsRequest && modeRef.current === 'page') toggleFullscreenRef.current()
+      } finally {
+        busy = false
+      }
+    }
+    void tick()
+    const timer = window.setInterval(() => void tick(), fullscreen ? 450 : 1000)
+    return () => {
+      stopped = true
+      window.clearInterval(timer)
+    }
+  }, [electron, mode, fullscreen, execInGuest])
 
   // Immersive Full toggles sidebar/safe-area after the first showAt — re-fit so
   // Gecko stays under the compact control strip instead of covering it.
