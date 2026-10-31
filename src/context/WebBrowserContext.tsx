@@ -18,12 +18,14 @@ import {
   RIVESTREAM_HIDE_SERVER_CHROME_SCRIPT,
   RIVESTREAM_PREFER_DIRECT_SCRIPT,
   RIVESTREAM_PREFER_ENGLISH_AUDIO_SCRIPT,
+  STREAMFREE_EMBED_PLAY_SCRIPT,
   isDesktopApp,
   isCloudflareChallengeTarget,
   isBlankBrowserUrl,
   isEmbedPlayerHost,
   isPlaceholderBrowserTitle,
   isSportsOrReplayEmbedUrl,
+  isStreamFreeEmbedUrl,
   sameBrowserPageUrl,
   toAutoplayUrl,
 } from '../lib/webBrowser'
@@ -501,6 +503,58 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
     unwrapTickRef.current = tick
   }, [execInGuest, stopUnwrapCover])
 
+  /**
+   * StreamFree: keep pressing JW play while its player is idle (see
+   * STREAMFREE_EMBED_PLAY_SCRIPT). Runs until the page leaves StreamFree, the browser
+   * closes, or 3h pass, so a "starting soon" feed that goes live later still starts.
+   */
+  const streamFreeLoopRef = useRef<{ url: string; timer: number }>({ url: '', timer: 0 })
+  const stopStreamFreeLoop = useCallback(() => {
+    window.clearInterval(streamFreeLoopRef.current.timer)
+    streamFreeLoopRef.current = { url: '', timer: 0 }
+  }, [])
+  const startStreamFreeLoop = useCallback(
+    (url: string) => {
+      if (!isStreamFreeEmbedUrl(url)) return
+      if (streamFreeLoopRef.current.url === url && streamFreeLoopRef.current.timer) return
+      stopStreamFreeLoop()
+      const startedAt = Date.now()
+      let busy = false
+      let kicked = false
+      let restored = false
+      const tick = () => {
+        if (busy) return
+        const page = navUrlForNudgeRef.current || ''
+        if (modeRef.current === 'off' || Date.now() - startedAt > 3 * 3600_000 || (page && !isStreamFreeEmbedUrl(page))) {
+          stopStreamFreeLoop()
+          return
+        }
+        busy = true
+        void execInGuest(STREAMFREE_EMBED_PLAY_SCRIPT).then(async (res) => {
+          busy = false
+          const text = (() => { try { return JSON.stringify(res) || '' } catch { return '' } })()
+          if (text.includes('sf-kick')) kicked = true
+          if (text.includes('sf-on') && kicked && !restored && electron) {
+            // Main-process sports kick mutes the view and only unmutes inside its ~27s
+            // window; a late StreamFree start would stay silent. Re-apply the user level.
+            restored = true
+            try {
+              const pct = Number((await window.signalDesktop?.browserGetVolume?.())?.percent)
+              await window.signalDesktop?.browserSetVolume?.(Number.isFinite(pct) ? pct : 100)
+            } catch {
+              /* ignore */
+            }
+          }
+          if (text.includes('sf-kick')) restored = false
+        })
+      }
+      streamFreeLoopRef.current = { url, timer: window.setInterval(tick, 2000) }
+      window.setTimeout(tick, 600)
+    },
+    [electron, execInGuest, stopStreamFreeLoop],
+  )
+  useEffect(() => () => stopStreamFreeLoop(), [stopStreamFreeLoop])
+
   const nudgePlayback = useCallback((urlOverride?: string, opts?: { early?: boolean }) => {
     if (!desktop) return
     const runScript = (script: string) => {
@@ -509,6 +563,8 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
     }
     const url = (urlOverride || navUrlForNudgeRef.current || '').trim()
     if (isCinetaroCatalogPageUrl(url) || isCloudflareChallengeTarget(url, nav.title)) return
+    // StreamFree mounts JW idle outside its own site: own play loop (idempotent per URL).
+    startStreamFreeLoop(url)
     const now = Date.now()
     // Always re-hide Rive server chrome — autoplay throttle must not skip this.
     if (/rivestream\.(ru|app)/i.test(url) || /vaplayer\.ru|vidup\.to|videasy\.to|cinezo\.live|vidzee\.wtf|mapple\.fun|primesrc\.me|streamingnow\.mov/i.test(url)) {
@@ -667,7 +723,7 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
     autoplayTimers.current.push(window.setTimeout(runClick, 4000))
     autoplayTimers.current.push(window.setTimeout(runCore, 5500))
     autoplayTimers.current.push(window.setTimeout(runAds, 7000))
-  }, [android, clearAutoplayTimers, desktop, electron])
+  }, [android, clearAutoplayTimers, desktop, electron, startStreamFreeLoop])
 
   /**
    * Resize into the corner pauses Gecko. Call play() on a paused video.

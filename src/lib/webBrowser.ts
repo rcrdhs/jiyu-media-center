@@ -706,6 +706,41 @@ export const RIVESTREAM_PREFER_ENGLISH_AUDIO_SCRIPT = `(() => {
   }
 })();`
 
+/** StreamFree embeds (strmfree.st, streamfree.top and mirrors). */
+export function isStreamFreeEmbedUrl(url: string): boolean {
+  return /^https?:\/\/([a-z0-9-]+\.)*(strmfree|streamfree)\.[a-z]{2,}(\/|$)/i.test(String(url || ''))
+}
+
+/**
+ * StreamFree turns JW autostart on only when the parent page is its own site, so in Jiyu
+ * the player mounts idle. When a feed is "starting soon" it builds the player only once
+ * it goes live (10s polls), long after the main-process kick window (~27s). The generic
+ * kick also awaits video.play() on the idle JW <video> (no src yet), which never settles,
+ * so its jwplayer().play() fallback never runs. Called on a timer by the renderer:
+ * presses JW play (muted; sound restored once it plays) while the player is idle and the
+ * user has not paused it. While the page shows its own "Stream starting soon" card, the
+ * Jiyu cover is dropped so that message is visible instead of a look-alike spinner.
+ * Results: sf-none / sf-soon / sf-wait / sf-kick / sf-on / sf-held (no 'play' words).
+ */
+export const STREAMFREE_EMBED_PLAY_SCRIPT = `(function(){try{
+var h=String(location.hostname||'').toLowerCase();
+if(h.indexOf('strmfree.')<0&&h.indexOf('streamfree.')<0)return 'sf-none';
+var w=window,d=document,now=Date.now();
+var soon=d.getElementById('starting-soon-message');
+if(soon&&soon.classList&&soon.classList.contains('show')){w.__jiyuUnwrapDone=true;var c=d.getElementById('__jiyu_unwrap_cover');if(c&&c.parentNode)c.parentNode.removeChild(c);return 'sf-soon';}
+if(typeof w.jwplayer!=='function')return 'sf-wait';
+var p=w.jwplayer('jwplayer');if(!p||typeof p.getState!=='function'||typeof p.play!=='function')return 'sf-wait';
+var st=String(p.getState()||'');
+if(!p.__jiyuSfHooked&&typeof p.on==='function'){p.__jiyuSfHooked=1;p.on('pause',function(e){if(e&&e.pauseReason==='interaction')w.__jiyuSfHeld=true;});p.on('play',function(){w.__jiyuSfHeld=false;});}
+if(st==='playing'){w.__jiyuSfStarted=true;if(w.__jiyuSfMuted){w.__jiyuSfMuted=false;var lv=w.__jiyuVolLevel;if(!(typeof lv==='number'&&lv<=0.001)){try{p.setMute(false);}catch(e){}}}return 'sf-on';}
+if(st==='buffering')return 'sf-wait';
+if(w.__jiyuSfHeld||(st==='paused'&&w.__jiyuSfStarted))return 'sf-held';
+if((w.__jiyuSfKicks||0)>=60||now-(w.__jiyuSfKickAt||0)<4000)return 'sf-wait';
+w.__jiyuSfKicks=(w.__jiyuSfKicks||0)+1;w.__jiyuSfKickAt=now;
+try{p.setMute(true);w.__jiyuSfMuted=true;}catch(e){}
+p.play();return 'sf-kick';
+}catch(e){return 'sf-wait';}})()`
+
 /**
  * Sports embeds often refuse to play when nested in a sandboxed iframe
  * ("Remove sandbox attributes on the iframe tag"). Android WebView hosts
