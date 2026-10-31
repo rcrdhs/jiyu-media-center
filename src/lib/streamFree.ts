@@ -169,14 +169,24 @@ async function fetchStreamsPayload(): Promise<JsonResult<{ streams?: StreamFreeS
 const CHANNEL_NAME_RE =
   /\b(red\s*zone|sky\s*sports?|willow|dazn|espn\s*\d?|tnt\s*sports?|bein|24\s*\/\s*7|channel|network)\b/i
 const CHANNEL_LEAGUE_RE = /^(sky|dazn|willow|redzone|24\s*\/\s*7|tv|channels?)$/i
+/** A team-less row "started" longer ago than this is an always-on feed, not an event. */
+const CHANNEL_MIN_AGE_SEC = 24 * 60 * 60
 
-export function isStreamFreeChannel(stream: StreamFreeStream): boolean {
+/**
+ * Single events (UFC cards, boxing, F1 races, tennis/cricket matches) often
+ * come without team1/team2 — keep them; only always-on channel feeds drop.
+ */
+export function isStreamFreeChannel(stream: StreamFreeStream, nowSec = unixSecondsNow()): boolean {
+  const name = String(stream.name || '').trim()
   const home = String(stream.team1?.name || '').trim()
   const away = String(stream.team2?.name || '').trim()
-  if (!home || !away) return true
+  if (home && away) return CHANNEL_NAME_RE.test(name)
+  // "Canelo vs. Mbilli" (league DAZN) is a fight, not the DAZN channel.
+  if (splitMatchTitle(name)) return false
+  if (CHANNEL_NAME_RE.test(name)) return true
   if (CHANNEL_LEAGUE_RE.test(String(stream.league || '').trim())) return true
-  if (CHANNEL_NAME_RE.test(String(stream.name || ''))) return true
-  return false
+  const startSec = Number(stream.match_timestamp) || 0
+  return startSec > 0 && startSec < nowSec - CHANNEL_MIN_AGE_SEC
 }
 
 /** Shelf sport tag, aligned with PPV.st category tags so filter chips merge. */
@@ -242,7 +252,7 @@ export function streamFreeStreamToItem(
   const key = String(stream?.stream_key || stream?.id || '').trim()
   const title = String(stream?.name || '').trim()
   if (!key || !title) return null
-  if (isStreamFreeChannel(stream)) return null
+  if (isStreamFreeChannel(stream, nowSec)) return null
 
   const live = Array.isArray(stream.live_sources) && stream.live_sources.length > 0
   const startSec = Number(stream.match_timestamp) || 0
@@ -256,7 +266,8 @@ export function streamFreeStreamToItem(
   const category = String(stream.category || 'sports').trim()
   const sportTag = categoryTag(category)
   const league = String(stream.league || '').trim()
-  const eventSport = league || titleCase(category) || 'Sports'
+  const eventSport =
+    (league && !CHANNEL_LEAGUE_RE.test(league) ? league : '') || titleCase(category) || 'Sports'
   const when =
     startSec > 0
       ? new Date(startSec * 1000).toLocaleString(undefined, {
