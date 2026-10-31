@@ -409,10 +409,10 @@ export function isSameSportsFixture(a: StreamItem, b: StreamItem): boolean {
 }
 
 /**
- * One card per match: a StreamFree row that duplicates a PPV.st row folds into
- * it (PPV stays the primary player; StreamFree embeds ride along in
- * sportsAltSources, and its crests / live flag fill gaps). Unmatched StreamFree
- * rows are appended.
+ * A StreamFree row that duplicates a PPV.st row lends the PPV card its crests /
+ * viewers and rides along in sportsAltSources, but it is ALSO kept as its own
+ * card: no screen offers sportsAltSources yet, so folding hid StreamFree's link
+ * entirely (e.g. Canelo vs. Mbilli only showed as the PPV.st card).
  */
 export function mergeStreamFreeWithPpv(ppvItems: StreamItem[], sfItems: StreamItem[]): StreamItem[] {
   const merged = ppvItems.map((item) => ({ ...item }))
@@ -420,10 +420,8 @@ export function mergeStreamFreeWithPpv(ppvItems: StreamItem[], sfItems: StreamIt
   const extra: StreamItem[] = []
   for (const sf of sfItems) {
     const twin = sportsRows.find((p) => isSameSportsFixture(p, sf))
-    if (!twin) {
-      extra.push(sf)
-      continue
-    }
+    extra.push(sf)
+    if (!twin) continue
     const alts = [
       ...(twin.sportsAltSources || []),
       { label: 'StreamFree', url: sf.url },
