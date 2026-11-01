@@ -4,8 +4,11 @@
  * Play: the site's own embed page (/embed/{category}/{key}{1080p|540p}) in the
  * Web Browser, same as PPV.st iframes. No native HLS token scraping.
  *
- * Mirrors: when the primary API host fails, the site's public mirror directory
+ * Hosts: streamfree.top first, then its backup strmfree.st (same site, same
+ * API and embed pages). Only when both fail, the site's public mirror directory
  * (strmfree.link/api/domains) lists other hosts that serve the same API.
+ * Embed / thumbnail URLs are moved onto whichever host answered the API, with
+ * the other StreamFree host kept as an alternate source.
  */
 
 import type { StreamItem } from '../types'
@@ -16,7 +19,13 @@ const STREAMFREE_MIRROR_DIRECTORIES = [
   'https://strmfree.link/api/domains',
   'https://strmfree.st/api/domains',
 ]
+/** Backup domain (Ricardo, Nov 1 2026): tried right after streamfree.top. */
+export const STREAMFREE_BACKUP_ORIGIN = 'https://strmfree.st'
 const STREAMFREE_FALLBACK_HOSTS = ['strmfree.st']
+/** One API attempt; past this the next host is tried (main-process fetch allows 30s). */
+const API_TIMEOUT_MS = 12_000
+/** After the primary fails, try the host that answered first for this long. */
+const PRIMARY_RETRY_AFTER_MS = 5 * 60_000
 /** Upcoming rows further out than this stay off the shelf (matches PPV.st). */
 const UPCOMING_WINDOW_SEC = 3 * 24 * 60 * 60
 /** Not live and started this long ago → finished leftover. */
@@ -68,7 +77,15 @@ function unixSecondsNow(): number {
 
 type JsonResult<T> = { ok: true; data: T } | { ok: false; error: string }
 
-async function fetchJsonUrl<T>(url: string, referer: string): Promise<JsonResult<T>> {
+function fetchJsonUrl<T>(url: string, referer: string): Promise<JsonResult<T>> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<JsonResult<T>>((resolve) => {
+    timer = setTimeout(() => resolve({ ok: false, error: 'Timed out' }), API_TIMEOUT_MS)
+  })
+  return Promise.race([fetchJsonUrlRaw<T>(url, referer), timeout]).finally(() => clearTimeout(timer))
+}
+
+async function fetchJsonUrlRaw<T>(url: string, referer: string): Promise<JsonResult<T>> {
   if (window.signalDesktop?.fetchJsonGet) {
     const result = await window.signalDesktop.fetchJsonGet(url, referer)
     if (!result.ok) return { ok: false, error: result.error || `HTTP ${result.status}` }
@@ -115,8 +132,29 @@ function normalizeHost(value: unknown): string {
 }
 
 let mirrorHostsCache: { at: number; hosts: string[] } | null = null
-/** Host that last answered; tried first on the next refresh. */
+/** Host that last answered (a backup while the primary is down). */
 let lastGoodHost = ''
+let primaryFailedAt = 0
+let primaryFailedHost = ''
+
+/** streamfree.top, strmfree.st and their mirrors (strmfree.link, …). */
+export function isStreamFreeHost(host: string): boolean {
+  return /(^|\.)(strmfree|streamfree)\.[a-z]{2,}$/i.test(String(host || ''))
+}
+
+/** Move a StreamFree embed / thumbnail URL onto `host` (other URLs unchanged). */
+export function rehostStreamFreeUrl(url: string, host: string): string {
+  if (!host) return url
+  try {
+    const u = new URL(url)
+    if (!isStreamFreeHost(u.hostname) || u.hostname === host) return url
+    if (!/^\/(embed|thumbnails)\//i.test(u.pathname)) return url
+    u.hostname = host
+    return u.toString()
+  } catch {
+    return url
+  }
+}
 
 async function mirrorHosts(): Promise<string[]> {
   if (mirrorHostsCache && Date.now() - mirrorHostsCache.at < 30 * 60_000) {
@@ -135,25 +173,44 @@ async function mirrorHosts(): Promise<string[]> {
   return STREAMFREE_FALLBACK_HOSTS
 }
 
-async function fetchStreamsPayload(): Promise<JsonResult<{ streams?: StreamFreeStream[] }>> {
-  const primary = normalizeHost(STREAMFREE_ORIGIN)
+type StreamsPayload = { streams?: StreamFreeStream[] }
+
+async function fetchStreamsPayload(
+  primaryOrigin = STREAMFREE_ORIGIN,
+): Promise<{ ok: true; data: StreamsPayload; host: string } | { ok: false; error: string }> {
+  const primary = normalizeHost(primaryOrigin)
+  const backup = normalizeHost(STREAMFREE_BACKUP_ORIGIN)
   const tried = new Set<string>()
   let lastError = 'StreamFree unavailable'
   const attempt = async (host: string) => {
     if (!host || tried.has(host)) return null
     tried.add(host)
-    const result = await fetchJsonUrl<{ streams?: StreamFreeStream[] }>(
+    const result = await fetchJsonUrl<StreamsPayload>(
       `https://${host}/api/v1/streams`,
       `https://${host}/`,
     )
     if (result.ok && Array.isArray(result.data?.streams)) {
       lastGoodHost = host
-      return result
+      if (host === primary) primaryFailedAt = 0
+      return { ok: true as const, data: result.data, host }
     }
-    lastError = result.ok ? 'StreamFree returned no streams' : result.error
+    lastError = `${host}: ${result.ok ? 'no streams in response' : result.error}`
+    if (host === primary) {
+      primaryFailedAt = Date.now()
+      primaryFailedHost = primary
+    }
     return null
   }
-  for (const host of [lastGoodHost, primary]) {
+  // streamfree.top first; strmfree.st on error / timeout / non-2xx / bad JSON. While the
+  // primary was down in the last few minutes, start on the host that answered instead
+  // so each 90s poll doesn't wait out the primary's timeout first.
+  const primaryCooling =
+    primaryFailedHost === primary &&
+    Date.now() - primaryFailedAt < PRIMARY_RETRY_AFTER_MS &&
+    lastGoodHost &&
+    lastGoodHost !== primary
+  const order = primaryCooling ? [lastGoodHost, primary, backup] : [primary, backup, lastGoodHost]
+  for (const host of order) {
     const hit = await attempt(host)
     if (hit) return hit
   }
@@ -232,17 +289,41 @@ function pickSource(sources: StreamFreeSource[] | undefined, quality: RegExp): s
 }
 
 /** FHD first, then SD, then anything with a URL. */
-export function streamFreeSourceUrls(stream: StreamFreeStream): Array<{ label: string; url: string }> {
+/**
+ * FHD first, then SD, then anything with a URL. With `apiHost`, StreamFree embeds
+ * move onto the host that answered the API and the API's own host stays as an
+ * alternate (e.g. "StreamFree FHD · strmfree.st").
+ */
+export function streamFreeSourceUrls(
+  stream: StreamFreeStream,
+  apiHost = '',
+): Array<{ label: string; url: string }> {
   const pool = stream.live_sources?.length ? stream.live_sources : stream.sources
-  const out: Array<{ label: string; url: string }> = []
+  const base: Array<{ label: string; url: string }> = []
   const fhd = pickSource(pool, /fhd|1080|hd/i)
   const sd = pickSource(pool, /^sd$|540|480/i)
-  if (fhd) out.push({ label: 'StreamFree FHD', url: fhd })
-  if (sd && sd !== fhd) out.push({ label: 'StreamFree SD', url: sd })
+  if (fhd) base.push({ label: 'StreamFree FHD', url: fhd })
+  if (sd && sd !== fhd) base.push({ label: 'StreamFree SD', url: sd })
   for (const s of pool || []) {
     const url = String(s?.url || '').trim()
-    if (!url || !/^https?:\/\//i.test(url) || out.some((o) => o.url === url)) continue
-    out.push({ label: `StreamFree ${String(s?.quality || '').trim() || 'Stream'}`, url })
+    if (!url || !/^https?:\/\//i.test(url) || base.some((o) => o.url === url)) continue
+    base.push({ label: `StreamFree ${String(s?.quality || '').trim() || 'Stream'}`, url })
+  }
+  if (!apiHost) return base
+  const out: Array<{ label: string; url: string }> = []
+  for (const s of base) {
+    const url = rehostStreamFreeUrl(s.url, apiHost)
+    if (!out.some((o) => o.url === url)) out.push({ label: s.label, url })
+  }
+  for (const s of base) {
+    if (out.some((o) => o.url === s.url)) continue
+    let host = ''
+    try {
+      host = new URL(s.url).hostname
+    } catch {
+      /* ignore */
+    }
+    out.push({ label: host ? `${s.label} · ${host}` : s.label, url: s.url })
   }
   return out
 }
@@ -250,6 +331,8 @@ export function streamFreeSourceUrls(stream: StreamFreeStream): Array<{ label: s
 export function streamFreeStreamToItem(
   stream: StreamFreeStream,
   nowSec = unixSecondsNow(),
+  /** Host that answered /api/v1/streams; embeds + thumbnails follow it. */
+  apiHost = '',
 ): StreamItem | null {
   const key = String(stream?.stream_key || stream?.id || '').trim()
   const title = String(stream?.name || '').trim()
@@ -263,7 +346,7 @@ export function streamFreeStreamToItem(
     if (startSec > 0 && startSec < nowSec - STALE_AFTER_START_SEC) return null
     if (startSec > nowSec + UPCOMING_WINDOW_SEC) return null
   }
-  const sources = streamFreeSourceUrls(stream)
+  const sources = streamFreeSourceUrls(stream, apiHost)
   if (!sources.length) return null
 
   const category = String(stream.category || 'sports').trim()
@@ -289,7 +372,7 @@ export function streamFreeStreamToItem(
     ? String(stream.team2?.logo)
     : undefined
   const thumb = /^https?:\/\//i.test(String(stream.thumbnail_url || ''))
-    ? String(stream.thumbnail_url)
+    ? rehostStreamFreeUrl(String(stream.thumbnail_url), apiHost)
     : undefined
 
   return {
@@ -298,7 +381,7 @@ export function streamFreeStreamToItem(
     description: [eventSport, 'StreamFree', alwaysLive ? '24/7' : when].filter(Boolean).join(' · '),
     category: 'sports',
     url: sources[0].url,
-    detailUrl: `${STREAMFREE_ORIGIN}/`,
+    detailUrl: apiHost ? `https://${apiHost}/` : `${STREAMFREE_ORIGIN}/`,
     poster: thumb || homeBadgeUrl || awayBadgeUrl,
     homeBadgeUrl,
     awayBadgeUrl,
@@ -328,21 +411,25 @@ export function isStreamFreeLiveNow(item: StreamItem): boolean {
   return isStreamFreeCatalogItem(item) && Boolean(item.tags?.includes('live-now'))
 }
 
-export async function fetchStreamFreeLiveCatalog(): Promise<
-  { ok: true; items: StreamItem[] } | { ok: false; error: string; items: StreamItem[] }
+export async function fetchStreamFreeLiveCatalog(options?: {
+  /** Tests only: point the primary at a host that fails to exercise the backup. */
+  primaryOrigin?: string
+}): Promise<
+  | { ok: true; items: StreamItem[]; host: string }
+  | { ok: false; error: string; items: StreamItem[] }
 > {
-  const result = await fetchStreamsPayload()
+  const result = await fetchStreamsPayload(options?.primaryOrigin)
   if (!result.ok) return { ok: false, error: result.error, items: [] }
   const nowSec = unixSecondsNow()
   const items: StreamItem[] = []
   const seen = new Set<string>()
   for (const stream of result.data.streams || []) {
-    const item = streamFreeStreamToItem(stream, nowSec)
+    const item = streamFreeStreamToItem(stream, nowSec, result.host)
     if (!item || seen.has(item.id)) continue
     seen.add(item.id)
     items.push(item)
   }
-  return { ok: true, items }
+  return { ok: true, items, host: result.host }
 }
 
 // ── Dedupe against PPV.st ────────────────────────────────────────────────
