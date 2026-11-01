@@ -12,6 +12,11 @@ export const APP_VERSION_LABEL = `v${APP_VERSION}`
 /** Short milestone log — newest first — so progress is visible in-app. */
 export const APP_RELEASES: ReadonlyArray<{ version: string; summary: string }> = [
   {
+    version: '0.3.91',
+    summary:
+      'Jiyu no longer crashes when it opens on Google TV and Android TV 11/12 boxes, and recovers instead of closing if the TV runs low on memory; the TV remote\'s D-pad now moves predictably everywhere: focus no longer gets lost after picking a section, closing the guide or changing page, and search only opens the keyboard when you press OK; Sports gets StreamFree as a new source (replacing Streamed.pk), with 24/7 channels and fights and races included, sound on and its starting-soon card; in Full mode the top bar stays reachable; PPV events reload by themselves when the stream stalls at start; Samsung TVs pick Movy streams that play smoothly and, when Movy can\'t play a movie or episode, fall back to other sources so more titles play',
+  },
+  {
     version: '0.3.90',
     summary:
       'Series no longer list episodes that have not aired yet; the Streamo source, which had stopped working, is removed; Samsung TVs hide movies they cannot play, check that a show really plays before putting it on a shelf, get a Full match / halves / Highlights picker for football replays, and play Movy anime and series through the Jiyu PC on the same Wi-Fi (leave npm run roku-hls running); a first Roku channel (installed separately) plays TVJ, Nationwide and live football through the PC',
