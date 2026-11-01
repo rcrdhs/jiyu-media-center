@@ -15,6 +15,23 @@
   }
 })();
 
+/* PPV start retry (electron/ppv-start-retry.js): reloads PPV.st mirror embeds whose JW Player
+   start stalls or falls back to the Clappr backup. */
+(function () {
+  try {
+    if (typeof JIYU_PPV_START_RETRY_SRC !== "string" || !JIYU_PPV_START_RETRY_SRC) return;
+    if (!/^\/embed\//i.test(location.pathname || "")) return;
+    var root = document.documentElement || document.head || document.body;
+    if (!root) return;
+    var el = document.createElement("script");
+    el.textContent = JIYU_PPV_START_RETRY_SRC;
+    root.appendChild(el);
+    el.remove();
+  } catch (_) {
+    /* CSP / detached document */
+  }
+})();
+
 (function () {
   function runCode(code) {
     return new Promise(function (resolve) {

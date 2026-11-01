@@ -1014,6 +1014,15 @@ const BROWSER_LIVE_REWIND_GUARD_SCRIPT = (() => {
   }
 })()
 
+/** Reloads PPV.st mirror embeds whose JW Player start stalls (see electron/ppv-start-retry.js). */
+const BROWSER_PPV_START_RETRY_SCRIPT = (() => {
+  try {
+    return fs.readFileSync(path.join(__dirname, 'ppv-start-retry.js'), 'utf8')
+  } catch {
+    return ''
+  }
+})()
+
 async function installBrowserFrameScript(contents, script) {
   if (!contents || contents.isDestroyed()) return
   const frames = collectContentFrames(contents, { maxFrames: 10 })
@@ -1036,6 +1045,9 @@ async function installBrowserWheelVolume(contents) {
   await installBrowserFrameScript(contents, BROWSER_SEEK_OVERLAY_SCRIPT)
   if (BROWSER_LIVE_REWIND_GUARD_SCRIPT) {
     await installBrowserFrameScript(contents, BROWSER_LIVE_REWIND_GUARD_SCRIPT)
+  }
+  if (BROWSER_PPV_START_RETRY_SCRIPT) {
+    await installBrowserFrameScript(contents, BROWSER_PPV_START_RETRY_SCRIPT)
   }
 }
 
@@ -4876,6 +4888,9 @@ function installWebBrowserHandlers(view) {
             void frame.executeJavaScript(BROWSER_AD_SHIELD_SCRIPT, true)
             if (BROWSER_LIVE_REWIND_GUARD_SCRIPT) {
               void frame.executeJavaScript(BROWSER_LIVE_REWIND_GUARD_SCRIPT, true)
+            }
+            if (BROWSER_PPV_START_RETRY_SCRIPT) {
+              void frame.executeJavaScript(BROWSER_PPV_START_RETRY_SCRIPT, true)
             }
           }
         } catch {
