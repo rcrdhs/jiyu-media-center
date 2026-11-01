@@ -36,6 +36,7 @@ public class MainActivity extends BridgeActivity {
 
   @Override
   public void onCreate(Bundle savedInstanceState) {
+    CrashLog.install(getApplicationContext());
     SplashScreen.installSplashScreen(this);
     registerPlugin(TorrentStreamerPlugin.class);
     registerPlugin(InAppBrowserPlugin.class);
@@ -48,6 +49,7 @@ public class MainActivity extends BridgeActivity {
     registerPlugin(app.jiyu.mediacenter.sync.SyncSecretPlugin.class);
     super.onCreate(savedInstanceState);
     applyDarkSystemBars();
+    CrashLog.showPendingIfAny(this);
     // Splash / Capacitor can flip icon appearance after first paint — re-assert.
     try {
       View decor = getWindow() != null ? getWindow().getDecorView() : null;

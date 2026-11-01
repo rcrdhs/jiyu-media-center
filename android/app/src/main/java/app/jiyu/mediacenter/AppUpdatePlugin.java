@@ -64,7 +64,7 @@ public class AppUpdatePlugin extends Plugin {
         ret.put("versionCode", feed.versionCode);
         ret.put("installedVersionCode", installed);
         call.resolve(ret);
-      } catch (Exception err) {
+      } catch (Throwable err) {
         call.reject(err.getMessage() == null ? "Update check failed" : err.getMessage());
       }
     });
@@ -97,7 +97,7 @@ public class AppUpdatePlugin extends Plugin {
         ret.put("ok", true);
         ret.put("version", feed.version);
         call.resolve(ret);
-      } catch (Exception err) {
+      } catch (Throwable err) {
         if (apk != null && apk.exists()) apk.delete();
         call.reject(err.getMessage() == null ? "Update download failed" : err.getMessage());
       } finally {
@@ -147,7 +147,7 @@ public class AppUpdatePlugin extends Plugin {
         JSObject ret = new JSObject();
         ret.put("ok", true);
         call.resolve(ret);
-      } catch (Exception err) {
+      } catch (Throwable err) {
         call.reject(err.getMessage() == null ? "Could not open the installer" : err.getMessage());
       }
     });
@@ -260,7 +260,8 @@ public class AppUpdatePlugin extends Plugin {
       if (total > max) throw new IOException("Update feed is too large");
       out.write(buf, 0, n);
     }
-    return out.toString(StandardCharsets.UTF_8);
+    // toString(Charset) is API 33; Android TV 11/12 threw NoSuchMethodError here at launch.
+    return new String(out.toByteArray(), StandardCharsets.UTF_8);
   }
 
   private static String hex(byte[] bytes) {

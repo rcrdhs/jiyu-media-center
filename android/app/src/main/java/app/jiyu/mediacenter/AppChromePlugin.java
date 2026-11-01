@@ -49,6 +49,21 @@ public class AppChromePlugin extends Plugin {
     });
   }
 
+  /** Last native crash (sanitized), for Settings / bug reports. */
+  @PluginMethod
+  public void getCrashLog(PluginCall call) {
+    JSObject ret = new JSObject();
+    String log = CrashLog.read(getContext());
+    ret.put("log", log);
+    call.resolve(ret);
+  }
+
+  @PluginMethod
+  public void clearCrashLog(PluginCall call) {
+    CrashLog.clear(getContext());
+    call.resolve();
+  }
+
   @PluginMethod
   public void setImmersive(PluginCall call) {
     Boolean enabled = call.getBoolean("enabled", false);
