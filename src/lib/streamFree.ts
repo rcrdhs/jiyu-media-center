@@ -307,7 +307,9 @@ export function streamFreeStreamToItem(
       'streamfree',
       'web-embed',
       sportTag,
-      ...(alwaysLive ? ['always-live'] : []),
+      // Same chip id as PPV.st's "24/7 Streams" category, so RedZone / Sky Sports /
+      // Willow show under that chip too (they only matched their sport chip before).
+      ...(alwaysLive ? ['always-live', '24/7-streams'] : []),
       live ? 'live-now' : 'upcoming',
     ],
     source: 'StreamFree',
