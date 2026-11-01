@@ -50,6 +50,29 @@ public class MainActivity extends BridgeActivity {
     super.onCreate(savedInstanceState);
     applyDarkSystemBars();
     CrashLog.showPendingIfAny(this);
+    // Low-RAM TVs can kill the WebView renderer; without a handler Chromium aborts the whole app.
+    try {
+      if (bridge != null) {
+        bridge.addWebViewListener(new com.getcapacitor.WebViewListener() {
+          @Override
+          public boolean onRenderProcessGone(android.webkit.WebView view, android.webkit.RenderProcessGoneDetail detail) {
+            boolean crashed = detail != null && detail.didCrash();
+            CrashLog.record(MainActivity.this, new RuntimeException("WebView renderer gone (crashed=" + crashed + ")"));
+            try {
+              android.view.ViewParent parent = view.getParent();
+              if (parent instanceof android.view.ViewGroup) ((android.view.ViewGroup) parent).removeView(view);
+              view.destroy();
+            } catch (Throwable ignored) {}
+            try {
+              recreate();
+            } catch (Throwable err) {
+              finish();
+            }
+            return true;
+          }
+        });
+      }
+    } catch (Throwable ignored) {}
     // Splash / Capacitor can flip icon appearance after first paint — re-assert.
     try {
       View decor = getWindow() != null ? getWindow().getDecorView() : null;

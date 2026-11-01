@@ -51,6 +51,15 @@ public final class CrashLog {
     });
   }
 
+  /** Save a non-fatal but app-breaking event (e.g. WebView renderer gone) so it shows on next start. */
+  public static void record(Context context, Throwable error) {
+    if (context == null || error == null) return;
+    try {
+      Context app = context.getApplicationContext() != null ? context.getApplicationContext() : context;
+      write(app, Thread.currentThread(), error);
+    } catch (Throwable ignored) {}
+  }
+
   private static void write(Context app, Thread thread, Throwable error) throws Exception {
     StringWriter sw = new StringWriter();
     PrintWriter pw = new PrintWriter(sw);
