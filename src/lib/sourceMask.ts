@@ -75,7 +75,12 @@ function savedWebsiteLabels(): string[] {
         const label = source?.label?.trim()
         if (label && label.length >= 3) labels.push(label)
         try {
-          if (source?.url) labels.push(new URL(source.url).hostname.replace(/^www\./, ''))
+          if (source?.url) {
+            // magnet: / odd URLs have an empty hostname — never push '' (it would
+            // become /\b\b/ and stamp "source" between every word).
+            const host = new URL(source.url).hostname.replace(/^www\./, '').trim()
+            if (host.length >= 3) labels.push(host)
+          }
         } catch {
           /* ignore bad url */
         }
@@ -109,9 +114,12 @@ export function maskUserFacingMessage(raw: string): string {
 
   const labels = savedWebsiteLabels().sort((a, b) => b.length - a.length)
   for (const label of labels) {
+    if (!label || label.trim().length < 3) continue
     const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     text = text.replace(new RegExp(`\\b${escaped}\\b`, 'gi'), 'source')
   }
+
+  text = text.replace(/(?:source){2,}/gi, 'source')
 
   // Sync / catalog phrasing
   text = text.replace(/\bfrom\s+website\b/gi, 'to the catalog')

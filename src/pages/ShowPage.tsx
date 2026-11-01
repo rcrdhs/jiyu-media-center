@@ -1332,7 +1332,12 @@ export function ShowPage() {
             ) : null}
             {isMovieDetail && (
               <div className="show-movie-actions">
-                <button type="button" className="primary-btn" onClick={startMovieWatch}>
+                <button
+                  type="button"
+                  className="primary-btn"
+                  data-tv-primary=""
+                  onClick={startMovieWatch}
+                >
                   {continueEntry && continueEntry.currentTime >= 5 ? 'Continue watching' : 'Watch'}
                 </button>
               </div>
@@ -1418,12 +1423,18 @@ export function ShowPage() {
           <ol className="show-episode-list">
             {episodes.map((ep, index) => {
               const isContinue = continueEntry?.playlistIndex === index
+              const hasContinue =
+                typeof continueEntry?.playlistIndex === 'number' &&
+                continueEntry.playlistIndex >= 0 &&
+                continueEntry.playlistIndex < episodes.length
+              const tvPrimary = isContinue || (!hasContinue && index === 0)
               const busy = playingIndex === index
               return (
                 <li key={ep.key || `${ep.title}-${index}`}>
                   <button
                     type="button"
                     className={`show-episode-row${isContinue ? ' is-continue' : ''}`}
+                    data-tv-primary={tvPrimary ? '' : undefined}
                     disabled={playingIndex === index}
                     onClick={() => void playEpisode(index)}
                   >

@@ -45,6 +45,10 @@ export const TV_SURFACE_SELECTOR = '.web-frame-embed-active, .web-embed-tile-sta
 const FULL_PLAYER_SELECTOR = '.player-shell:not(.player-shell-pip):not(.player-shell-tile)'
 const PLAYER_CHROME_SELECTOR = '.player-bottom-bar, .player-bar, .player-chrome, .player-controls'
 const TEXT_INPUT_TYPES = new Set(['text', 'search', 'email', 'url', 'tel', 'password', 'number', ''])
+/** Detail pages mark their main action (Watch, resume episode) for the remote. */
+export const TV_PRIMARY_SELECTOR = '[data-tv-primary]'
+/** Back on TV with a Home search typed: HomePage clears its query. */
+export const HOME_SEARCH_RESET_EVENT = 'jiyu:home-search-reset'
 
 const KEY_DIR: Record<string, Dir> = {
   ArrowUp: 'up',
@@ -160,7 +164,7 @@ function modalScope(): HTMLElement | null {
   const player = fullPlayer()
   if (player) return player
   const dialogs = Array.from(
-    document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"], .welcome-tour, .new-titles-dialog'),
+    document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"], .welcome-tour, .new-titles-dialog, #sections-menu.is-android-portal'),
   ).filter((el) => {
     const r = el.getBoundingClientRect()
     return r.width > 2 && r.height > 2
@@ -227,6 +231,21 @@ function findNext(dir: Dir, from: HTMLElement | null, scope: ParentNode): HTMLEl
   if (!list.length) return null
   if (!from) return initialTarget(list)
   const fromRect = from.getBoundingClientRect()
+  // Up/Down inside the side rail stays in the rail (≡ → Library) before falling into content.
+  const rail = dir === 'up' || dir === 'down' ? from.closest('.sidebar') : null
+  if (rail) {
+    let railBest: HTMLElement | null = null
+    let railScore = Infinity
+    for (const el of list) {
+      if (el === from || el.contains(from) || !rail.contains(el)) continue
+      const s = score(dir, fromRect, el.getBoundingClientRect())
+      if (s != null && s < railScore) {
+        railScore = s
+        railBest = el
+      }
+    }
+    if (railBest) return railBest
+  }
   let best: HTMLElement | null = null
   let bestScore = Infinity
   for (const el of list) {
@@ -252,8 +271,14 @@ function initialTarget(list: HTMLElement[]): HTMLElement | null {
   // Prefer a Gecko surface or the main content over the nav bar.
   const surface = pool.find((el) => el.matches(TV_SURFACE_SELECTOR))
   if (surface) return surface
+  // A page's main action (detail Watch / resume episode) beats its Back link.
+  const primary = pool.find((el) => el.matches(TV_PRIMARY_SELECTOR))
+  if (primary) return primary
   const inMain = main ? pool.filter((el) => main.contains(el)) : []
-  const ordered = (inMain.length ? inMain : pool).slice().sort((a, b) => {
+  // First Down lands on content (shelves), not the search box or hero buttons.
+  const base = inMain.length ? inMain : pool
+  const content = base.filter((el) => !isTextInput(el) && !el.closest('.hero'))
+  const ordered = (content.length ? content : base).slice().sort((a, b) => {
     const ra = a.getBoundingClientRect()
     const rb = b.getBoundingClientRect()
     return ra.top - rb.top || ra.left - rb.left
@@ -266,6 +291,8 @@ function focusEl(el: HTMLElement, opts?: { smooth?: boolean; dir?: Dir }) {
     el.setAttribute('tabindex', '-1')
   }
   if (!el.matches(FOCUSABLE) && !el.hasAttribute('tabindex')) el.setAttribute('tabindex', '-1')
+  // Lock before focus() so the IME never gets a chance to pop up.
+  if (isTextInput(el)) lockIme(el)
   try {
     el.focus({ preventScroll: true })
   } catch {
@@ -348,8 +375,97 @@ function syncPointerRect() {
   void androidBrowserTvPointer(pointerMode, rect)
 }
 
+// ---------------------------------------------------------------- text fields
+
+// Focusing a text field on Android TV pops the on-screen keyboard at once, so a
+// D-pad pass over the search box would trap the user in the IME. Fields get
+// inputmode="none" while the remote is just passing through; OK opens the IME.
+const IME_LOCK_ATTR = 'data-tv-ime-lock'
+const IME_ORIG_ATTR = 'data-tv-im-orig'
+
+function lockIme(el: HTMLElement) {
+  if (el.getAttribute(IME_LOCK_ATTR) === '1') return
+  const orig = el.getAttribute('inputmode')
+  el.setAttribute(IME_ORIG_ATTR, orig ?? '')
+  el.setAttribute(IME_LOCK_ATTR, '1')
+  el.setAttribute('inputmode', 'none')
+}
+
+function restoreInputMode(el: HTMLElement) {
+  const orig = el.getAttribute(IME_ORIG_ATTR)
+  if (orig) el.setAttribute('inputmode', orig)
+  else el.removeAttribute('inputmode')
+  el.removeAttribute(IME_ORIG_ATTR)
+}
+
+/** OK on a locked field: restore its input mode and re-focus so the IME shows. */
+function openIme(el: HTMLElement) {
+  el.setAttribute(IME_LOCK_ATTR, 'open')
+  restoreInputMode(el)
+  try {
+    el.blur()
+    el.focus({ preventScroll: true })
+  } catch {
+    el.focus()
+  }
+  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+    try {
+      const end = el.value.length
+      el.setSelectionRange(end, end)
+    } catch {
+      /* type=number/email have no selection API */
+    }
+  }
+}
+
+function onFocusOut(e: FocusEvent) {
+  const el = e.target instanceof HTMLElement ? e.target : null
+  if (!el || !el.hasAttribute(IME_LOCK_ATTR)) return
+  // openIme() blurs and re-focuses — keep the "open" state across that hop.
+  if (el.getAttribute(IME_LOCK_ATTR) === 'open' && e.relatedTarget == null) {
+    window.setTimeout(() => {
+      if (document.activeElement !== el) {
+        el.removeAttribute(IME_LOCK_ATTR)
+        restoreInputMode(el)
+      }
+    }, 0)
+    return
+  }
+  el.removeAttribute(IME_LOCK_ATTR)
+  restoreInputMode(el)
+}
+
+/** Pointer / touch on a locked field means "type here". */
+function onPointerDown(e: Event) {
+  const el = e.target instanceof HTMLElement ? e.target : null
+  if (el && isTextInput(el) && el.getAttribute(IME_LOCK_ATTR) === '1') openIme(el)
+}
+
+// ---------------------------------------------------------------- focus memory
+
+type FocusMemo = { href: string | null; label: string; tag: string }
+const focusMemory = new Map<string, FocusMemo>()
+
+function focusKey(): string {
+  // HashRouter: '' and '#/' are the same route, so key on the hash path when present.
+  const hashRoute = window.location.hash.replace(/^#/, '')
+  return hashRoute || window.location.pathname + window.location.search || '/'
+}
+
+function focusLabel(el: HTMLElement): string {
+  return (el.getAttribute('aria-label') || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 120)
+}
+
+function rememberFocus(el: HTMLElement) {
+  if (isTextInput(el) || el.matches(TV_SURFACE_SELECTOR)) return
+  if (fullPlayer()?.contains(el) || modalScope()) return
+  focusMemory.set(focusKey(), { href: el.getAttribute('href'), label: focusLabel(el), tag: el.tagName })
+}
+
 function onFocusIn(e: FocusEvent) {
   const el = e.target instanceof HTMLElement ? e.target : null
+  if (el) rememberFocus(el)
+  if (el && isTextInput(el) && el.getAttribute(IME_LOCK_ATTR) !== 'open') lockIme(el)
   if (el && el.matches(TV_SURFACE_SELECTOR)) {
     if (pointerEl !== el || pointerMode === 'off') setPointer('focus', el)
     return
@@ -495,6 +611,11 @@ function onKeyDown(e: KeyboardEvent) {
   }
 
   // ---- Everywhere else.
+  if (isEnter && active && isTextInput(active) && active.getAttribute(IME_LOCK_ATTR) === '1') {
+    stop(e)
+    if (!e.repeat) openIme(active)
+    return
+  }
   if (isEnter) {
     // Native activation (buttons, links, role=button handlers). Keep it from
     // reaching a PiP player's window listener only when it is a text field.
@@ -524,6 +645,11 @@ function onKeyDown(e: KeyboardEvent) {
     // A popup menu just opened from its trigger — move into it.
     next = findNext(dir, active, menu) || candidates(menu)[0] || null
   }
+  if (!next && scope !== document && (!active || !(scope as HTMLElement).contains(active))) {
+    // A sheet (sections menu) just opened from its trigger: start on its current item.
+    const inScope = candidates(scope)
+    next = inScope.find((el) => el.getAttribute('aria-current') === 'page') || inScope[0] || null
+  }
   if (!next) {
     const from = active && (scope === document || (scope as HTMLElement).contains(active)) ? active : null
     next = findNext(dir, from, scope)
@@ -537,6 +663,10 @@ function onKeyDown(e: KeyboardEvent) {
 export function startTvNav(): () => void {
   window.addEventListener('keydown', onKeyDown, true)
   document.addEventListener('focusin', onFocusIn, true)
+  document.addEventListener('focusout', onFocusOut, true)
+  document.addEventListener('pointerdown', onPointerDown, true)
+  const active = document.activeElement
+  if (active instanceof HTMLElement && isTextInput(active)) lockIme(active)
   const offMedia = onTvMediaKey(handleMediaKey)
   const offPointer = androidBrowserOnTvPointer((mode) => {
     // Native Back in cursor mode → focus ring again; keep DOM focus on the surface.
@@ -557,6 +687,12 @@ export function startTvNav(): () => void {
   return () => {
     window.removeEventListener('keydown', onKeyDown, true)
     document.removeEventListener('focusin', onFocusIn, true)
+    document.removeEventListener('focusout', onFocusOut, true)
+    document.removeEventListener('pointerdown', onPointerDown, true)
+    document.querySelectorAll<HTMLElement>(`[${IME_LOCK_ATTR}]`).forEach((el) => {
+      el.removeAttribute(IME_LOCK_ATTR)
+      restoreInputMode(el)
+    })
     window.removeEventListener('hashchange', onRoute)
     offMedia()
     offPointer()
@@ -575,6 +711,45 @@ export function focusTvSurfaceIfIdle(): void {
   if (active && active !== document.body) return
   const surface = document.querySelector<HTMLElement>(TV_SURFACE_SELECTOR)
   if (surface && isElementVisible(surface)) focusEl(surface)
+}
+
+/** Put the remote on a detail page's main action when nothing has focus yet. */
+export function focusTvPrimaryIfIdle(): void {
+  const active = document.activeElement
+  if (active && active !== document.body) return
+  if (modalScope()) return
+  const primary = Array.from(document.querySelectorAll<HTMLElement>(TV_PRIMARY_SELECTOR)).find(
+    (el) => isElementVisible(el) && !(el as HTMLButtonElement).disabled,
+  )
+  if (primary) focusEl(primary)
+}
+
+/** Back on a page we left: put the remote on the item that opened the next page. */
+export function focusTvRememberedIfIdle(): boolean {
+  const active = document.activeElement
+  if (active && active !== document.body) return false
+  if (modalScope() || fullPlayer()) return false
+  const memo = focusMemory.get(focusKey())
+  if (!memo) return false
+  const list = candidates(document)
+  const hit =
+    (memo.href ? list.find((el) => el.getAttribute('href') === memo.href) : undefined) ||
+    (memo.label ? list.find((el) => el.tagName === memo.tag && focusLabel(el) === memo.label) : undefined)
+  if (!hit) return false
+  focusEl(hit)
+  return true
+}
+
+/** True when a text field (search box, form input) has focus. */
+export function isTvTextFieldFocused(): boolean {
+  return isTextInput(document.activeElement)
+}
+
+/** Move the remote to the page's first content target (shelves, primary action). */
+export function focusTvStart(): void {
+  const scope: ParentNode = modalScope() || document
+  const target = initialTarget(candidates(scope))
+  if (target) focusEl(target, { dir: 'down' })
 }
 
 /**

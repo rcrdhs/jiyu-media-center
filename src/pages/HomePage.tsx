@@ -11,6 +11,7 @@ import { NewTitlesDialog } from '../components/NewTitlesDialog'
 import { WatchNextStrip } from '../components/WatchNextStrip'
 import { WatchHistory } from '../components/WatchHistory'
 import { useUrlOverlay } from '../hooks/useUrlOverlay'
+import { HOME_SEARCH_RESET_EVENT } from '../lib/tvNav'
 import { LocalChannelLive } from '../components/LocalChannelLive'
 import { filterShelfVisibleItems, isSeriesWebCatalogItem } from '../lib/torrents'
 import { HIDE_KEYWORDS_EVENT } from '../lib/hideKeywords'
@@ -35,11 +36,27 @@ import {
 } from '../lib/watchlist'
 
 const HOME_PANELS = ['added', 'saved'] as const
+/** Survives detail -> Back (HomePage remounts); cleared with the box. */
+const HOME_QUERY_KEY = 'jiyu.homeQuery'
 
 export function HomePage() {
   const { byCategory, items, ready, englishOnly } = useCatalog()
   const { item: playingItem, mode } = usePlayback()
-  const [homeQuery, setHomeQuery] = useState('')
+  const [homeQuery, setHomeQuery] = useState(() => {
+    try {
+      return sessionStorage.getItem(HOME_QUERY_KEY) || ''
+    } catch {
+      return ''
+    }
+  })
+  useEffect(() => {
+    try {
+      if (homeQuery) sessionStorage.setItem(HOME_QUERY_KEY, homeQuery)
+      else sessionStorage.removeItem(HOME_QUERY_KEY)
+    } catch {
+      /* private mode */
+    }
+  }, [homeQuery])
   const [kidsMode, setKidsMode] = useState(isKidsModeEnabled)
   const [catalogGrowth, setCatalogGrowth] = useState<SectionGrowth>(() =>
     getCatalogGrowth(items.length),
@@ -52,6 +69,11 @@ export function HomePage() {
   const [hideKeywordsTick, setHideKeywordsTick] = useState(0)
 
   useEffect(() => subscribeKidsMode(() => setKidsMode(isKidsModeEnabled())), [])
+  useEffect(() => {
+    const reset = () => setHomeQuery('')
+    window.addEventListener(HOME_SEARCH_RESET_EVENT, reset)
+    return () => window.removeEventListener(HOME_SEARCH_RESET_EVENT, reset)
+  }, [])
   useEffect(() => {
     const bump = () => setHideKeywordsTick((n) => n + 1)
     window.addEventListener(HIDE_KEYWORDS_EVENT, bump)

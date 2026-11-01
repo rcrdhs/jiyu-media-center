@@ -12,10 +12,33 @@ import {
 } from '../lib/androidFullscreen'
 import { exitOsFullscreen, getFullscreenOwner } from '../lib/fullscreenSession'
 import { dismissTopOverlay } from '../lib/overlayDismiss'
-import { closeOpenTvPopup } from '../lib/tvNav'
+import {
+  closeOpenTvPopup,
+  focusTvStart,
+  HOME_SEARCH_RESET_EVENT,
+  isTvTextFieldFocused,
+} from '../lib/tvNav'
 import { isTizenTv, isTvMode, onTizenBackKey, tizenExitApp } from '../lib/tvMode'
 
 const EXIT_CONFIRM_MS = 2500
+
+/**
+ * TV: Back while in a text field, or on Home with a search typed, leaves the
+ * search (clears it, drops focus onto the shelves) instead of arming exit.
+ */
+function leaveTvTextEntry(atHome: boolean): boolean {
+  if (!isTvMode()) return false
+  const typing = isTvTextFieldFocused()
+  const homeSearch = atHome
+    ? (document.getElementById('home-search') as HTMLInputElement | null)
+    : null
+  const hasQuery = Boolean(homeSearch?.value.trim())
+  if (!typing && !hasQuery) return false
+  if (typing && document.activeElement instanceof HTMLElement) document.activeElement.blur()
+  if (hasQuery) window.dispatchEvent(new Event(HOME_SEARCH_RESET_EVENT))
+  window.setTimeout(focusTvStart, 80)
+  return true
+}
 
 function routeFromState(state: unknown): string | null {
   if (
@@ -181,6 +204,13 @@ export function AndroidBackBridge() {
 
         const path = s.path || '/'
         const atHome = path === '/' || path === ''
+
+        // 4b) TV: leave a search field / typed Home search before route Back.
+        if (leaveTvTextEntry(atHome)) {
+          exitArmedUntil.current = 0
+          setExitHint(null)
+          return
+        }
 
         // 5) Detail / watch → section (not endless history.back).
         if (

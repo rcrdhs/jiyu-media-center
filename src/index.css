@@ -7541,6 +7541,13 @@ html.tv-mode :is(.media-card, .continue-card, .watch-next-card):focus {
   transition: transform 120ms ease-out;
 }
 
+/* Horizontal shelves clip both axes: give the lifted card + glow room to breathe. */
+html.tv-mode :is(.continue-row, .favorite-matches .catalog-grid) {
+  padding: 0.6rem 0.6rem 0.75rem;
+  margin-inline: -0.6rem;
+  scroll-padding-inline: 0.6rem;
+}
+
 /* No hover-only affordances on TV: sticky :hover would fight the focus ring. */
 html.tv-mode * {
   -webkit-tap-highlight-color: transparent;
@@ -7607,4 +7614,19 @@ html.tv-mode body {
 html.tv-mode :is(input, textarea, [contenteditable='true']) {
   user-select: text;
   -webkit-user-select: text;
+}
+
+/* Old Android TV WebViews (Chrome < 108) drop dvh, and the minifier folds a vh fallback
+   into the dvh line, so give them the sections sheet height explicitly. */
+@supports not (height: 1dvh) {
+  html.is-android .side-nav.is-android-portal,
+  .side-nav.is-android-portal {
+    max-height: min(70vh, 28rem) !important;
+  }
+  @media (orientation: landscape) {
+    html.is-android .side-nav.is-android-portal,
+    .side-nav.is-android-portal {
+      max-height: calc(100vh - 0.8rem) !important;
+    }
+  }
 }

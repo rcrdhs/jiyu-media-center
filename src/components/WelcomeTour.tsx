@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { pushOverlayDismiss } from '../lib/overlayDismiss'
+import { isAndroidShell } from '../lib/androidFullscreen'
 import { isTizenTv } from '../lib/tvMode'
 
 const SEEN_KEY = 'jiyu.welcome.seen'
@@ -97,9 +98,27 @@ export function WelcomeTour() {
     return () => window.removeEventListener(OPEN_FEATURE_GUIDE_EVENT, onOpen)
   }, [])
 
-  // Samsung Tizen: the remote's Return key closes the guide (Back ladder overlay).
+  // Closing the guide (Back, Close, Done) hands focus back to whatever opened it,
+  // so a TV remote is not left on <body>.
   useEffect(() => {
-    if (!open || !isTizenTv()) return
+    if (!open) return
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    return () => {
+      window.setTimeout(() => {
+        const active = document.activeElement
+        if (!opener || !opener.isConnected || (active && active !== document.body)) return
+        try {
+          opener.focus({ preventScroll: true })
+        } catch {
+          /* ignore */
+        }
+      }, 0)
+    }
+  }, [open])
+
+  // Samsung Tizen Return / Android Back closes the guide (Back ladder overlay).
+  useEffect(() => {
+    if (!open || !(isTizenTv() || isAndroidShell())) return
     return pushOverlayDismiss(() => {
       markWelcomeSeen()
       setFromHelp(false)
