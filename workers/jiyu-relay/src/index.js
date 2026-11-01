@@ -39,8 +39,12 @@ const DATA_HOSTS = [
   /^(?:www\.)?fullmatchshows\.com$/,
   /^(?:www\.)?soccerfull\.net$/,
   /^www\.youtube\.com$/,
-  // Movy api.wecollege.net is NOT here: CF egress is rate-limited and seeds are
-  // IP-bound. Samsung resolves Movy via the LAN PC bridge (roku-hls /api/movy).
+  // Movy: seed + sources fetched with Referer injection here. Seeds are crypto keys,
+  // not IP-bound CDN tokens -- the resulting stream URLs are plain CDN links, so
+  // Samsung TV fetches segments directly at home-IP speed. No PC bridge needed.
+  /^api\.wecollege\.net$/,
+  // PopcornMovies standby (watch HTML + /api/sources). CF may still challenge Worker egress.
+  /^(?:www\.)?popcornmovies\.ac$/,
 ]
 
 /** IPTV CDNs whose playlists fail CORS for a file:// (Tizen) page. Public IPv4 literals too. */
@@ -111,19 +115,27 @@ const HLS_REFERERS = [
   /^https:\/\/(?:[a-z0-9-]+\.)*biliintl\.com$/,
   /^https:\/\/(?:[a-z0-9-]+\.)*rivestream\.[a-z]+$/,
   /^https:\/\/(?:[a-z0-9-]+\.)*(?:embedsports|embedme|streamed)\.[a-z]+$/,
+  /^https:\/\/(?:www\.)?popcornmovies\.ac$/,
 ]
 
 const DESKTOP_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 const MAX_DATA_BYTES = 12 * 1024 * 1024
 const MAX_PLAYLIST_BYTES = 2 * 1024 * 1024
-const PASS_HEADERS = ['content-type', 'x-youtube-client-name', 'x-youtube-client-version', 'accept', 'accept-language']
+const PASS_HEADERS = [
+  'content-type',
+  'x-youtube-client-name',
+  'x-youtube-client-version',
+  'accept',
+  'accept-language',
+  'x-play-token',
+]
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, HEAD, POST, OPTIONS',
   'Access-Control-Allow-Headers':
-    'Content-Type, Accept, Accept-Language, X-Youtube-Client-Name, X-Youtube-Client-Version, X-Relay-Referer, X-Relay-UA, Range',
+    'Content-Type, Accept, Accept-Language, X-Youtube-Client-Name, X-Youtube-Client-Version, X-Relay-Referer, X-Relay-UA, X-Play-Token, Range',
   'Access-Control-Expose-Headers': 'Content-Length, Content-Range, X-Relay-Status, X-Relay-Cache',
   'Access-Control-Max-Age': '86400',
 }
@@ -234,6 +246,11 @@ async function relayData(request, ctx) {
   const ref = request.headers.get('x-relay-referer') || reqUrl.searchParams.get('ref')
   if (ref && /^https?:\/\//i.test(ref)) {
     headers.set('Referer', ref)
+    try {
+      headers.set('Origin', new URL(ref).origin)
+    } catch {
+      /* ignore */
+    }
   }
 
   let body = null

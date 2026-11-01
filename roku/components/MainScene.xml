@@ -1,67 +1,243 @@
 <?xml version="1.0" encoding="utf-8" ?>
 <component name="MainScene" extends="Scene">
+  <script type="text/brightscript" uri="pkg:/source/deviceProfile.brs" />
   <script type="text/brightscript" uri="MainScene.brs" />
   <interface>
     <field id="deepLinkContentId" type="string" onChange="onDeepLink" />
   </interface>
   <children>
+    <Rectangle id="bg" width="1280" height="720" color="0x080A0DFF" />
     <Rectangle
-      id="bg"
-      width="1920"
-      height="1080"
-      color="0x0B0C10FF"
+      id="glowGold"
+      width="560"
+      height="300"
+      translation="[820,-40]"
+      color="0xF0B42914"
+    />
+
+    <!-- Left sidebar — same shell as desktop Jiyu. -->
+    <Rectangle id="sidebar" width="248" height="720" color="0x0C1016FF" />
+    <Rectangle
+      id="sidebarEdge"
+      width="1"
+      height="720"
+      translation="[248,0]"
+      color="0xE8ECF414"
+    />
+
+    <Poster
+      id="brandLogo"
+      width="40"
+      height="40"
+      translation="[24,28]"
+      uri="pkg:/images/mm_icon_focus_hd.png"
+      loadWidth="40"
+      loadHeight="40"
+      loadDisplayMode="scaleToFit"
     />
     <Label
       id="brand"
       text="Jiyu"
-      translation="[72,48]"
-      font="font:LargeBoldSystemFont"
+      translation="[74,28]"
+      font="font:MediumBoldSystemFont"
       color="0xF0B429FF"
-      width="600"
+      width="160"
+      height="28"
     />
     <Label
-      id="subtitle"
-      text="Live · first slice for Roku"
-      translation="[72,110]"
+      id="brandTag"
+      text="自由 · Roku"
+      translation="[74,54]"
       font="font:SmallSystemFont"
-      color="0x94A3B8FF"
-      width="900"
+      color="0x8B95A8FF"
+      width="160"
+      height="22"
+    />
+
+    <Label
+      id="browseLabel"
+      text="Browse"
+      translation="[24,100]"
+      font="font:SmallSystemFont"
+      color="0x8B95A8FF"
+      width="200"
+    />
+    <MarkupList
+      id="nav"
+      translation="[16,128]"
+      itemComponentName="SideNavItem"
+      itemSize="[216,48]"
+      itemSpacing="[0,4]"
+      numRows="7"
+      drawFocusFeedback="false"
+    />
+
+    <Label
+      id="watchLabel"
+      text="Watch"
+      translation="[24,500]"
+      font="font:SmallSystemFont"
+      color="0x8B95A8FF"
+      width="200"
+    />
+    <Label
+      id="watchHint"
+      text="Web · Multi-view on phone"
+      translation="[24,528]"
+      font="font:SmallSystemFont"
+      color="0x8B95A866"
+      width="200"
+      wrap="true"
+      lineSpacing="2"
+    />
+
+    <!-- Catalog sync bar — mirrors desktop CatalogSyncBar (sidebar footer). -->
+    <Rectangle
+      id="syncBar"
+      width="216"
+      height="52"
+      translation="[16,640]"
+      color="0x10141AEB"
+      visible="true"
+    />
+    <Rectangle
+      id="syncBarTrack"
+      width="184"
+      height="4"
+      translation="[32,678]"
+      color="0xF0B42929"
+      visible="true"
+    />
+    <Rectangle
+      id="syncBarFill"
+      width="40"
+      height="4"
+      translation="[32,678]"
+      color="0xF0B429FF"
+      visible="true"
+    />
+    <Label
+      id="syncBarMsg"
+      text="Updating catalog…"
+      translation="[32,648]"
+      width="140"
+      height="28"
+      font="font:SmallBoldSystemFont"
+      color="0xE8ECF4FF"
+      horizAlign="left"
+      vertAlign="center"
+      wrap="false"
+      ellipsizeOnBoundary="true"
+      visible="true"
+    />
+    <Label
+      id="syncBarPct"
+      text="…"
+      translation="[170,648]"
+      width="46"
+      height="28"
+      font="font:SmallBoldSystemFont"
+      color="0xF0B429FF"
+      horizAlign="right"
+      vertAlign="center"
+      visible="true"
+    />
+
+    <!-- Main stage -->
+    <Label
+      id="stageTitle"
+      text="Home"
+      translation="[280,28]"
+      font="font:LargeBoldSystemFont"
+      color="0xE8ECF4FF"
+      width="640"
+    />
+    <!-- Home hero counter — Total titles / Added (desktop hero-frame). -->
+    <Rectangle
+      id="homeCounter"
+      width="220"
+      height="88"
+      translation="[1000,20]"
+      color="0x10141AEB"
+      visible="false"
+    />
+    <Label
+      id="homeCounterLabel"
+      text="TOTAL TITLES"
+      translation="[1016,28]"
+      width="188"
+      height="22"
+      font="font:SmallBoldSystemFont"
+      color="0xF0B429FF"
+      visible="false"
+    />
+    <Label
+      id="homeCounterValue"
+      text="0"
+      translation="[1016,48]"
+      width="188"
+      height="36"
+      font="font:LargeBoldSystemFont"
+      color="0xE8ECF4FF"
+      visible="false"
+    />
+    <Label
+      id="homeCounterSub"
+      text="Added today —"
+      translation="[1016,82]"
+      width="188"
+      height="22"
+      font="font:SmallSystemFont"
+      color="0x8B95A8FF"
+      visible="false"
+    />
+    <Label
+      id="stageBlurb"
+      text="Local channels and live sports"
+      translation="[280,72]"
+      font="font:SmallSystemFont"
+      color="0x8B95A8FF"
+      width="700"
     />
     <Label
       id="status"
       text="Loading…"
-      translation="[72,160]"
+      translation="[280,100]"
       font="font:SmallSystemFont"
-      color="0xCBD5E1FF"
-      width="1700"
+      color="0x8B95A8FF"
+      width="700"
       wrap="true"
-      lineSpacing="6"
+      lineSpacing="4"
     />
+
     <RowList
       id="rows"
-      translation="[48,230]"
+      translation="[268,140]"
       itemComponentName="PosterItem"
       numRows="3"
-      rowItemSize="[[320,180]]"
-      rowItemSpacing="[[24,0]]"
-      itemSize="[1824,260]"
-      rowHeights="[260]"
-      showRowLabel="[true]"
-      rowLabelOffset="[[0,12]]"
+      rowItemSize="[[268,228]]"
+      rowItemSpacing="[[16,0]]"
+      itemSize="[980,270]"
+      rowHeights="[270]"
+      showRowLabel="[true, true, true]"
+      rowLabelOffset="[[0,2]]"
+      rowLabelFont="font:MediumBoldSystemFont"
+      rowLabelColor="0xF0B429FF"
       drawFocusFeedback="false"
       visible="false"
     />
+
     <Rectangle
       id="playerShade"
-      width="1920"
-      height="1080"
+      width="1280"
+      height="720"
       color="0x000000FF"
       visible="false"
     />
     <Video
       id="video"
-      width="1920"
-      height="1080"
+      width="1280"
+      height="720"
       translation="[0,0]"
       visible="false"
       enableUI="false"
@@ -69,43 +245,44 @@
     <Label
       id="playStatus"
       text=""
-      translation="[72,48]"
+      translation="[48,28]"
       font="font:SmallSystemFont"
       color="0xF8FAFCFF"
-      width="1700"
+      width="1180"
       visible="false"
     />
+
     <Rectangle
       id="choiceShade"
-      width="1920"
-      height="1080"
-      color="0x000000CC"
+      width="1280"
+      height="720"
+      color="0x080A0DCC"
       visible="false"
     />
     <Label
       id="choiceTitle"
       text=""
-      translation="[72,360]"
+      translation="[280,240]"
       font="font:MediumBoldSystemFont"
-      color="0xF8FAFCFF"
-      width="1700"
+      color="0xE8ECF4FF"
+      width="900"
       visible="false"
     />
     <Label
       id="choiceHint"
       text="OK to choose · Back to cancel"
-      translation="[72,420]"
+      translation="[280,280]"
       font="font:SmallSystemFont"
-      color="0x94A3B8FF"
-      width="1700"
+      color="0x8B95A8FF"
+      width="900"
       visible="false"
     />
     <LabelList
       id="choiceList"
-      translation="[72,480]"
-      itemSize="[900,64]"
+      translation="[280,320]"
+      itemSize="[700,56]"
       numRows="4"
-      color="0xCBD5E1FF"
+      color="0xE8ECF4FF"
       focusedColor="0xF0B429FF"
       visible="false"
     />

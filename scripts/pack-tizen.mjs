@@ -63,10 +63,13 @@ function stampLanBridge() {
   const base =
     String(process.env.TIZEN_LAN_BRIDGE || process.env.ROKU_HLS_BASE || '').trim() ||
     `http://${lanIPv4()}:${ROKU_PORT}`
+  const token = String(process.env.TIZEN_MOVY_TOKEN || '').trim()
   const body = `/* Stamped by npm run pack:tizen — ${new Date().toISOString()}
- * Movy API bridge (roku-hls). Override: localStorage jiyu.tizen.lanBridge
+ * Movy API bridge (roku-hls or Hetzner movy-resolve).
+ * Override: localStorage jiyu.tizen.lanBridge / jiyu.tizen.movyToken
  */
 window.__JIYU_LAN_BRIDGE__ = ${JSON.stringify(base)};
+window.__JIYU_MOVY_TOKEN__ = ${JSON.stringify(token)};
 `
   fs.writeFileSync(path.join(tizenDir, 'bridge-config.js'), body)
   return base

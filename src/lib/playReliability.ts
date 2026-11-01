@@ -8,7 +8,15 @@ const MAX_ENTRIES = 200
 /** Prefer a remembered pipe for a week; older entries still inform ranking weakly. */
 const FRESH_MS = 7 * 24 * 60 * 60 * 1000
 
-export type PlayPipe = 'movy' | 'atlantic' | 'streamo' | 'nyaa' | 'm2box' | 'torrent'
+export type PlayPipe =
+  | 'movy'
+  | 'atlantic'
+  | 'streamo'
+  | 'popcorn'
+  | 'rive'
+  | 'nyaa'
+  | 'm2box'
+  | 'torrent'
 
 export type LastGoodPlay = {
   pipe: PlayPipe
@@ -96,7 +104,7 @@ export function rememberLastGoodPlay(
 export function rememberResolvedHlsPlay(
   key: string,
   result: {
-    backend?: 'movy' | 'atlantic' | 'streamo'
+    backend?: 'movy' | 'atlantic' | 'streamo' | 'rive'
     provider?: string
     url?: string
     language?: string
@@ -167,7 +175,13 @@ export function inferPlayPipe(opts: {
   referrer?: string
   backend?: string
 }): PlayPipe | null {
-  if (opts.backend === 'atlantic' || opts.backend === 'movy' || opts.backend === 'streamo') {
+  if (
+    opts.backend === 'atlantic' ||
+    opts.backend === 'movy' ||
+    opts.backend === 'streamo' ||
+    opts.backend === 'popcorn' ||
+    opts.backend === 'rive'
+  ) {
     return opts.backend
   }
   const url = String(opts.url || '')
@@ -176,10 +190,14 @@ export function inferPlayPipe(opts: {
       /atlantic/i.test(ref)) {
     return 'atlantic'
   }
+  if (/(?:api|cdn)\.dlproxy\.com/i.test(url) || /popcornmovies\.ac/i.test(ref)) {
+    return 'popcorn'
+  }
   if (/paleoak|zenoak|wecollege\.net|movy\.sx|\bmoon\.|\bsun\./i.test(url) ||
       /movy\.sx/i.test(ref)) {
     return 'movy'
   }
+  if (/valhallastream|hscow\.com/i.test(url) || /rivestream/i.test(ref)) return 'rive'
   if (/shegu\.net/i.test(url) || /streamo\.pro/i.test(ref)) return 'streamo'
   if (/hakunaymatata|aoneroom/i.test(url)) return 'm2box'
   if (/^magnet:/i.test(url) || /127\.0\.0\.1|localhost/i.test(url)) return 'torrent'

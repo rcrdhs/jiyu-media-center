@@ -1001,3 +1001,57 @@ export async function resolveRivestreamPlay(options: {
     episode,
   }
 }
+
+/**
+ * Samsung (Tizen) fallback for Movy/Atlantic: scrapper providers that answer
+ * TV ids quickly and whose HLS plays through the jiyu-relay with the
+ * rivestream Referer (pulse = valhallastream proxy, citadel = hscow CDN).
+ */
+export const RIVESTREAM_TIZEN_TV_PROVIDERS = ['pulse', 'citadel', 'flowcast'] as const
+
+/**
+ * Every HLS source one scrapper provider lists for an episode, best audio
+ * first, WITHOUT probing: the TV can't send the Referer that
+ * proxy.valhallastream.com needs, so the caller verifies through the relay.
+ * Dubs in a language other than English / the title's original language
+ * (Japanese for anime) are dropped.
+ */
+export async function listRivestreamTvHls(opts: {
+  provider: string
+  tmdbId: string
+  season: number
+  episode: number
+  originalLanguage?: string
+}): Promise<RivestreamHlsSource[]> {
+  const result = await fetchScrapperJson(opts.provider, opts.tmdbId, opts.season, opts.episode)
+  if (!result.ok) return []
+  const root = (result.data && typeof result.data === 'object' ? result.data : {}) as Record<string, unknown>
+  const nested = root.data && typeof root.data === 'object' ? (root.data as Record<string, unknown>) : {}
+  const list = (Array.isArray(root.sources) ? root.sources : Array.isArray(nested.sources) ? nested.sources : []) as unknown[]
+  const lang = String(opts.originalLanguage || '').toLowerCase()
+  const japanese = lang === 'ja'
+  const subtitleUrl = pickEnglishCaptionUrl(result.data)
+  const out: Array<RivestreamHlsSource & { score: number }> = []
+  for (const entry of list) {
+    if (!entry || typeof entry !== 'object') continue
+    const row = entry as Record<string, unknown>
+    const url = String(row.url || '').trim()
+    const format = String(row.format || '').toLowerCase()
+    if (!/^https?:\/\//i.test(url)) continue
+    if (!(format === 'hls' || /m3u8/i.test(url))) continue
+    const blob = `${row.source || ''} ${row.quality || ''}`
+    const okJapanese = japanese && /japanese|\bjpn?\b|\bja\b/i.test(blob)
+    if (NON_ENGLISH_AUDIO_HINT.test(blob) && !okJapanese) continue
+    if (!japanese && /japanese|\bjpn?\b/i.test(blob)) continue
+    out.push({
+      url,
+      provider: opts.provider,
+      quality: String(row.quality || ''),
+      subtitleUrl,
+      score: japanese ? scoreAnimeAudioHint(blob) : scoreEnglishAudioHint(blob),
+    })
+  }
+  return out
+    .sort((a, b) => b.score - a.score)
+    .map(({ score: _score, ...rest }) => rest)
+}

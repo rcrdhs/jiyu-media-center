@@ -16,6 +16,9 @@ export const TIZEN_RELAY_ORIGIN = 'https://jiyu-relay.free-river.workers.dev'
 /** localStorage override; pack-tizen stamps window.__JIYU_LAN_BRIDGE__. */
 export const TIZEN_LAN_BRIDGE_KEY = 'jiyu.tizen.lanBridge'
 
+/** Optional bearer/query token for remote Movy bridges (Hetzner). Stamped as __JIYU_MOVY_TOKEN__. */
+export const TIZEN_MOVY_TOKEN_KEY = 'jiyu.tizen.movyToken'
+
 /** Must mirror DATA_HOSTS in workers/jiyu-relay/src/index.js (except Movy API). */
 const RELAY_HOSTS: RegExp[] = [
   /^(?:[a-z0-9-]+\.)*streamed\.pk$/,
@@ -29,6 +32,8 @@ const RELAY_HOSTS: RegExp[] = [
   /^epgshare01\.online$/,
   /^(?:www\.)?fullmatchshows\.com$/,
   /^(?:www\.)?soccerfull\.net$/,
+  // PopcornMovies standby (watch HTML + /api/sources). CF may still challenge.
+  /^(?:www\.)?popcornmovies\.ac$/,
 ]
 
 /** Mirrors IPTV_HOSTS in the worker. */
@@ -49,6 +54,7 @@ const HLS_REFERERS: RegExp[] = [
   /^https:\/\/(?:[a-z0-9-]+\.)*biliintl\.com$/,
   /^https:\/\/(?:[a-z0-9-]+\.)*rivestream\.[a-z]+$/,
   /^https:\/\/(?:[a-z0-9-]+\.)*(?:embedsports|embedme|streamed)\.[a-z]+$/,
+  /^https:\/\/(?:www\.)?popcornmovies\.ac$/,
 ]
 
 /** Mirrors ATLANTIC_HLS_HOSTS in the worker: Helios / Aphrodite entry playlist hosts. */
@@ -80,8 +86,8 @@ export function isMovyApiUrl(url: string): boolean {
 }
 
 /**
- * PC bridge base (roku-hls), e.g. http://192.168.1.10:8791.
- * Override anytime: localStorage.setItem('jiyu.tizen.lanBridge', 'http://…:8791')
+ * Movy resolve bridge base (LAN roku-hls or Hetzner movy-resolve), e.g. http://192.168.1.10:8791.
+ * Override anytime: localStorage.setItem('jiyu.tizen.lanBridge', 'http://…:8787')
  */
 export function getTizenLanBridge(): string {
   if (!isTizenTv()) return ''
@@ -102,6 +108,33 @@ export function getTizenLanBridge(): string {
   return ''
 }
 
+export function getTizenMovyToken(): string {
+  if (!isTizenTv()) return ''
+  try {
+    const fromLs = String(window.localStorage.getItem(TIZEN_MOVY_TOKEN_KEY) || '').trim()
+    if (fromLs) return fromLs
+  } catch {
+    /* private mode */
+  }
+  try {
+    return String(
+      (window as unknown as { __JIYU_MOVY_TOKEN__?: string }).__JIYU_MOVY_TOKEN__ || '',
+    ).trim()
+  } catch {
+    return ''
+  }
+}
+
+/** Route Movy seed/sources through the non-CF bridge (same IP must mint + fetch sources). */
+export function tizenMovyBridgeUrl(apiUrl: string): string | null {
+  const bridge = getTizenLanBridge()
+  if (!bridge || !isMovyApiUrl(apiUrl)) return null
+  const qs = new URLSearchParams({ u: apiUrl })
+  const token = getTizenMovyToken()
+  if (token) qs.set('token', token)
+  return `${bridge}/api/movy?${qs}`
+}
+
 /** True when this request should go through /r (or the LAN Movy bridge) on this device. */
 export function shouldRelayFetch(url: string, method = 'GET'): boolean {
   if (!isTizenTv()) return false
@@ -113,16 +146,15 @@ export function shouldRelayFetch(url: string, method = 'GET'): boolean {
   const m = method.toUpperCase()
   if (youtubeRelayable(u, m)) return true
   if (m !== 'GET' && m !== 'HEAD') return false
-  if (isMovyApiUrl(url)) return Boolean(bridge)
+  // Prefer the LAN/Hetzner bridge for Movy; only fall through to CF if none is stamped.
+  if (isMovyApiUrl(url)) return !getTizenLanBridge()
   const host = u.hostname.toLowerCase()
   return RELAY_HOSTS.some((re) => re.test(host))
 }
 
 export function tizenRelayUrl(url: string): string {
-  if (isMovyApiUrl(url)) {
-    const bridge = getTizenLanBridge()
-    if (bridge) return `${bridge}/api/movy?u=${encodeURIComponent(url)}`
-  }
+  const viaBridge = tizenMovyBridgeUrl(url)
+  if (viaBridge) return viaBridge
   const u = parse(url)
   const target = u && u.hostname === 'youtube.com' ? url.replace('://youtube.com', '://www.youtube.com') : url
   return `${TIZEN_RELAY_ORIGIN}/r?u=${encodeURIComponent(target)}`
@@ -329,6 +361,18 @@ export function installTizenFetchRelay(): void {
       const headers = new Headers(
         init?.headers || (typeof input === 'object' && 'headers' in input ? (input as Request).headers : undefined),
       )
+      // Movy seed/sources: always prefer the stamped Hetzner/LAN bridge when present.
+      if ((method === 'GET' || method === 'HEAD') && isMovyApiUrl(url)) {
+        const bridged = tizenMovyBridgeUrl(url)
+        if (bridged) {
+          return nativeFetch(bridged, {
+            method,
+            credentials: 'omit',
+            mode: 'cors',
+            signal: init?.signal,
+          })
+        }
+      }
       if (!shouldRelayFetch(url, method)) {
         // Referer-locked HLS probes (Movy / Atlantic …): the browser drops the Referer
         // header, so send the playlist through /hls with it instead.

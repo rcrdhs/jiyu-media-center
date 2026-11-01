@@ -11,6 +11,8 @@
  *   GET  /api/mse?sid=&p=master|ts&i=
  *   GET  /api/hls?sid=&url=&referer=   (real-HLS proxy mode)
  *   GET  /api/movy?u=<api.wecollege.net/…>  Samsung Movy seed/sources (Referer)
+ *   GET  /api/series/catalog            → TMDB Popular / Airing / Trending (Rive play)
+ *   GET  /api/series/resolve?tmdbId=&season=&episode= → Rive HLS → /api/hls proxy
  *   POST /internal/ingest?sid=         (127.0.0.1 only, raw fMP4 bytes)
  *   GET  /health
  */
@@ -24,13 +26,30 @@ import { createRequire } from 'node:module'
 
 const require = createRequire(import.meta.url)
 const puppeteer = require('puppeteer-core')
-const ffmpegPath = require('ffmpeg-static')
+/** Prefer system ffmpeg on Linux/ARM (Oracle Ampere); fall back to ffmpeg-static on Windows/dev. */
+function resolveFfmpegPath() {
+  const fromEnv = String(process.env.FFMPEG_PATH || process.env.ROKU_HLS_FFMPEG || '').trim()
+  if (fromEnv && fs.existsSync(fromEnv)) return fromEnv
+  for (const p of ['/usr/bin/ffmpeg', '/usr/local/bin/ffmpeg']) {
+    if (fs.existsSync(p)) return p
+  }
+  try {
+    const bundled = require('ffmpeg-static')
+    if (bundled && fs.existsSync(String(bundled))) return String(bundled)
+  } catch {
+    /* optional on ARM hosts without the npm binary */
+  }
+  return null
+}
+const ffmpegPath = resolveFfmpegPath()
 
 const PORT = Number(process.env.ROKU_HLS_PORT || 8791)
 const TOKEN = String(process.env.ROKU_HLS_TOKEN || '').trim()
 const RESOLVE_MS = Number(process.env.ROKU_HLS_RESOLVE_MS || 35_000)
 const CACHE_MS = Number(process.env.ROKU_HLS_CACHE_MS || 180_000)
 const SNIFF_MS = Number(process.env.ROKU_HLS_SNIFF_MS || 8_000)
+/** Concurrent ffmpeg remux jobs — keep up with live edge on multi-core hosts. */
+const REMUX_WORKERS = Math.max(1, Math.min(4, Number(process.env.ROKU_HLS_REMUX_WORKERS || 3) || 3))
 /** Live playlist depth — long windows make Roku rebuffer back to an old edge. */
 const SEG_WINDOW = 8
 const RAW_SEG_WINDOW = 48
@@ -68,9 +87,162 @@ const resolveCache = new Map()
 /** @type {Map<string, Session>} */
 const sessions = new Map()
 
+/**
+ * Live ffmpeg → 720p30 HLS for weak Roku TVs (Futbol-x audio-only / black video).
+ * @typedef {{
+ *   dir: string,
+ *   child: import('node:child_process').ChildProcess,
+ *   at: number,
+ *   url: string,
+ * }} CompatSession
+ */
+/** @type {Map<string, CompatSession>} */
+const compatSessions = new Map()
+const COMPAT_TTL_MS = 12 * 60_000
+
 /** @type {{ session: Session, video: {seq:number,buf:Buffer,dur:number}, audio: Buffer | null }[]} */
 const remuxQueue = []
-let remuxBusy = false
+let remuxActive = 0
+
+async function closeCompatSession(id, s) {
+  if (!s) return
+  try {
+    s.child?.kill('SIGKILL')
+  } catch {
+    /* ignore */
+  }
+  compatSessions.delete(id)
+  try {
+    fs.rmSync(s.dir, { recursive: true, force: true })
+  } catch {
+    /* ignore */
+  }
+}
+
+async function pruneCompatSessions() {
+  const now = Date.now()
+  for (const [id, s] of [...compatSessions.entries()]) {
+    if (now - s.at > COMPAT_TTL_MS) await closeCompatSession(id, s)
+  }
+}
+
+function startCompatTranscode(url, referer, maxHeight = 720) {
+  const sid = newSessionId()
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `jiyu-compat-${sid}-`))
+  const headerLines = [
+    `Referer: ${referer || 'https://www.futbol-x.xyz/'}`,
+    'User-Agent: JiyuRokuCompat/0.1',
+    '',
+  ].join('\r\n')
+  const outPlaylist = path.join(dir, 'index.m3u8')
+  const outSeg = path.join(dir, 'seg%05d.ts')
+  const h = Math.max(360, Math.min(1080, Number(maxHeight) || 720))
+  const bitrate = h <= 720 ? '2200k' : '3500k'
+  const maxrate = h <= 720 ? '2500k' : '4000k'
+  const bufsize = h <= 720 ? '4500k' : '7000k'
+  const level = h <= 720 ? '3.1' : '4.0'
+  const args = [
+    '-hide_banner',
+    '-loglevel',
+    'warning',
+    '-reconnect',
+    '1',
+    '-reconnect_streamed',
+    '1',
+    '-reconnect_delay_max',
+    '5',
+    '-headers',
+    headerLines,
+    '-i',
+    url,
+    '-map',
+    '0:v:0',
+    '-map',
+    '0:a:0?',
+    '-c:v',
+    'libx264',
+    '-preset',
+    'veryfast',
+    '-tune',
+    'zerolatency',
+    '-profile:v',
+    'main',
+    '-level',
+    level,
+    '-vf',
+    // Cap height from Roku device profile (lite→720, balanced/high→1080).
+    `scale=-2:${h}`,
+    '-r',
+    '30',
+    '-g',
+    '60',
+    '-keyint_min',
+    '30',
+    '-b:v',
+    bitrate,
+    '-maxrate',
+    maxrate,
+    '-bufsize',
+    bufsize,
+    '-pix_fmt',
+    'yuv420p',
+    '-c:a',
+    'aac',
+    '-ac',
+    '2',
+    '-ar',
+    '44100',
+    '-b:a',
+    '128k',
+    '-f',
+    'hls',
+    '-hls_time',
+    '2',
+    '-hls_list_size',
+    '8',
+    '-hls_flags',
+    'delete_segments+append_list+omit_endlist',
+    '-hls_segment_filename',
+    outSeg,
+    outPlaylist,
+  ]
+  const child = spawn(ffmpegPath, args, { stdio: ['ignore', 'ignore', 'pipe'] })
+  let errTail = ''
+  child.stderr?.on('data', (chunk) => {
+    errTail = (errTail + chunk.toString('utf8')).slice(-800)
+  })
+  child.on('exit', (code) => {
+    if (compatSessions.get(sid)) {
+      console.warn(`[roku-hls] compat ${sid} ffmpeg exit ${code}: ${errTail.slice(0, 200)}`)
+    }
+  })
+  compatSessions.set(sid, { dir, child, at: Date.now(), url })
+  console.log(`[roku-hls] compat start ${sid} ← ${url.slice(0, 80)}`)
+  return { sid, dir }
+}
+
+function waitForCompatPlaylist(sid, timeoutMs) {
+  const started = Date.now()
+  return new Promise((resolve) => {
+    const tick = () => {
+      const s = compatSessions.get(sid)
+      if (!s) return resolve(false)
+      const pl = path.join(s.dir, 'index.m3u8')
+      if (fs.existsSync(pl)) {
+        try {
+          const text = fs.readFileSync(pl, 'utf8')
+          if (text.includes('#EXTINF')) return resolve(true)
+        } catch {
+          /* retry */
+        }
+      }
+      if (s.child.exitCode != null && s.child.exitCode !== 0) return resolve(false)
+      if (Date.now() - started >= timeoutMs) return resolve(false)
+      setTimeout(tick, 300)
+    }
+    tick()
+  })
+}
 
 function newSessionId() {
   return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
@@ -114,6 +286,12 @@ function findChrome() {
     path.join(process.env.LOCALAPPDATA || '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
     path.join(process.env.PROGRAMFILES || '', 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
     path.join(process.env.LOCALAPPDATA || '', 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+    // Oracle Ampere / Linux
+    '/usr/bin/chromium-browser',
+    '/usr/bin/chromium',
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/google-chrome',
+    '/snap/bin/chromium',
   ]
   for (const p of candidates) {
     if (p && fs.existsSync(p)) return p
@@ -368,14 +546,14 @@ function isMasterPlaylist(text) {
   return text?.startsWith('#EXTM3U') && /#EXT-X-STREAM-INF/i.test(text) && !/#EXTINF/i.test(text)
 }
 
-/* ─── A/C: ffmpeg remux via temp files (Windows has no pipe:3), single-flight queue ─── */
+/* ─── A/C: ffmpeg remux via temp files (Windows has no pipe:3), worker pool ─── */
 
 const REMUX_TMP = path.join(os.tmpdir(), 'roku-hls-remux')
 
 function runFfmpeg(args) {
   return new Promise((resolve, reject) => {
     if (!ffmpegPath || !fs.existsSync(ffmpegPath)) {
-      reject(new Error('ffmpeg-static missing'))
+      reject(new Error('ffmpeg missing — install ffmpeg or set FFMPEG_PATH'))
       return
     }
     const ff = spawn(ffmpegPath, args, { stdio: ['ignore', 'pipe', 'pipe'] })
@@ -477,10 +655,10 @@ function enqueueRemux(session, videoEntry) {
   if (!session?.videoInit || !videoEntry?.buf) return
   // Drain timer used to re-queue the same vSeq every 400ms → queue explosion.
   if (remuxQueuedOrDone(session, videoEntry.seq)) return
-  // Hold until audio init arrives so we do not permanently bake video-only TS.
+  // Short hold for audio — remux video-only after 2s so live edge does not stall.
   if (!session.audioInit) {
-    if (Date.now() - videoEntry.at < 12_000) return
-  } else if (!session.audioSegs.length && Date.now() - videoEntry.at < 4_000) {
+    if (Date.now() - videoEntry.at < 2_000) return
+  } else if (!session.audioSegs.length && Date.now() - videoEntry.at < 1_500) {
     return
   }
   remuxQueue.push({
@@ -488,61 +666,62 @@ function enqueueRemux(session, videoEntry) {
     video: videoEntry,
     audio: null, // collected fresh at remux time
   })
-  // Keep only the live edge — backlog = laggy/desynced Roku play.
-  while (remuxQueue.length > 4) remuxQueue.shift()
+  // Cap backlog without creating playlist holes: drop oldest *queued* jobs only
+  // (never advertise a mediaSeq we skipped). Prefer keeping the live edge.
+  while (remuxQueue.length > 8) remuxQueue.shift()
   pumpRemuxQueue()
 }
 
 function pumpRemuxQueue() {
-  if (remuxBusy) return
-  const job = remuxQueue.shift()
-  if (!job) return
-  // Drop jobs for closed sessions.
-  if (![...sessions.values()].includes(job.session)) {
-    pumpRemuxQueue()
-    return
+  while (remuxActive < REMUX_WORKERS && remuxQueue.length) {
+    const job = remuxQueue.shift()
+    if (!job) break
+    // Drop jobs for closed sessions.
+    if (![...sessions.values()].includes(job.session)) continue
+    if (job.session.tsSegs.some((t) => t.vSeq === job.video.seq)) continue
+    remuxActive += 1
+    const started = Date.now()
+    // Cover full video duration with every overlapping audio frag.
+    const audioBuf = collectAudioForVideo(job.session, job.video) || job.audio
+    remuxToTs(job.session.videoInit, job.video.buf, job.session.audioInit, audioBuf)
+      .then((ts) => {
+        const ms = Date.now() - started
+        if (!ts || ts[0] !== 0x47) return
+        const s = job.session
+        if (typeof s.nextMediaSeq !== 'number') s.nextMediaSeq = 0
+        // Contiguous media sequence (ingest seq skips audio numbers and confuses Roku).
+        const mediaSeq = s.nextMediaSeq++
+        const row = {
+          seq: mediaSeq,
+          vSeq: job.video.seq,
+          buf: ts,
+          dur: job.video.dur,
+        }
+        s.tsSegs.push(row)
+        while (s.tsSegs.length > SEG_WINDOW) s.tsSegs.shift()
+        s.at = Date.now()
+        if (ms > (job.video.dur || 2) * 1000) {
+          console.log('[roku-hls] remux slow', `${ms}ms`, `vSeq=${job.video.seq}`, `dur=${job.video.dur}`)
+        }
+      })
+      .catch((err) => {
+        console.log(
+          '[roku-hls] remux fail',
+          err instanceof Error ? err.message.slice(0, 160) : err,
+        )
+      })
+      .finally(() => {
+        remuxActive -= 1
+        pumpRemuxQueue()
+      })
   }
-  if (job.session.tsSegs.some((t) => t.vSeq === job.video.seq)) {
-    pumpRemuxQueue()
-    return
-  }
-  remuxBusy = true
-  // Cover full video duration with every overlapping audio frag.
-  const audioBuf = collectAudioForVideo(job.session, job.video) || job.audio
-  remuxToTs(job.session.videoInit, job.video.buf, job.session.audioInit, audioBuf)
-    .then((ts) => {
-      if (!ts || ts[0] !== 0x47) return
-      const s = job.session
-      if (typeof s.nextMediaSeq !== 'number') s.nextMediaSeq = 0
-      // Contiguous media sequence (ingest seq skips audio numbers and confuses Roku).
-      const mediaSeq = s.nextMediaSeq++
-      const row = {
-        seq: mediaSeq,
-        vSeq: job.video.seq,
-        buf: ts,
-        dur: job.video.dur,
-      }
-      s.tsSegs.push(row)
-      while (s.tsSegs.length > SEG_WINDOW) s.tsSegs.shift()
-      s.at = Date.now()
-    })
-    .catch((err) => {
-      console.log(
-        '[roku-hls] remux fail',
-        err instanceof Error ? err.message.slice(0, 160) : err,
-      )
-    })
-    .finally(() => {
-      remuxBusy = false
-      pumpRemuxQueue()
-    })
 }
 
 function remuxPending(session) {
   if (!session.videoInit) return
   const pending = session.videoSegs.filter((v) => !remuxQueuedOrDone(session, v.seq))
   // Prefer the live edge — oldest unfinished segs are already stale for Roku.
-  const work = pending.length > 3 ? pending.slice(-3) : pending
+  const work = pending.length > REMUX_WORKERS + 1 ? pending.slice(-(REMUX_WORKERS + 1)) : pending
   for (const v of work) enqueueRemux(session, v)
 }
 
@@ -1028,7 +1207,7 @@ async function resolveViaMse(iframeUrl) {
       // Always drain the page fallback queue — loopback fetch may only partially work.
       await drainMseFallback(session)
       remuxPending(session)
-      if (session.tsSegs.length >= 6) break
+      if (session.tsSegs.length >= 3) break
       await nudgeSitePlayer(page, { clickUi: false })
       await new Promise((r) => setTimeout(r, 300))
     }
@@ -1046,7 +1225,7 @@ async function resolveViaMse(iframeUrl) {
       while (Date.now() < retryUntil) {
         await drainMseFallback(session)
         remuxPending(session)
-        if (session.tsSegs.length >= 4) break
+        if (session.tsSegs.length >= 3) break
         await nudgeSitePlayer(page, { clickUi: false })
         await new Promise((r) => setTimeout(r, 300))
       }
@@ -1054,7 +1233,7 @@ async function resolveViaMse(iframeUrl) {
 
     // Wait briefly for in-flight pipe remux jobs.
     const remuxWait = Date.now() + 8_000
-    while (Date.now() < remuxWait && session.tsSegs.length < 4 && (remuxBusy || remuxQueue.length)) {
+    while (Date.now() < remuxWait && session.tsSegs.length < 3 && (remuxActive > 0 || remuxQueue.length)) {
       await new Promise((r) => setTimeout(r, 200))
     }
     remuxPending(session)
@@ -1321,6 +1500,312 @@ async function resolveEmbed(iframeUrl) {
   return mse
 }
 
+/* ─── TV Series (TMDB catalog + Rive HLS) — mirrors desktop Series settings ─── */
+
+const TMDB_KEY = 'd64117f26031a428449f102ced3aba73'
+const TMDB_API = 'https://api.themoviedb.org/3'
+const RIVE_SCRAPPER = 'https://scrapper.rivestream.app'
+const RIVE_REFERER = 'https://rivestream.ru/'
+/** Same provider order as src/lib/rivestream.ts TV_PROVIDERS (English-first). */
+const RIVE_TV_PROVIDERS = [
+  'pulse',
+  'flowcast',
+  'citadel',
+  'solstice',
+  'primevids',
+  'apex',
+  'quasar',
+  'horizon',
+  'guru',
+  'hindicast',
+]
+
+async function tmdbJson(pathAndQuery) {
+  const url = `${TMDB_API}${pathAndQuery}${pathAndQuery.includes('?') ? '&' : '?'}api_key=${TMDB_KEY}`
+  const res = await fetch(url, {
+    headers: { Accept: 'application/json', 'User-Agent': 'JiyuRokuHls/0.1' },
+  })
+  if (!res.ok) throw new Error(`TMDB HTTP ${res.status}`)
+  return res.json()
+}
+
+function mapTmdbShow(show) {
+  const id = String(show?.id || '').trim()
+  const title = String(show?.name || show?.original_name || '').trim()
+  if (!id || !title) return null
+  const genres = Array.isArray(show.genre_ids) ? show.genre_ids : []
+  // Match desktop Series: exclude Animation (16) from popular/airing/trending shelves.
+  if (genres.includes(16)) return null
+  const year = String(show.first_air_date || '').slice(0, 4)
+  const posterPath = String(show.poster_path || '').trim()
+  return {
+    id: `tmdb-tv-${id}`,
+    title,
+    kind: 'series',
+    tmdbId: id,
+    season: 1,
+    episode: 1,
+    url: '',
+    poster: posterPath ? `https://image.tmdb.org/t/p/w342${posterPath}` : '',
+    detail: ['TV Series', year, 'TMDB', 'Rive'].filter(Boolean).join(' · '),
+    handle: id,
+  }
+}
+
+async function fetchTmdbShelf(kind, pages = 2) {
+  const out = []
+  const seen = new Set()
+  for (let page = 1; page <= pages; page++) {
+    let data
+    if (kind === 'popular') {
+      // Same discover as desktop popular Series (without_genres=16).
+      data = await tmdbJson(
+        `/discover/tv?sort_by=popularity.desc&without_genres=16&include_null_first_air_dates=false&page=${page}`,
+      )
+    } else if (kind === 'airing') {
+      data = await tmdbJson(`/tv/on_the_air?page=${page}`)
+    } else {
+      data = await tmdbJson(`/trending/tv/week?page=${page}`)
+    }
+    for (const show of data?.results || []) {
+      const item = mapTmdbShow(show)
+      if (!item || seen.has(item.tmdbId)) continue
+      seen.add(item.tmdbId)
+      out.push(item)
+      if (out.length >= 24) return out
+    }
+  }
+  return out
+}
+
+async function fetchSeriesCatalog() {
+  const [popular, airing, trending] = await Promise.all([
+    fetchTmdbShelf('popular', 2),
+    fetchTmdbShelf('airing', 1),
+    fetchTmdbShelf('trending', 1),
+  ])
+  return { popular, airing, trending }
+}
+
+function pickRiveHlsUrl(data) {
+  const root = data && typeof data === 'object' ? data : {}
+  const nested = root.data && typeof root.data === 'object' ? root.data : null
+  const lists = [
+    Array.isArray(root.sources) ? root.sources : null,
+    nested && Array.isArray(nested.sources) ? nested.sources : null,
+  ].filter(Boolean)
+  const candidates = []
+  for (const list of lists) {
+    for (const entry of list) {
+      if (!entry || typeof entry !== 'object') continue
+      const url = String(entry.url || '').trim()
+      if (!url) continue
+      const format = String(entry.format || entry.quality || '').toLowerCase()
+      if (format === 'hls' || /\.m3u8/i.test(url) || /m3u8-proxy|\.m3u8\?/i.test(url)) {
+        candidates.push({
+          url,
+          quality: String(entry.quality || ''),
+          source: String(entry.source || entry.label || ''),
+        })
+      }
+    }
+  }
+  if (!candidates.length) return null
+  const scored = [...candidates].sort((a, b) => {
+    const score = (c) => {
+      const blob = `${c.source} ${c.quality} ${c.url}`.toLowerCase()
+      let n = 0
+      if (/english|\beng\b|\ben-?us\b|\ben\b/.test(blob)) n += 20
+      if (/hindi|\bhin\b|hindicast|arabic|spanish|french|german|portuguese|russian|turkish|tamil|telugu|urdu|korean|chinese|mandarin/.test(blob))
+        n -= 25
+      return n
+    }
+    return score(b) - score(a)
+  })
+  return scored[0]
+}
+
+async function resolveSeriesHls(tmdbId, season, episode, maxHeight = 720) {
+  const cap = Math.max(360, Math.min(1080, Number(maxHeight) || 720))
+  await pruneSessions()
+  let lastError = 'No HLS sources'
+  for (const provider of RIVE_TV_PROVIDERS) {
+    const api =
+      `${RIVE_SCRAPPER}/api/provider?provider=${encodeURIComponent(provider)}` +
+      `&id=${encodeURIComponent(tmdbId)}&season=${season}&episode=${episode}`
+    let data
+    try {
+      const res = await fetch(api, {
+        headers: {
+          Accept: 'application/json',
+          Origin: 'https://rivestream.ru',
+          Referer: RIVE_REFERER,
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        },
+      })
+      if (!res.ok) {
+        lastError = `${provider} HTTP ${res.status}`
+        continue
+      }
+      data = await res.json()
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : `${provider} failed`
+      continue
+    }
+    const hit = pickRiveHlsUrl(data)
+    if (!hit?.url) {
+      lastError = `${provider} had no HLS`
+      continue
+    }
+    const upstream = await proxyHlsFetch(hit.url, RIVE_REFERER)
+    if (!upstream.ok || !upstream.buf.slice(0, 7).toString('utf8').startsWith('#EXTM3U')) {
+      lastError = `${provider} playlist fetch failed`
+      continue
+    }
+    const playlist = upstream.buf.toString('utf8')
+    if (isDecoyPlaylist(playlist)) {
+      lastError = `${provider} decoy playlist`
+      continue
+    }
+    const sid = newSessionId()
+    /** @type {Session} */
+    const session = {
+      mode: 'hls',
+      referer: RIVE_REFERER,
+      mediaUrl: hit.url,
+      page: null,
+      videoInit: null,
+      audioInit: null,
+      videoTimescale: 0,
+      audioTimescale: 0,
+      videoSegs: [],
+      audioSegs: [],
+      tsSegs: [],
+      playlist,
+      variants: {},
+      segments: {},
+      nextSeq: 1,
+      nextMediaSeq: 0,
+      drainTimer: null,
+      lastDrainAt: 0,
+      drainCount: 0,
+      ingestCount: 0,
+      at: Date.now(),
+    }
+    // Prefer a media playlist within the device maxHeight (no ffmpeg).
+    const safe = pickSafeHlsVariant(playlist, hit.url, cap)
+    if (safe) {
+      const media = await proxyHlsFetch(safe.url, RIVE_REFERER)
+      if (media.ok && media.buf.slice(0, 7).toString('utf8').startsWith('#EXTM3U')) {
+        const mediaText = media.buf.toString('utf8')
+        if (!isDecoyPlaylist(mediaText)) {
+          sessions.set(sid, {
+            ...session,
+            mediaUrl: safe.url,
+            playlist: mediaText,
+          })
+          console.log(
+            '[roku-hls] series ≤' + cap + 'p',
+            tmdbId,
+            `S${season}E${episode}`,
+            provider,
+            safe.height || '?',
+            safe.url.slice(0, 80),
+          )
+          return {
+            ok: true,
+            mode: 'hls',
+            sid,
+            mediaUrl: safe.url,
+            referer: RIVE_REFERER,
+            provider,
+            height: safe.height || cap,
+          }
+        }
+      }
+    }
+
+    // Over-cap / single high rung → remux to device maxHeight (Futbol-x compat path).
+    if (!ffmpegPath) {
+      lastError = `${provider} needs ffmpeg for ${cap}p compat`
+      continue
+    }
+    await pruneCompatSessions()
+    for (const [id, s] of [...compatSessions.entries()]) {
+      await closeCompatSession(id, s)
+    }
+    const started = startCompatTranscode(hit.url, RIVE_REFERER, cap)
+    const ready = await waitForCompatPlaylist(started.sid, 45_000)
+    if (!ready) {
+      await closeCompatSession(started.sid, compatSessions.get(started.sid))
+      lastError = `${provider} compat ${cap}p timed out`
+      continue
+    }
+    console.log(
+      '[roku-hls] series compat',
+      cap + 'p',
+      tmdbId,
+      `S${season}E${episode}`,
+      provider,
+      hit.url.slice(0, 80),
+    )
+    return {
+      ok: true,
+      mode: 'compat',
+      sid: started.sid,
+      mediaUrl: hit.url,
+      referer: RIVE_REFERER,
+      provider,
+      height: cap,
+    }
+  }
+  return { ok: false, error: lastError }
+}
+
+/** Pick the best media variant with height ≤ maxH (and prefer ~720 when available). */
+function pickSafeHlsVariant(playlist, playlistUrl, maxH = 720) {
+  if (!/#EXT-X-STREAM-INF/i.test(playlist)) {
+    // Already a media playlist — unknown height; let caller fall through to compat.
+    return null
+  }
+  let base
+  try {
+    base = new URL(playlistUrl)
+  } catch {
+    return null
+  }
+  const lines = playlist.split(/\r?\n/)
+  const candidates = []
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    if (!/^#EXT-X-STREAM-INF:/i.test(line)) continue
+    const next = (lines[i + 1] || '').trim()
+    if (!next || next.startsWith('#')) continue
+    const res = /RESOLUTION=(\d+)x(\d+)/i.exec(line)
+    const br = /BANDWIDTH=(\d+)/i.exec(line)
+    const height = res ? Number(res[2]) : 0
+    const bandwidth = br ? Number(br[1]) : 0
+    if (height > maxH) continue
+    let abs = next
+    try {
+      abs = new URL(next, base).href
+    } catch {
+      continue
+    }
+    candidates.push({ url: abs, height: height || maxH, bandwidth })
+  }
+  if (!candidates.length) return null
+  candidates.sort((a, b) => {
+    // Prefer closest to 720 without going over, then higher bandwidth within that.
+    const ah = a.height || 0
+    const bh = b.height || 0
+    if (bh !== ah) return bh - ah
+    return (b.bandwidth || 0) - (a.bandwidth || 0)
+  })
+  return candidates[0]
+}
+
 /* ─── HTTP ─── */
 
 function readBody(req) {
@@ -1422,10 +1907,12 @@ const server = http.createServer(async (req, res) => {
       tsSegs: ts,
       ingest,
       remuxQueue: remuxQueue.length,
-      remuxBusy,
+      remuxActive,
+      remuxWorkers: REMUX_WORKERS,
       mode: 'mpegts+hls',
       movyProxy: true,
       ffmpeg: Boolean(ffmpegPath && fs.existsSync(String(ffmpegPath))),
+      ffmpegPath: ffmpegPath || null,
     })
     return
   }
@@ -1654,12 +2141,184 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
+  /**
+   * Futbol-x / heavy single-rendition HLS → 720p30 Main@L3.1 for weak Roku TVs
+   * (audio-only / black video). TCL 40FS3850 cannot decode 1080p50/60 @ 6–12 Mbps.
+   *
+   *   GET /api/compat/start?url=&referer=  → { ok, proxiedUrl, sid }
+   *   GET /api/compat?sid=&f=index.m3u8|seg….ts
+   */
+  if (req.method === 'GET' && url.pathname === '/api/compat/start') {
+    if (!authOk(req)) {
+      sendJson(res, 401, { ok: false, error: 'Unauthorized' })
+      return
+    }
+    const target = url.searchParams.get('url') || ''
+    const referer = url.searchParams.get('referer') || 'https://www.futbol-x.xyz/'
+    const maxHeight = Math.max(
+      360,
+      Math.min(1080, Number(url.searchParams.get('maxHeight') || 720) || 720),
+    )
+    if (!/^https?:\/\//i.test(target)) {
+      sendJson(res, 400, { ok: false, error: 'Missing url' })
+      return
+    }
+    if (!ffmpegPath) {
+      sendJson(res, 503, { ok: false, error: 'ffmpeg missing on bridge host' })
+      return
+    }
+    try {
+      await pruneCompatSessions()
+      // One live transcode at a time on a living-room PC.
+      for (const [id, s] of [...compatSessions.entries()]) {
+        await closeCompatSession(id, s)
+      }
+      const started = startCompatTranscode(target, referer, maxHeight)
+      const ready = await waitForCompatPlaylist(started.sid, 20_000)
+      if (!ready) {
+        await closeCompatSession(started.sid, compatSessions.get(started.sid))
+        sendJson(res, 504, { ok: false, error: 'Compat transcoder timed out starting' })
+        return
+      }
+      const proxiedUrl =
+        `${publicBase(req)}/api/compat?sid=${encodeURIComponent(started.sid)}&f=index.m3u8`
+      sendJson(res, 200, {
+        ok: true,
+        sid: started.sid,
+        proxiedUrl,
+        expiresIn: 600,
+        mode: 'compat-720p30',
+      })
+    } catch (err) {
+      sendJson(res, 502, {
+        ok: false,
+        error: err instanceof Error ? err.message : 'Compat start failed',
+      })
+    }
+    return
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/compat') {
+    if (!authOk(req)) {
+      res.writeHead(401, { 'Content-Type': 'text/plain' })
+      res.end('Unauthorized')
+      return
+    }
+    const sid = url.searchParams.get('sid') || ''
+    const file = path.basename(url.searchParams.get('f') || 'index.m3u8')
+    const session = sid ? compatSessions.get(sid) : null
+    if (!session) {
+      res.writeHead(404, { 'Content-Type': 'text/plain' })
+      res.end('Unknown compat session')
+      return
+    }
+    session.at = Date.now()
+    const abs = path.join(session.dir, file)
+    if (!abs.startsWith(session.dir) || !fs.existsSync(abs)) {
+      res.writeHead(404, { 'Content-Type': 'text/plain' })
+      res.end('Missing segment')
+      return
+    }
+    const body = fs.readFileSync(abs)
+    if (file.endsWith('.m3u8')) {
+      // Rewrite segment URIs to absolute compat URLs.
+      const text = body.toString('utf8').replace(/^(seg\d+\.ts)$/gm, (_m, seg) => {
+        return `${publicBase(req)}/api/compat?sid=${encodeURIComponent(sid)}&f=${seg}`
+      })
+      res.writeHead(200, {
+        'Content-Type': 'application/vnd.apple.mpegurl',
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'no-store',
+      })
+      res.end(text)
+      return
+    }
+    res.writeHead(200, {
+      'Content-Type': 'video/mp2t',
+      'Cache-Control': 'no-store',
+      'Access-Control-Allow-Origin': '*',
+    })
+    res.end(body)
+    return
+  }
+
+  /**
+   * TV Series shelves — same TMDB feeds + Rive play path as desktop Series.
+   *   GET /api/series/catalog
+   *   GET /api/series/resolve?tmdbId=&season=&episode=
+   */
+  if (req.method === 'GET' && url.pathname === '/api/series/catalog') {
+    try {
+      const catalog = await fetchSeriesCatalog()
+      sendJson(res, 200, { ok: true, ...catalog })
+    } catch (err) {
+      sendJson(res, 502, {
+        ok: false,
+        error: err instanceof Error ? err.message : 'Series catalog failed',
+        popular: [],
+        airing: [],
+        trending: [],
+      })
+    }
+    return
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/series/resolve') {
+    try {
+      const tmdbId = String(url.searchParams.get('tmdbId') || '').trim()
+      const season = Math.max(1, Number(url.searchParams.get('season') || 1) || 1)
+      const episode = Math.max(1, Number(url.searchParams.get('episode') || 1) || 1)
+      const maxHeight = Math.max(
+        360,
+        Math.min(1080, Number(url.searchParams.get('maxHeight') || 720) || 720),
+      )
+      if (!tmdbId) {
+        sendJson(res, 400, { ok: false, error: 'Missing tmdbId' })
+        return
+      }
+      const resolved = await resolveSeriesHls(tmdbId, season, episode, maxHeight)
+      if (!resolved.ok) {
+        sendJson(res, 502, resolved)
+        return
+      }
+      const base = publicBase(req)
+      const proxiedUrl =
+        resolved.mode === 'compat'
+          ? `${base}/api/compat?sid=${encodeURIComponent(resolved.sid)}&f=index.m3u8`
+          : `${base}/api/hls?sid=${encodeURIComponent(resolved.sid)}` +
+            `&url=${encodeURIComponent(resolved.mediaUrl)}` +
+            `&referer=${encodeURIComponent(resolved.referer)}` +
+            (TOKEN ? `&token=${encodeURIComponent(TOKEN)}` : '')
+      sendJson(res, 200, {
+        ok: true,
+        proxiedUrl,
+        mediaUrl: resolved.mediaUrl,
+        referer: resolved.referer,
+        sid: resolved.sid,
+        provider: resolved.provider,
+        mode: resolved.mode || 'hls',
+        height: resolved.height || 720,
+        season,
+        episode,
+        tmdbId,
+      })
+    } catch (err) {
+      sendJson(res, 500, {
+        ok: false,
+        error: err instanceof Error ? err.message : 'Series resolve failed',
+      })
+    }
+    return
+  }
+
   sendJson(res, 404, { ok: false, error: 'Not found' })
 })
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`[roku-hls] listening on http://0.0.0.0:${PORT}`)
   console.log('[roku-hls] resolve → YouTube/yt-dlp HLS, real-HLS sniff, else MSE+ffmpeg')
+  console.log('[roku-hls] compat → /api/compat/start (Futbol-x → 720p30 for weak TVs)')
+  console.log('[roku-hls] series → /api/series/catalog + /api/series/resolve (TMDB + Rive)')
   console.log('[roku-hls] ffmpeg', ffmpegPath || 'missing')
   console.log('[roku-hls] yt-dlp', findYtDlp().cmd)
   if (TOKEN) console.log('[roku-hls] token auth enabled')
@@ -1667,6 +2326,7 @@ server.listen(PORT, '0.0.0.0', () => {
 
 process.on('SIGINT', async () => {
   for (const [id, s] of sessions) await closeSession(id, s)
+  for (const [id, s] of compatSessions) await closeCompatSession(id, s)
   if (browser) await browser.close().catch(() => {})
   process.exit(0)
 })

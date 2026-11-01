@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<component name="SideNavItem" extends="Group">
+  <script type="text/brightscript" uri="SideNavItem.brs" />
+  <interface>
+    <field id="itemContent" type="node" onChange="onContentSet" />
+    <field id="focusPercent" type="float" onChange="onFocusPercent" />
+  </interface>
+  <children>
+    <!-- Matches desktop sidebar row: gold pill when focused, colored dot + label. -->
+    <Rectangle
+      id="pill"
+      width="200"
+      height="44"
+      translation="[0,0]"
+      color="0x00000000"
+    />
+    <Rectangle
+      id="dot"
+      width="8"
+      height="8"
+      translation="[16,18]"
+      color="0x8B95A8FF"
+    />
+    <Label
+      id="label"
+      translation="[34,0]"
+      width="158"
+      height="44"
+      font="font:SmallBoldSystemFont"
+      color="0xE8ECF4FF"
+      horizAlign="left"
+      vertAlign="center"
+    />
+  </children>
+</component>

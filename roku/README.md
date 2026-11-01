@@ -5,14 +5,14 @@ BrightScript / SceneGraph channel for TCL and other Roku TVs. This is **not** th
 ## What it does
 
 - **Local live:** TVJ (HLS in-channel), Nationwide (`jiyu-nnn` Cloudflare Worker → stays in Jiyu, no PC / no YouTube app), CVM (info only)
-- **Live football:** cards from `api.ppv.st`; play goes through `services/roku-hls` on your PC
+- **Live football:** [Futbol-x](https://www.futbol-x.xyz/) JSON → Flussonic signed HLS (no PC bridge)
+- PPV embeds / `roku-hls` remain available for older paths but are not the football shelf default
 
 ## Test football on a TCL
 
 ```powershell
 cd D:\app
-npm run roku-hls          # leave running
-npm run pack:roku         # stamps this PC's LAN IP into the channel
+npm run pack:roku
 ```
 
-Sideload `release\jiyu-roku.zip` — steps in `docs/install-tvs.md`.
+Sideload `release\jiyu-roku.zip` — steps in `docs/install-tvs.md`. OK a Futbol-x card; token refreshes ~every 13 minutes.

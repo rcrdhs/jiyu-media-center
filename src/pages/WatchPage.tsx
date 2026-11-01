@@ -52,6 +52,7 @@ import { upsertTorrentItems } from '../lib/torrentCatalogStore'
 import { TORRENTIO_TV_TRIAL } from '../lib/torrentio'
 import { getViewingQuality, resolveRequestedQuality } from '../lib/viewingQuality'
 import { isStreamedCatalogItem, resolveStreamedPlay } from '../lib/streamed'
+import { isFutbolXCatalogItem, resolveFutbolXPlay } from '../lib/futbolX'
 import {
   isLivextvReplayCatalogItem,
   resolveLivextvReplayPlay,
@@ -589,6 +590,42 @@ export function WatchPage() {
         isTmdbTvCatalogItem(item!)
       ) {
         navigate(`/show/${item!.id}`, { replace: true, state: { from: returnTo } })
+        return
+      }
+
+      // Futbol-x → Flussonic token → native HLS (no Web Browser / no bridge).
+      if (isFutbolXCatalogItem(item!)) {
+        setLoadStatus('Signing stream…')
+        const signed = await resolveFutbolXPlay(item!.url)
+        if (cancelled) return
+        if (!signed.ok) {
+          setError(signed.error || 'Could not sign Futbol-x stream')
+          return
+        }
+        const guard = multiviewGuardRef.current
+        const keepOthers =
+          guard.awaitingAdd || guard.slotsLen > 1 || guard.mode === 'multi'
+        if (!keepOthers) clearWebSurfacesForWatch()
+        const hlsItem = {
+          ...item!,
+          url: signed.url,
+          httpReferrer: item!.httpReferrer || 'https://www.futbol-x.xyz/',
+          tags: [
+            ...new Set(
+              [...(item!.tags ?? []), 'live', 'hls', 'futbolx'].filter((t) => t !== 'web-embed'),
+            ),
+          ],
+        }
+        play(hlsItem, {
+          forceFull: true,
+          replace: !keepOthers,
+          returnTo: returnTo || '/section/sports',
+        })
+        if (keepOthers) {
+          navigate('/multiview', { replace: true })
+        } else {
+          navigate('/', { replace: true })
+        }
         return
       }
 

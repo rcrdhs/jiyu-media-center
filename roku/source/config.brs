@@ -1,4 +1,4 @@
-' Stamped by npm run pack:roku — 2026-10-29T11:49:57.877Z
+' Stamped by npm run pack:roku — 2026-11-01T05:18:52.719Z
 ' Override with ROKU_HLS_BASE / ROKU_HLS_TOKEN when packing.
 function rokuHlsBase() as string
   return "http://10.10.10.6:8791"

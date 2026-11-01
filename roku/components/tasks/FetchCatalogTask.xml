@@ -4,5 +4,7 @@
     <field id="request" type="string" />
     <field id="response" type="assocarray" />
   </interface>
+  <script type="text/brightscript" uri="pkg:/source/config.brs" />
+  <script type="text/brightscript" uri="pkg:/source/deviceProfile.brs" />
   <script type="text/brightscript" uri="FetchCatalogTask.brs" />
 </component>

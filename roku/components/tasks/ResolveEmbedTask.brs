@@ -61,7 +61,7 @@ sub runTask()
   if msg = invalid
     m.top.response = {
       ok: false
-      error: "roku-hls timed out at " + base + " — is npm run roku-hls running? Firewall allowing port 8791?"
+      error: "roku-hls timed out at " + base + " — is the cloud bridge up? Firewall allowing port 8791?"
       title: title
     }
     return
@@ -77,7 +77,7 @@ sub runTask()
   if raw = invalid or raw = ""
     m.top.response = {
       ok: false
-      error: "No response from roku-hls at " + base + " — is npm run roku-hls running on the PC?"
+      error: "No response from roku-hls at " + base + " — is the cloud bridge running?"
       title: title
     }
     return

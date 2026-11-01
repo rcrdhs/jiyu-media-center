@@ -28,6 +28,8 @@ tizen/*
 .env
 .env.*
 !.env.example
+services/movy-resolve/.deploy-token
+services/movy-resolve/.env
 
 # Local scratch / probe dumps
 .tmp-*
@@ -50,3 +52,9 @@ reports/
 *.csv
 release-pack/
 
+
+services/movy-resolve/.deploy-token
+services/movy-resolve/.env
+
+
+services/roku-hls/.deploy-token

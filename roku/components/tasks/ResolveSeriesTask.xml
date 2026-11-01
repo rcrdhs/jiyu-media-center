@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<component name="ResolveSeriesTask" extends="Task">
+  <interface>
+    <field id="tmdbId" type="string" />
+    <field id="season" type="integer" />
+    <field id="episode" type="integer" />
+    <field id="title" type="string" />
+    <field id="maxHeight" type="integer" />
+    <field id="response" type="assocarray" />
+  </interface>
+  <script type="text/brightscript" uri="pkg:/source/config.brs" />
+  <script type="text/brightscript" uri="pkg:/source/deviceProfile.brs" />
+  <script type="text/brightscript" uri="ResolveSeriesTask.brs" />
+</component>

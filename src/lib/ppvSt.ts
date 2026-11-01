@@ -1,9 +1,19 @@
 /**
  * PPV.st (api.ppv.st) — live / upcoming sports & PPV schedule.
  * Catalog: /api/streams → Sports → Live. Play: site iframe in Web Browser.
+ *
+ * StreamFree (streamfree.top) rows ride the same shelf: fetchPpvStLiveCatalog
+ * merges them in (one card per match), and isPpvStCatalogItem accepts them so
+ * Live / Upcoming / sport chips treat both sources alike.
  */
 
 import type { StreamItem } from '../types'
+import {
+  fetchStreamFreeLiveCatalog,
+  isStreamFreeCatalogItem,
+  isStreamFreeLiveNow,
+  mergeStreamFreeWithPpv,
+} from './streamFree'
 
 export const PPV_ST_ORIGIN = 'https://ppv.st'
 export const PPV_ST_API_ORIGIN = 'https://api.ppv.st'
@@ -48,6 +58,7 @@ export function isPpvStCatalogItem(item: {
   source?: string
 }): boolean {
   if (item.id?.startsWith(PPV_ST_ID_PREFIX)) return true
+  if (isStreamFreeCatalogItem(item)) return true
   if (item.tags?.some((t) => /^ppv\.?st$/i.test(t))) return true
   if (/^ppv\.st$/i.test(String(item.source || ''))) return true
   try {
@@ -66,6 +77,8 @@ export function isPpvStCatalogItem(item: {
 
 export function isPpvStLiveNow(item: StreamItem, nowSec = unixSecondsNow()): boolean {
   if (!isPpvStCatalogItem(item)) return false
+  // StreamFree: live_sources (refreshed every poll) decides, not the kickoff clock.
+  if (isStreamFreeCatalogItem(item)) return isStreamFreeLiveNow(item)
   if (item.tags?.includes('always-live')) return true
   const start = item.eventStartsAt
     ? Math.floor(item.eventStartsAt / 1000)
@@ -289,7 +302,16 @@ export function ppvStSportChipsFromItems(
   items: StreamItem[],
 ): Array<{ id: string; name: string }> {
   const byId = new Map<string, string>()
-  const skip = new Set(['live', 'ppv.st', 'live-now', 'always-live', 'upcoming'])
+  const skip = new Set([
+    'live',
+    'ppv.st',
+    'streamfree',
+    'web-embed',
+    'media3',
+    'live-now',
+    'always-live',
+    'upcoming',
+  ])
   for (const item of items) {
     if (!isPpvStCatalogItem(item)) continue
     for (const raw of item.tags || []) {
@@ -309,8 +331,8 @@ export function ppvStSportChipsFromItems(
     .sort((a, b) => a.name.localeCompare(b.name))
 }
 
-/** Fetch live + near-term upcoming PPV.st events for Sports → Live / Upcoming. */
-export async function fetchPpvStLiveCatalog(): Promise<
+/** PPV.st only — live + near-term upcoming events. */
+async function fetchPpvStOnlyCatalog(): Promise<
   { ok: true; items: StreamItem[] } | { ok: false; error: string; items: StreamItem[] }
 > {
   const result = await fetchJson<{
@@ -356,5 +378,72 @@ export async function fetchPpvStLiveCatalog(): Promise<
     return (a.releasedAt || 0) - (b.releasedAt || 0)
   })
 
+  return { ok: true, items }
+}
+
+/**
+ * Sports → Live / Upcoming schedule: PPV.st + StreamFree + Futbol-x, deduped.
+ * Succeeds when any source answers.
+ */
+export async function fetchPpvStLiveCatalog(): Promise<
+  { ok: true; items: StreamItem[] } | { ok: false; error: string; items: StreamItem[] }
+> {
+  const { fetchFutbolXFootballCatalog } = await import('./futbolX')
+  const [ppv, sf, fx] = await Promise.all([
+    fetchPpvStOnlyCatalog(),
+    fetchStreamFreeLiveCatalog(),
+    fetchFutbolXFootballCatalog(),
+  ])
+  if (!ppv.ok && !sf.ok && !fx.ok) {
+    return {
+      ok: false,
+      error: `PPV.st: ${ppv.error}; StreamFree: ${sf.error}; Futbol-x: ${fx.error}`,
+      items: [],
+    }
+  }
+  if (!ppv.ok) console.warn('PPV.st streams unavailable:', ppv.error)
+  if (!sf.ok) console.warn('StreamFree streams unavailable:', sf.error)
+  if (!fx.ok) console.warn('Futbol-x streams unavailable:', fx.error)
+  const { isSameSportsFixture } = await import('./streamFree')
+  const { isFutbolXCatalogItem } = await import('./futbolX')
+  // Embeds first, then overlay Futbol-x HLS as the primary card when it's the same fixture.
+  const merged = mergeStreamFreeWithPpv(ppv.items, sf.items)
+  const items: StreamItem[] = []
+  const usedFx = new Set<string>()
+  for (const row of merged) {
+    const twin = (fx.ok ? fx.items : []).find(
+      (f) => !usedFx.has(f.id) && isSameSportsFixture(row, f),
+    )
+    if (twin) {
+      usedFx.add(twin.id)
+      items.push({
+        ...twin,
+        sportsAltSources: [
+          { label: row.source || 'Alt', url: row.url },
+          ...(row.sportsAltSources || []),
+          ...(twin.sportsAltSources || []),
+        ].filter((s, i, all) => s.url && s.url !== twin.url && all.findIndex((o) => o.url === s.url) === i),
+        homeBadgeUrl: twin.homeBadgeUrl || row.homeBadgeUrl,
+        awayBadgeUrl: twin.awayBadgeUrl || row.awayBadgeUrl,
+      })
+      continue
+    }
+    items.push(row)
+  }
+  for (const f of fx.ok ? fx.items : []) {
+    if (!usedFx.has(f.id)) items.push(f)
+  }
+  items.sort((a, b) => {
+    const rank = (item: StreamItem) => {
+      if (isFutbolXCatalogItem(item) && item.tags?.includes('live-now')) return -1
+      if (item.tags?.includes('always-live')) return 1
+      if (isPpvStLiveNow(item)) return 0
+      return 2
+    }
+    const ra = rank(a)
+    const rb = rank(b)
+    if (ra !== rb) return ra - rb
+    return (a.releasedAt || 0) - (b.releasedAt || 0)
+  })
   return { ok: true, items }
 }

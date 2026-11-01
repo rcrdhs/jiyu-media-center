@@ -84,6 +84,7 @@ import {
 import { resolveM2BoxPlay } from '../lib/m2box'
 import {
   lookupRivestreamTmdbId,
+  lookupTmdbMovieMeta,
   resolveAnimeTmdbTvId,
   rivestreamTmdbIdFromItem,
   shouldPreferRivestreamJapaneseAudio,
@@ -95,7 +96,11 @@ import {
   getMovyPlaySession,
   rememberMovyPlaySession,
   type MovyAudioOption,
+  markTizenSourceFailed,
+  getTizenFailedSources,
+  clearTizenFailedSources,
 } from '../lib/movy'
+import { resolvePopcornPlay, POPCORN_PLAY_REFERER, isPopcornStreamUrl } from '../lib/popcorn'
 import { BILIBILI_TV_PLAY_REFERER } from '../lib/bilibiliTv'
 import { resolveDonghuaPlay } from '../lib/donghuaResolve'
 import { biliSubtitleHeaders, isBiliSubtitleUrl } from '../lib/biliSubs'
@@ -636,6 +641,15 @@ function loadSavedMuted(): boolean {
  */
 const AUDIO_PIPELINE_REV = 10
 
+/** Samsung runtime format fallback (auto-rotate when the TV can't decode a stream). */
+const TIZEN_FORMAT_FALLBACK_MAX = 6
+/** Buffered 6 s+ ahead but readyState < 2 this long = the TV can't decode it (fMP4). */
+const TIZEN_DECODE_WAIT_MS = 8_000
+/** No first frame this long after the source attached. */
+const TIZEN_START_LIMIT_MS = 30_000
+const TIZEN_START_FAIL_RE =
+  /stalled|not supported|unsupported|can't play|cannot play|could not play|decode|media error|MEDIA_ERR|timed out/i
+
 export function Player({
   item,
   onClose,
@@ -960,6 +974,128 @@ export function Player({
   useEffect(() => {
     setMovyAudioOpen(false)
   }, [activePlaylistItem.url])
+  // Samsung runtime format fallback: a stream this TV can't decode (muxed fMP4 that
+  // buffers at readyState 1, MEDIA_ERR_DECODE / SRC_NOT_SUPPORTED, or a stall error
+  // before the first frame) rotates to the next server instead of stopping on the
+  // stall error. Desktop / Android / Roku are unchanged.
+  const tizenFormatFallbackRef = useRef({ key: '', count: 0 })
+  const tizenErrorMirrorRef = useRef<string | null>(null)
+  tizenErrorMirrorRef.current = error
+  useEffect(() => {
+    if (!isTizenTv() || isLivePlaybackItem(item)) return
+    const url = activePlaylistItem.url || ''
+    if (!/^https?:\/\//i.test(url) || isEphemeralLocalStreamUrl(url)) return
+    let armedAt = Date.now()
+    let decodeWaitSince = 0
+    let lastT = -1
+    let done = false
+    let timer = 0
+    const stop = () => {
+      done = true
+      window.clearInterval(timer)
+    }
+    const describe = () => {
+      const session = getMovyPlaySession(url)
+      let host = ''
+      try {
+        const u = new URL(url)
+        host = new URL(u.searchParams.get('u') || url).host
+      } catch {
+        host = ''
+      }
+      const backend = session?.backend || (isPopcornStreamUrl(url) ? 'popcorn' : '?')
+      return `${backend}:${session?.provider || ''} lang=${session?.language || ''} host=${host}`
+    }
+    const started = () => {
+      stop()
+      console.info(`[jiyu] tizen stream started (${describe()}) after ${Math.round((Date.now() - armedAt) / 1000)}s`)
+    }
+    const fail = (reason: string) => {
+      stop()
+      const meta = hlsFallbackMetaRef.current
+      if (!meta?.tmdbId || activeUrlRef.current !== url) return
+      const epKey = `${item.id}|${playlistIndex}`
+      const st = tizenFormatFallbackRef.current
+      if (st.key !== epKey) {
+        st.key = epKey
+        st.count = 0
+      }
+      if (st.count >= TIZEN_FORMAT_FALLBACK_MAX) return
+      st.count += 1
+      const session = getMovyPlaySession(url)
+      const hint = isPopcornStreamUrl(url)
+        ? { backend: 'popcorn' }
+        : !session && activePlaybackReferrerRef.current === ATLANTIC_PLAY_REFERER
+          ? { backend: 'atlantic' }
+          : undefined
+      markTizenSourceFailed(
+        { tmdbId: meta.tmdbId, mediaType: meta.mediaType, season: meta.season, episode: meta.episode },
+        url,
+        hint,
+      )
+      console.info(
+        `[jiyu] tizen format fallback #${st.count} (${reason}) from ${describe()}`,
+      )
+      meta.busy = true
+      setError(null)
+      setStatus("This TV can't play that stream - trying another source...")
+      void selectPlaylistItemRef.current(playlistIndex, { force: true, rotateSource: true })
+    }
+    timer = window.setInterval(() => {
+      if (done) return
+      const v = videoRef.current
+      const attached = Boolean(v && (v.currentSrc || v.getAttribute('src')))
+      if (!v || !attached || activeUrlRef.current !== url) {
+        armedAt = Date.now()
+        return
+      }
+      const t = v.currentTime
+      // Decoding: frames are moving, or a decoded frame is waiting on a paused player.
+      if (v.readyState >= 2 && Number.isFinite(t) && lastT >= 0 && t > lastT + 0.15) {
+        started()
+        return
+      }
+      if (v.readyState >= 3 && v.paused) {
+        started()
+        return
+      }
+      if (Number.isFinite(t)) lastT = t
+      const sinceArm = Date.now() - armedAt
+      const code = v.error?.code ?? 0
+      if (sinceArm > 2_500 && (code === 3 || code === 4)) {
+        fail(`media error ${code}`)
+        return
+      }
+      const err = tizenErrorMirrorRef.current
+      if (err && sinceArm > 1_500 && TIZEN_START_FAIL_RE.test(err)) {
+        fail(`error: ${err}`)
+        return
+      }
+      let ahead = 0
+      try {
+        if (v.buffered.length > 0) {
+          ahead = v.buffered.end(v.buffered.length - 1) - (Number.isFinite(t) ? t : 0)
+        }
+      } catch {
+        ahead = 0
+      }
+      if (ahead >= 6 && v.readyState < 2) {
+        if (!decodeWaitSince) decodeWaitSince = Date.now()
+        else if (Date.now() - decodeWaitSince >= TIZEN_DECODE_WAIT_MS) {
+          fail('buffered but not decoding')
+          return
+        }
+      } else {
+        decodeWaitSince = 0
+      }
+      if (sinceArm >= TIZEN_START_LIMIT_MS) fail('no first frame')
+    }, 1_000)
+    return () => {
+      done = true
+      window.clearInterval(timer)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activePlaylistItem.url, playlistIndex, item.id])
   useEffect(() => {
     if (!chromeVisible) setMovyAudioOpen(false)
   }, [chromeVisible])
@@ -2926,6 +3062,11 @@ export function Player({
   ) {
     if (index < 0 || index >= playlist.length) return
     if (index === playlistIndex && !options?.force && !options?.rotateSource) return
+    // Samsung format fallback: a fresh pick (not an automatic rotate) gets every server back.
+    if (isTizenTv() && !options?.rotateSource) {
+      clearTizenFailedSources()
+      tizenFormatFallbackRef.current = { key: '', count: 0 }
+    }
     // Never hard-block other episodes while one resolve is in flight — that left
     // anime stuck after a mid-play stall (Next / Restart / other eps did nothing).
     if (episodeLoading) {
@@ -2964,7 +3105,25 @@ export function Player({
     // Always re-resolve torrent episodes. Sibling entries often still hold a
     // 127.0.0.1 remux URL from earlier, but torrentStop() kills that swarm —
     // reusing it shows "Native playback failed".
+    const isTorrentMovieRow =
+      item.category === 'movies' &&
+      playlist.length <= 1 &&
+      (Boolean(entry.torrentUri) ||
+        item.sourceKind === 'torrent' ||
+        item.transport === 'torrent' ||
+        item.torrentSourceId === 'builtin-yts' ||
+        /^magnet:/i.test(String(entry.url || '')))
+    // Samsung: YTS posters stay visible; play via Movy Direct, Popcorn standby (no torrent).
+    const needsTizenDirectMovie =
+      isTizenTv() &&
+      isTorrentMovieRow &&
+      (Boolean(options?.force) ||
+        Boolean(options?.rotateSource) ||
+        !hasPlayableHttp ||
+        Boolean(entry.torrentUri) ||
+        /^magnet:/i.test(String(entry.url || '')))
     const needsTorrent =
+      !needsTizenDirectMovie &&
       (baseCandidates.length > 0 || useTorrentio) &&
       (options?.force ||
         options?.rotateTorrent ||
@@ -2983,20 +3142,22 @@ export function Player({
     // remints re-resolve the *movie* (the TV branch below asked for S1E1) and rotate
     // away from the city that just played.
     const movieTmdbId =
-      item.category === 'movies' && playlist.length <= 1 && !entry.torrentUri
+      item.category === 'movies' && playlist.length <= 1 && (!entry.torrentUri || needsTizenDirectMovie)
         ? rivestreamTmdbIdFromItem(item)
         : ''
     const movieOnHlsPipe =
       movyStyleUrl ||
       Boolean(getMovyPlaySession(entry.url)) ||
-      ['movy', 'atlantic', 'streamo'].includes(
+      isPopcornStreamUrl(entry.url || '') ||
+      ['movy', 'atlantic', 'streamo', 'popcorn'].includes(
         inferPlayPipe({ url: entry.url, referrer: activePlaybackReferrerRef.current }) ?? '',
       ) ||
-      Boolean(item.tags?.some((t) => /^(movy|atlantic|streamo)$/i.test(t)))
+      Boolean(item.tags?.some((t) => /^(movy|atlantic|streamo|popcorn)$/i.test(t)))
     const needsMovyMovie =
-      Boolean(movieTmdbId) &&
-      movieOnHlsPipe &&
-      (Boolean(options?.rotateSource) || (movyStyleUrl && Boolean(options?.force)))
+      needsTizenDirectMovie ||
+      (Boolean(movieTmdbId) &&
+        movieOnHlsPipe &&
+        (Boolean(options?.rotateSource) || (movyStyleUrl && Boolean(options?.force))))
     const needsRivestream =
       !needsMovyMovie &&
       isRivestreamShow &&
@@ -3270,7 +3431,13 @@ export function Player({
     } else if (needsMovyMovie) {
       setEpisodeLoading(true)
       setMediaReady(false)
-      setStatus(options?.rotateSource ? 'Trying another source…' : 'Opening stream…')
+      setStatus(
+        options?.rotateSource
+          ? 'Trying another source…'
+          : needsTizenDirectMovie
+            ? 'Looking up stream…'
+            : 'Opening stream…',
+      )
       setError(null)
       // Keep the playhead across the source switch (tail keeps autoSeekResumeOnceRef
       // for a same-index remint).
@@ -3282,68 +3449,180 @@ export function Player({
       if (keepAt > 0) pinStallPlayhead(keepAt)
       try {
         const prevSession = getMovyPlaySession(entry.url)
+        const yearMatch = /\b((?:19|20)\d{2})\b/.exec(String(item.title || item.description || ''))
+        let tmdbId = movieTmdbId
+        let originalLanguage =
+          normalizeLanguageCode(item.originalLanguage) ||
+          prevSession?.request.originalLanguage ||
+          undefined
+        let year = prevSession?.request.year ?? yearMatch?.[1]
+        if (!tmdbId) {
+          setStatus('Matching title…')
+          const meta = await lookupTmdbMovieMeta(cleanShowDisplayTitle(item.title) || item.title)
+          if (episodeFailGenRef.current !== failGen) return
+          if (!meta?.tmdbId) {
+            failOnEpisode('Could not match this movie for streaming')
+            return
+          }
+          tmdbId = meta.tmdbId
+          if (!originalLanguage && meta.originalLanguage) {
+            originalLanguage = normalizeLanguageCode(meta.originalLanguage) || meta.originalLanguage
+          }
+          if (!year && meta.year) year = meta.year
+          // Cache TMDB id on the catalog row for next play.
+          try {
+            upsertTorrentItems([
+              {
+                ...item,
+                rivestreamTmdbId: tmdbId,
+                ...(originalLanguage ? { originalLanguage } : {}),
+              },
+            ])
+          } catch {
+            /* ignore */
+          }
+        }
         const reliabilityKey = playReliabilityKey({
           itemId: item.id,
-          tmdbId: movieTmdbId,
+          tmdbId,
           mediaType: 'movie',
         })
         // Retry: never pin the pipe / city that just failed.
         if (options?.rotateSource) forgetLastGoodPlay(reliabilityKey)
-        const yearMatch = /\b((?:19|20)\d{2})\b/.exec(String(item.title || item.description || ''))
-        const movy = await withTimeout(
-          resolveMovyPlay({
-            tmdbId: movieTmdbId,
-            title:
-              prevSession?.request.title || cleanShowDisplayTitle(item.title) || item.title,
-            mediaType: 'movie',
-            year: prevSession?.request.year ?? yearMatch?.[1],
-            originalLanguage:
-              normalizeLanguageCode(item.originalLanguage) ||
-              prevSession?.request.originalLanguage ||
-              undefined,
-            avoidProvider:
-              options?.rotateSource && !options?.fromRestart ? prevSession?.provider : undefined,
-          }),
-          22_000,
-          'Source lookup timed out.',
-        )
-        if (episodeFailGenRef.current !== failGen) return
-        if (!movy.ok) {
-          failOnEpisode(movy.error || 'No other source for this movie right now')
+        const title =
+          prevSession?.request.title || cleanShowDisplayTitle(item.title) || item.title
+        setStatus(options?.rotateSource ? 'Trying another source…' : 'Opening Movy…')
+        let played:
+          | {
+              url: string
+              referer: string
+              provider: string
+              backend?: string
+              subtitleUrl?: string
+              subtitleKind?: 'file'
+            }
+          | null = null
+        // Samsung: Popcorn already failed to decode for this movie - don't retry it.
+        const popcornFailedHere =
+          isTizenTv() &&
+          Boolean(getTizenFailedSources({ tmdbId: String(tmdbId), mediaType: 'movie' })?.backends.has('popcorn'))
+        const skipPopcornFirst =
+          options?.rotateSource && isPopcornStreamUrl(entry.url || '') && !popcornFailedHere
+        if (!skipPopcornFirst) {
+          try {
+            const movy = await withTimeout(
+              resolveMovyPlay({
+                tmdbId,
+                title,
+                mediaType: 'movie',
+                year,
+                originalLanguage,
+                avoidProvider:
+                  options?.rotateSource && !options?.fromRestart
+                    ? prevSession?.provider
+                    : undefined,
+              }),
+              22_000,
+              'Source lookup timed out.',
+            )
+            if (episodeFailGenRef.current !== failGen) return
+            if (movy.ok) {
+              played = {
+                url: movy.url,
+                referer: movy.referer || MOVY_PLAY_REFERER,
+                provider: movy.provider,
+                backend: movy.backend,
+                subtitleUrl: movy.subtitleUrl,
+                subtitleKind: movy.subtitleKind,
+              }
+              rememberResolvedHlsPlay(reliabilityKey, movy)
+            }
+          } catch {
+            /* fall through to Popcorn */
+          }
+        }
+        if (!played && !popcornFailedHere) {
+          setStatus('Trying Popcorn…')
+          try {
+            const popcorn = await withTimeout(
+              resolvePopcornPlay({
+                tmdbId,
+                title,
+                mediaType: 'movie',
+                year,
+              }),
+              25_000,
+              'Popcorn lookup timed out.',
+            )
+            if (episodeFailGenRef.current !== failGen) return
+            if (popcorn.ok) {
+              played = {
+                url: popcorn.url,
+                referer: popcorn.referer || POPCORN_PLAY_REFERER,
+                provider: popcorn.provider,
+                backend: 'popcorn',
+              }
+              rememberLastGoodPlay(reliabilityKey, 'popcorn', {
+                provider: popcorn.provider,
+                host: (() => {
+                  try {
+                    return new URL(popcorn.url).host
+                  } catch {
+                    return undefined
+                  }
+                })(),
+              })
+            } else if (!skipPopcornFirst) {
+              failOnEpisode(popcorn.error || 'No stream for this movie right now')
+              return
+            }
+          } catch (err) {
+            failOnEpisode(err instanceof Error ? err.message : 'Could not load movie')
+            return
+          }
+        }
+        if (!played) {
+          failOnEpisode('No stream for this movie right now')
           return
         }
-        rememberResolvedHlsPlay(reliabilityKey, movy)
         hlsFallbackMetaRef.current = {
-          tmdbId: movieTmdbId,
+          tmdbId,
           mediaType: 'movie',
           title: cleanShowDisplayTitle(item.title) || item.title,
-          tried: movy.backend === 'atlantic',
+          tried: played.backend === 'atlantic' || played.backend === 'popcorn',
           busy: false,
         }
-        activePlaybackReferrerRef.current = movy.referer || MOVY_PLAY_REFERER
+        activePlaybackReferrerRef.current = played.referer
         if (window.signalDesktop?.setPlaybackHeaders) {
           void window.signalDesktop.setPlaybackHeaders({
-            url: movy.url,
-            referrer: movy.referer || MOVY_PLAY_REFERER,
+            url: played.url,
+            referrer: played.referer,
           })
         }
-        if (keepAt >= 5) reopenMovyAt(movy.url, keepAt, index)
+        if (keepAt >= 5) reopenMovyAt(played.url, keepAt, index)
         setLocalPlaylist((prev) => {
           const base = prev && prev.length > 0 ? prev : playlist
           return base.map((row, i) =>
             i === index
               ? {
                   ...row,
-                  url: movy.url,
+                  url: played!.url,
+                  torrentUri: undefined,
                   // Keep captions already attached; Movy's own English track wins.
-                  subtitleUrl: movy.subtitleUrl || row.subtitleUrl,
-                  subtitleKind: movy.subtitleUrl ? movy.subtitleKind : row.subtitleKind,
+                  subtitleUrl: played!.subtitleUrl || row.subtitleUrl,
+                  subtitleKind: played!.subtitleUrl ? played!.subtitleKind : row.subtitleKind,
                 }
               : row,
           )
         })
-        if (options?.rotateSource && prevSession?.provider && prevSession.provider !== movy.provider) {
-          flash('Switched to another source')
+        if (options?.rotateSource && prevSession?.provider && prevSession.provider !== played.provider) {
+          flash(
+            played.backend === 'popcorn'
+              ? 'Switched to Popcorn'
+              : 'Switched to another source',
+          )
+        } else if (played.backend === 'popcorn' && !options?.rotateSource) {
+          flash('Playing via Popcorn')
         }
       } catch (err) {
         failOnEpisode(err instanceof Error ? err.message : 'Could not load movie')
@@ -3603,6 +3882,9 @@ export function Player({
           )
           if (episodeFailGenRef.current !== failGen) return
           if (movy.ok) {
+            if (isTizenTv() && movy.backend === 'movy' && movy.languageOk === false) {
+              flash(`Audio: ${(movy.language || 'other').toUpperCase()} - the usual audio can't play on this TV`)
+            }
             const usedAtlantic = movy.backend === 'atlantic'
             hlsFallbackMetaRef.current = {
               tmdbId,
@@ -3664,6 +3946,13 @@ export function Player({
             setStatus('Trying another source…')
             let atlanticOk = false
             try {
+              // Samsung: Helios already failed to decode this episode - don't retry it.
+              if (
+                isTizenTv() &&
+                getTizenFailedSources({ tmdbId, mediaType: 'tv', season, episode })?.backends.has('atlantic')
+              ) {
+                throw new Error('atlantic already failed on this TV')
+              }
               const alt = await resolveAtlanticPlay({
                 tmdbId,
                 mediaType: 'tv',
@@ -4262,15 +4551,19 @@ export function Player({
       let url = ''
       if (await probeMovyHlsUrl(option.url, MOVY_PLAY_REFERER)) {
         url = option.url
-        rememberMovyPlaySession(url, { ...session, language: option.key })
+        rememberMovyPlaySession(url, {
+          ...session,
+          language: option.key,
+          ...(option.provider ? { provider: option.provider } : {}),
+        })
       } else {
         // Signed link went stale — ask the same city again for that language.
         const fresh = await withTimeout(
           resolveMovyPlay({
             ...session.request,
             audioLanguage: option.key,
-            providers: [session.provider],
-            preferProvider: session.provider,
+            providers: [option.provider || session.provider],
+            preferProvider: option.provider || session.provider,
             preferBackend: undefined,
             avoidProvider: undefined,
           }),

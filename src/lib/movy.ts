@@ -15,6 +15,11 @@ import { getViewingQuality, resolveRequestedQuality } from './viewingQuality'
 import { normalizeLanguageCode } from './language'
 import { tizenHlsSource } from './tizenRelay'
 import { isTizenTv } from './tvMode'
+import {
+  RIVESTREAM_PLAY_REFERER,
+  RIVESTREAM_TIZEN_TV_PROVIDERS,
+  listRivestreamTvHls,
+} from './rivestream'
 
 export const MOVY_STREAM_ORIGIN = 'https://api.wecollege.net'
 export const MOVY_PLAY_REFERER = 'https://www.movy.sx/'
@@ -237,7 +242,7 @@ export async function fetchMovySeed(mediaId: string | number): Promise<string> {
 }
 
 export type MovyMediaType = 'movie' | 'tv'
-export type MovyBackend = 'movy' | 'atlantic'
+export type MovyBackend = 'movy' | 'atlantic' | 'rive'
 
 export interface MovyResolveOptions {
   tmdbId: string | number
@@ -285,6 +290,8 @@ export interface MovyAudioOption {
   key: string
   label: string
   url: string
+  /** Samsung union menu: city that lists this stream (Audio switch re-resolves there). */
+  provider?: string
 }
 
 export interface MovySubtitle {
@@ -765,6 +772,84 @@ function rankMovyProviders(
   })
 }
 
+/**
+ * Samsung runtime format fallback: sources that never started decoding on this TV
+ * (fMP4 Tizen MSE can't open, unsupported codec, stall before the first frame),
+ * per title / episode. resolveMovyPlay skips them so the next attempt lands on
+ * another city, Helios or Rive; the Player skips Popcorn the same way.
+ */
+type TizenFailedSources = {
+  providers: Set<string>
+  backends: Set<string>
+  urls: Set<string>
+  at: number
+}
+
+export type TizenSourceRequest = {
+  tmdbId: string | number
+  mediaType: MovyMediaType
+  season?: number
+  episode?: number
+}
+
+const TIZEN_FAILED_TTL_MS = 30 * 60_000
+const tizenFailedSources = new Map<string, TizenFailedSources>()
+
+function tizenFailedKey(req: TizenSourceRequest): string {
+  const tv = req.mediaType === 'tv'
+  return [
+    req.mediaType,
+    String(req.tmdbId || '').trim(),
+    tv ? Math.max(1, req.season || 1) : 0,
+    tv ? Math.max(1, req.episode || 1) : 0,
+  ].join(':')
+}
+
+export function getTizenFailedSources(req: TizenSourceRequest): TizenFailedSources | null {
+  if (!isTizenTv()) return null
+  const key = tizenFailedKey(req)
+  const hit = tizenFailedSources.get(key)
+  if (!hit) return null
+  if (Date.now() - hit.at > TIZEN_FAILED_TTL_MS) {
+    tizenFailedSources.delete(key)
+    return null
+  }
+  return hit
+}
+
+export function markTizenSourceFailed(
+  req: TizenSourceRequest,
+  url: string,
+  hint?: { backend?: string; provider?: string },
+): void {
+  if (!isTizenTv() || !String(req.tmdbId || '').trim()) return
+  const rec: TizenFailedSources = getTizenFailedSources(req) ?? {
+    providers: new Set<string>(),
+    backends: new Set<string>(),
+    urls: new Set<string>(),
+    at: 0,
+  }
+  rec.at = Date.now()
+  if (url) rec.urls.add(url)
+  const session = url ? getMovyPlaySession(url) : null
+  const backend = String(hint?.backend || session?.backend || '').toLowerCase()
+  const provider = String(hint?.provider || session?.provider || '').trim().toLowerCase()
+  if (backend === 'rive') {
+    if (provider) rec.providers.add(`rive:${provider}`)
+  } else if (backend && backend !== 'movy') {
+    rec.backends.add(backend)
+  } else if (provider) {
+    rec.providers.add(provider)
+  }
+  tizenFailedSources.set(tizenFailedKey(req), rec)
+}
+
+/** Fresh pick (not an automatic rotate): every server gets another chance. */
+export function clearTizenFailedSources(req?: TizenSourceRequest): void {
+  if (req) tizenFailedSources.delete(tizenFailedKey(req))
+  else tizenFailedSources.clear()
+}
+
 export async function resolveMovyPlay(options: MovyResolveOptions): Promise<MovyPlayResult> {
   const tmdbId = String(options.tmdbId || '').trim()
   const title = String(options.title || '').trim()
@@ -786,6 +871,12 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
   if (avoidProvider && providers.length > 1) {
     providers = providers.filter((p) => p !== avoidProvider)
   }
+  // Samsung: skip cities / backends / URLs that already failed to decode on this TV.
+  const tizenFailed =
+    onlyProviders.length === 0
+      ? getTizenFailedSources({ tmdbId, mediaType: options.mediaType, season, episode })
+      : null
+  if (tizenFailed) providers = providers.filter((p) => !tizenFailed.providers.has(p))
   const citiesOnly = onlyProviders.length > 0
   const forcedAudio = String(options.audioLanguage || '').trim().toLowerCase()
   const givenOriginal = normalizeLanguageCode(options.originalLanguage)
@@ -808,6 +899,7 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
   }
 
   const tryAtlanticFallback = async (): Promise<MovyPlayResult | null> => {
+    if (tizenFailed?.backends.has('atlantic')) return null
     const started = Date.now()
     try {
       const alt = await resolveAtlanticPlay({
@@ -821,6 +913,7 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
         recordStreamProbeResult('atlantic', false, Date.now() - started)
         return null
       }
+      if (tizenFailed?.urls.has(alt.url)) return null
       recordStreamProbeResult('atlantic', true, Date.now() - started)
       if (alt.provider) recordStreamProbeResult(alt.provider, true, Date.now() - started)
       return {
@@ -840,8 +933,51 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
     }
   }
 
+  /**
+   * Samsung only, TV episodes: RiveStream scrapper (pulse / citadel / flowcast)
+   * when Movy and Atlantic (Helios) have nothing. Each listed stream is loaded
+   * through the relay with the rivestream Referer before it is returned.
+   */
+  const tryRiveFallback = async (): Promise<MovyPlayResult | null> => {
+    if (!isTizenTv() || options.mediaType !== 'tv' || season == null || episode == null) return null
+    const lang = await originalLanguagePromise
+    for (const provider of RIVESTREAM_TIZEN_TV_PROVIDERS) {
+      if (tizenFailed?.providers.has(`rive:${provider}`)) continue
+      const sources = await withTimeoutOr(
+        listRivestreamTvHls({ provider, tmdbId, season, episode, originalLanguage: lang }).catch(() => []),
+        10_000,
+        [],
+      )
+      for (const src of sources.slice(0, 2)) {
+        if (tizenFailed?.urls.has(src.url)) continue
+        if ((await verifyTizenHlsPlayable(src.url, RIVESTREAM_PLAY_REFERER)) !== 'ok') continue
+        return {
+          ok: true,
+          mode: 'hls',
+          url: src.url,
+          referer: RIVESTREAM_PLAY_REFERER,
+          provider,
+          tmdbId,
+          season,
+          episode,
+          quality: src.quality || undefined,
+          subtitleUrl: src.subtitleUrl,
+          subtitleKind: src.subtitleUrl ? 'file' : undefined,
+          backend: 'rive',
+          languageOk: true,
+        }
+      }
+    }
+    return null
+  }
+
   /** Set by pickFromPool: on Samsung every Movy city answered with fMP4 only. */
   let tizenMovyFmp4Only = false
+  /**
+   * Samsung audio fallback: best TS city in another language, used when the wanted
+   * audio is fMP4-only (stalls on Tizen) or missing, instead of stalling.
+   */
+  let tizenOtherAudio = null as MovyPlayResult | null
 
   const resolveMovyCities = async (): Promise<MovyPlayResult | null> => {
     type AliveCity = {
@@ -858,9 +994,42 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
       fmp4: boolean
     }
 
-    const buildResult = (pick: AliveCity): MovyPlayResult => {
+    /** Samsung audio fallback: Audio menu across every live city (picked one first). */
+    const buildTizenUnionAudioOptions = (
+      pick: AliveCity,
+      pool: AliveCity[],
+      p: MovyLanguagePref,
+    ): MovyAudioOption[] => {
+      const cap = movyQualityCap()
+      const byKey = new Map<string, { option: MovyAudioOption; source: MovyStreamSource }>()
+      for (const c of [pick, ...pool.filter((o) => o !== pick && !o.fmp4)]) {
+        for (const s of [...c.decoded.sources].sort((a, b) => compareMovySources(a, b, cap))) {
+          const key = movyAudioKey(s)
+          if (byKey.has(key)) continue
+          byKey.set(key, {
+            option: { key, label: movyAudioLabel(s), url: s.url, provider: c.provider },
+            source: s,
+          })
+        }
+      }
+      // The picked stream itself must be the option for its own language.
+      const pickKey = movyAudioKey(pick.best)
+      byKey.set(pickKey, {
+        option: { key: pickKey, label: movyAudioLabel(pick.best), url: pick.best.url, provider: pick.provider },
+        source: pick.best,
+      })
+      if (byKey.size < 2) return []
+      const auto: MovyLanguagePref = { original: p.original, forced: '' }
+      return [...byKey.values()]
+        .sort((a, b) => movyLanguageRank(a.source, auto) - movyLanguageRank(b.source, auto))
+        .map((e) => e.option)
+    }
+
+    const buildResult = (pick: AliveCity, audioPool?: AliveCity[]): MovyPlayResult => {
       const sub = pickEnglishSubtitle(pick.decoded.subtitles)
-      const audioOptions = buildMovyAudioOptions(pick.decoded.sources, pref)
+      const audioOptions = audioPool
+        ? buildTizenUnionAudioOptions(pick, audioPool, pref)
+        : buildMovyAudioOptions(pick.decoded.sources, pref)
       return {
         ok: true,
         mode: 'hls',
@@ -880,7 +1049,19 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
       }
     }
 
-    const pickFromPool = async (englishAlive: AliveCity[]): Promise<MovyPlayResult | null> => {
+    const pickFromPool = async (
+      englishAlive: AliveCity[],
+      otherAudioTs: AliveCity[] = [],
+    ): Promise<MovyPlayResult | null> => {
+      tizenOtherAudio = null
+      // Samsung audio fallback: no TS city has the wanted audio (only fMP4, which the
+      // TV can't decode, or none) - keep the best TS city in another language ready.
+      if (isTizenTv() && otherAudioTs.length > 0 && !englishAlive.some((c) => !c.fmp4)) {
+        const alt = [...otherAudioTs].sort(
+          (a, b) => a.languageRank - b.languageRank || a.probeMs - b.probeMs,
+        )[0]!
+        tizenOtherAudio = buildResult(alt, [...englishAlive, ...otherAudioTs])
+      }
       if (englishAlive.length === 0) return null
       // Spoken language first: original / English audio beats a faster dub.
       // Samsung: muxed fMP4 (#EXT-X-MAP, e.g. goldenkite) buffers but never decodes
@@ -941,7 +1122,9 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
         let finished = false
         let pending = providers.length
         const englishAlive: AliveCity[] = []
-        const seenUrls = new Set<string>()
+        // Samsung: live TS cities whose best stream is another language (audio fallback).
+        const otherAudioTs: AliveCity[] = []
+        const seenUrls = new Set<string>(tizenFailed?.urls ?? [])
         // Audio menu: keep waiting until a city that lists the picked language answers.
         const satisfied = () => !pref.forced || englishAlive.some((c) => c.languageRank === 0)
         let graceTimer: ReturnType<typeof setTimeout> | null = null
@@ -959,7 +1142,7 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
             graceTimer = null
           }
           // Skip French-dub-only answers so Atlantic can try English.
-          resolve(await pickFromPool(englishAlive))
+          resolve(await pickFromPool(englishAlive, otherAudioTs))
         }
 
         const armEarlyPick = () => {
@@ -1044,10 +1227,23 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
                 return
               }
               if (live.length > 0) armEarlyPick()
+            } else if (probe.ok && isTizenTv() && !fmp4) {
+              otherAudioTs.push({
+                provider,
+                decoded,
+                best,
+                started,
+                probeMs: probe.ms,
+                abrMaster: Boolean(probe.abrMaster),
+                languageRank,
+                fmp4,
+              })
             }
             settleOne()
           })()
         }
+        // Every city already failed on this TV: settle now instead of hanging.
+        if (providers.length === 0) void finalize()
       })
 
     let seed: string
@@ -1081,6 +1277,8 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
 
   // Kick the Atlantic fallback immediately so it overlaps the Movy city lookups.
   const atlanticFallback = tryAtlanticFallback()
+  // Samsung: overlap the RiveStream lookup too (Movy/Helios are often down).
+  const riveFallback = isTizenTv() && options.mediaType === 'tv' ? tryRiveFallback() : null
 
   if (options.preferBackend === 'atlantic') {
     const first = await atlanticFallback
@@ -1092,6 +1290,8 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
     // Samsung: Movy only had fMP4 (stalls on Tizen), so try Helios before it.
     const alt = await withTimeoutOr(atlanticFallback, MOVY_TIZEN_HELIOS_WAIT_MS, null)
     if (alt) return withSession(alt)
+    // Samsung: another language over TS beats the wanted audio as fMP4 (stalls).
+    if (tizenOtherAudio) return withSession(tizenOtherAudio)
   }
   if (movy) return withSession(movy)
 
@@ -1099,6 +1299,14 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
     const alt = await atlanticFallback
     if (alt) return withSession(alt)
   }
+
+  if (riveFallback) {
+    const rive = await riveFallback
+    if (rive) return withSession(rive)
+  }
+
+  // Samsung: nothing in the wanted audio anywhere - another language beats no stream.
+  if (tizenOtherAudio) return withSession(tizenOtherAudio)
 
   return { ok: false, error: 'No streams for this title' }
 }
@@ -1260,10 +1468,14 @@ export async function checkMovyTvPlayable(opts: {
   const title = String(opts.title || '').trim()
   if (!tmdbId || !title) return 'none'
   const started = Date.now()
+  // Samsung also has the RiveStream fallback, so a Movy outage alone isn't fatal
+  // (but a miss while Movy is down stays 'error', never cached as dead).
+  let seedOk = true
   try {
     await fetchMovySeed(tmdbId)
   } catch {
-    return 'error'
+    if (!isTizenTv()) return 'error'
+    seedOk = false
   }
   const base: MovyResolveOptions = {
     tmdbId,
@@ -1295,7 +1507,7 @@ export async function checkMovyTvPlayable(opts: {
     if ((play.backend ?? 'movy') !== 'movy' || !play.provider || tried.has(play.provider)) break
     tried.add(play.provider)
   }
-  if (limited || movyRateLimitedAt >= started) return 'error'
+  if (limited || !seedOk || movyRateLimitedAt >= started) return 'error'
   return 'none'
 }
 
