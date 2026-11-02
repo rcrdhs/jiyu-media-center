@@ -52,6 +52,10 @@ const STEPS = [
     body: 'Google TV, Android TV, and Fire TV: install the free Downloader app on the TV, then type jiyu.free-river.workers.dev/tv and open the file it downloads. That link always gets the newest TV version, and Jiyu updates itself from the menu after that. The remote works everywhere: arrows to move, OK to select, Back to go back.',
   },
   {
+    title: 'Subtitle timing: Subs - and Subs +',
+    body: 'When subtitles are on, the player shows Subs -, a timer, and Subs +. Subtitles show up before the voices: press Subs + to show them later. Subtitles show up after the voices: press Subs - to show them earlier. Each press moves them half a second (up to 15 seconds either way), and the timer shows the shift, like +1.0s. Press the timer to go back to \u00b10s. On PC, the [ and ] keys do the same, and Auto tries to find the timing for you. On a TV, press OK or Up to show the controls, use the arrows to reach the buttons, and press OK. Each new episode starts at \u00b10s; anime keeps your last setting and starts at +0.5s until you change it.',
+  },
+  {
     title: 'Player tips',
     body: 'Use the seekbar to jump; Restart starts the episode from the beginning. Minimize to PiP to keep watching while you browse. Multi-view lets you watch more than one stream. Check for updates from the Jiyu menu.',
   },
