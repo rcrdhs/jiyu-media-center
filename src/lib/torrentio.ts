@@ -7,7 +7,7 @@
 import { getRealDebridToken, hasRealDebridToken } from './debridSettings'
 
 /** Flip to false to disable Torrentio enrichment without deleting call sites. */
-export const TORRENTIO_TV_TRIAL = true
+export const TORRENTIO_TV_TRIAL = false
 
 const TORRENTIO_ORIGIN = 'https://torrentio.strem.fun'
 /** Broader scrape set — season packs with peers beat single dead EZTV magnets. */

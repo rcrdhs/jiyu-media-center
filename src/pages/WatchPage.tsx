@@ -52,7 +52,11 @@ import { upsertTorrentItems } from '../lib/torrentCatalogStore'
 import { TORRENTIO_TV_TRIAL } from '../lib/torrentio'
 import { getViewingQuality, resolveRequestedQuality } from '../lib/viewingQuality'
 import { isStreamedCatalogItem, resolveStreamedPlay } from '../lib/streamed'
-import { isFutbolXCatalogItem, resolveFutbolXPlay } from '../lib/futbolX'
+import {
+  isFutbolXCatalogItem,
+  resolveFutbolXBackupPlay,
+  resolveFutbolXPlay,
+} from '../lib/futbolX'
 import {
   isLivextvReplayCatalogItem,
   resolveLivextvReplayPlay,
@@ -630,13 +634,45 @@ export function WatchPage() {
         return
       }
 
-      // Streamed.pk live sports → resolve embed.st URL, play in Web Browser (PiP on Back).
+      // StreamCorner / legacy Streamed → watch page or embed in Web Browser (PiP on Back).
       // Android: try Gecko unwrap → Media3 first; fall back to embed WebView.
+      // Futbol-x HLS alts are tried when Streamed resolve fails.
       if (isStreamedCatalogItem(item!)) {
-        const resolved = await resolveStreamedPlay(item!)
+        // StreamCorner rows already carry the watch URL — no Streamed.pk resolve.
+        const isCorner =
+          /^streamcorner$/i.test(String(item!.source || '')) ||
+          Boolean(item!.id?.startsWith('streamcorner-')) ||
+          Boolean(item!.tags?.includes('streamcorner'))
+        const resolved = isCorner
+          ? { ok: true as const, url: item!.url }
+          : await resolveStreamedPlay(item!)
         if (cancelled) return
         if (!resolved.ok) {
-          setError(resolved.error || 'Could not load Streamed match')
+          setLoadStatus('Trying Futbol-x backup…')
+          const fx = await resolveFutbolXBackupPlay(item!)
+          if (cancelled) return
+          if (fx.ok) {
+            const hlsItem = {
+              ...item!,
+              url: fx.url,
+              httpReferrer: item!.httpReferrer || 'https://www.futbol-x.xyz/',
+              tags: [
+                ...new Set(
+                  [...(item!.tags ?? []), 'live', 'hls', 'futbolx'].filter(
+                    (t) => t !== 'web-embed',
+                  ),
+                ),
+              ],
+            }
+            play(hlsItem, {
+              forceFull: true,
+              replace: true,
+              returnTo: returnTo || '/section/sports',
+            })
+            navigate('/', { replace: true })
+            return
+          }
+          setError(resolved.error || 'Could not load StreamCorner match')
           return
         }
         const guard = multiviewGuardRef.current
@@ -1039,6 +1075,33 @@ export function WatchPage() {
             return
           }
           void media3Hide({ stop: true })
+          // Embed unwrap failed — Futbol-x signed HLS backup when attached.
+          if (item!.sportsAltSources?.length) {
+            setLoadStatus('Trying Futbol-x backup…')
+            const fx = await resolveFutbolXBackupPlay(item!)
+            if (cancelled) return
+            if (fx.ok) {
+              const hlsItem = {
+                ...item!,
+                url: fx.url,
+                httpReferrer: item!.httpReferrer || 'https://www.futbol-x.xyz/',
+                tags: [
+                  ...new Set(
+                    [...(item!.tags ?? []), 'live', 'hls', 'futbolx'].filter(
+                      (t) => t !== 'web-embed',
+                    ),
+                  ),
+                ],
+              }
+              play(hlsItem, {
+                forceFull: true,
+                replace: true,
+                returnTo: returnTo || '/section/sports',
+              })
+              navigate('/', { replace: true })
+              return
+            }
+          }
         }
 
         const webItem = {

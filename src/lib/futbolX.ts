@@ -211,6 +211,40 @@ export type FutbolXPlayResult =
   | { ok: true; url: string; expiresInSec: number; rawUrl: string }
   | { ok: false; error: string }
 
+/** Pick Futbol-x HLS alts off a sports card after PPV / StreamFree / StreamCorner fail. */
+export function futbolXAltUrlsFromItem(item: {
+  url?: string
+  sportsAltSources?: Array<{ label?: string; url?: string }>
+}): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const alt of item.sportsAltSources || []) {
+    const url = String(alt?.url || '').trim()
+    if (!url || seen.has(url)) continue
+    if (!/\.m3u8(?:$|[?#])/i.test(url)) continue
+    const labeled = /futbol/i.test(String(alt?.label || ''))
+    const hostFx = /futbol-x\.xyz|futx\.nx\.kg/i.test(url)
+    if (!labeled && !hostFx) continue
+    seen.add(url)
+    out.push(url)
+  }
+  return out
+}
+
+export async function resolveFutbolXBackupPlay(item: {
+  url?: string
+  sportsAltSources?: Array<{ label?: string; url?: string }>
+}): Promise<FutbolXPlayResult> {
+  const urls = futbolXAltUrlsFromItem(item)
+  let lastError = 'No Futbol-x backup on this match'
+  for (const url of urls) {
+    const signed = await resolveFutbolXPlay(url)
+    if (signed.ok) return signed
+    lastError = signed.error
+  }
+  return { ok: false, error: lastError }
+}
+
 /** Sign a Flussonic m3u8 for playback (~15 min). */
 export async function resolveFutbolXPlay(rawUrl: string): Promise<FutbolXPlayResult> {
   const raw = String(rawUrl || '').trim()

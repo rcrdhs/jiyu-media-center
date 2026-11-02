@@ -406,7 +406,7 @@ export async function fetchPpvStLiveCatalog(): Promise<
   if (!fx.ok) console.warn('Futbol-x streams unavailable:', fx.error)
   const { isSameSportsFixture } = await import('./streamFree')
   const { isFutbolXCatalogItem } = await import('./futbolX')
-  // Embeds first, then overlay Futbol-x HLS as the primary card when it's the same fixture.
+  // Keep PPV / StreamFree as the primary card; Futbol-x HLS rides as a probe backup.
   const merged = mergeStreamFreeWithPpv(ppv.items, sf.items)
   const items: StreamItem[] = []
   const usedFx = new Set<string>()
@@ -417,27 +417,34 @@ export async function fetchPpvStLiveCatalog(): Promise<
     if (twin) {
       usedFx.add(twin.id)
       items.push({
-        ...twin,
+        ...row,
         sportsAltSources: [
-          { label: row.source || 'Alt', url: row.url },
+          { label: 'Futbol-x', url: twin.url },
           ...(row.sportsAltSources || []),
           ...(twin.sportsAltSources || []),
-        ].filter((s, i, all) => s.url && s.url !== twin.url && all.findIndex((o) => o.url === s.url) === i),
-        homeBadgeUrl: twin.homeBadgeUrl || row.homeBadgeUrl,
-        awayBadgeUrl: twin.awayBadgeUrl || row.awayBadgeUrl,
+        ].filter(
+          (s, i, all) =>
+            s.url &&
+            s.url !== row.url &&
+            all.findIndex((o) => o.url === s.url) === i,
+        ),
+        homeBadgeUrl: row.homeBadgeUrl || twin.homeBadgeUrl,
+        awayBadgeUrl: row.awayBadgeUrl || twin.awayBadgeUrl,
+        poster: row.poster || twin.poster,
       })
       continue
     }
     items.push(row)
   }
+  // Fixtures only on Futbol-x still appear as their own cards.
   for (const f of fx.ok ? fx.items : []) {
     if (!usedFx.has(f.id)) items.push(f)
   }
   items.sort((a, b) => {
     const rank = (item: StreamItem) => {
-      if (isFutbolXCatalogItem(item) && item.tags?.includes('live-now')) return -1
       if (item.tags?.includes('always-live')) return 1
       if (isPpvStLiveNow(item)) return 0
+      if (isFutbolXCatalogItem(item) && item.tags?.includes('live-now')) return 0
       return 2
     }
     const ra = rank(a)

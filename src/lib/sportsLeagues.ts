@@ -198,3 +198,89 @@ export function groupFootballByLeague(items: StreamItem[]): FootballLeagueShelf[
   }
   return shelves
 }
+
+function titleCaseSport(raw: string): string {
+  return String(raw || '')
+    .replace(/[-_]+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    .join(' ')
+}
+
+/** Sport shelf label for mixed Live / Upcoming / Replay grids. */
+export function sportsShelfLabel(item: StreamItem): string {
+  const event = String(item.eventSport || '').trim()
+  if (event && !/^24\/7$/i.test(event)) return event
+  const tagSport = (item.tags || []).find(
+    (t) =>
+      t &&
+      !/^(live|live-now|upcoming|streamed|streamcorner|ppv|ppv\.st|futbolx|hls|popular|replay|vod|web-embed|torrent)$/i.test(
+        t,
+      ),
+  )
+  if (tagSport) return titleCaseSport(tagSport)
+  return 'Other sports'
+}
+
+function groupByLabel(
+  items: StreamItem[],
+  labelFor: (item: StreamItem) => string,
+  idPrefix = 'sport',
+): FootballLeagueShelf[] {
+  const buckets = new Map<string, { label: string; items: StreamItem[] }>()
+  for (const item of items) {
+    const label = labelFor(item) || 'Other'
+    const id = `${idPrefix}:${label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`
+    const hit = buckets.get(id)
+    if (hit) hit.items.push(item)
+    else buckets.set(id, { label, items: [item] })
+  }
+  return [...buckets.entries()]
+    .map(([id, { label, items: list }]) => ({ id, label, items: list }))
+    .sort((a, b) => a.label.localeCompare(b.label))
+}
+
+/**
+ * All-sports view: football → league shelves; everything else → sport shelves.
+ * Used on Live / Upcoming / Replay when the sport chip is “All sports”.
+ */
+export function groupAllSportsShelves(items: StreamItem[]): FootballLeagueShelf[] {
+  const football = items.filter(isFootballSportsItem)
+  const other = items.filter((item) => !isFootballSportsItem(item))
+  return [...groupFootballByLeague(football), ...groupByLabel(other, sportsShelfLabel, 'sport')]
+}
+
+/**
+ * Single-sport chip (basketball, cricket, …): split by league / eventSport when
+ * there are multiple subdivisions; otherwise return [] so the flat grid is used.
+ */
+export function groupSportBySubdivision(items: StreamItem[]): FootballLeagueShelf[] {
+  if (items.length < 2) return []
+  const shelves = groupByLabel(items, sportsShelfLabel, 'sub')
+  return shelves.length > 1 ? shelves : []
+}
+
+/**
+ * Pick the right shelf grouping for Sports Live / Upcoming / Replay.
+ * - football chip → leagues
+ * - all sports → leagues + other sports
+ * - other chip → subdivision shelves when useful
+ */
+export function groupSportsSectionShelves(
+  items: StreamItem[],
+  sportFilter: string,
+): FootballLeagueShelf[] | null {
+  if (!items.length) return null
+  if (sportFilter === 'football') {
+    const shelves = groupFootballByLeague(items)
+    return shelves.length ? shelves : null
+  }
+  if (sportFilter === 'all') {
+    const shelves = groupAllSportsShelves(items)
+    return shelves.length ? shelves : null
+  }
+  const shelves = groupSportBySubdivision(items)
+  return shelves.length ? shelves : null
+}

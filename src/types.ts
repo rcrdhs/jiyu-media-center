@@ -212,6 +212,22 @@ declare global {
       resolveVimeoLiveHls?: (
         input: string,
       ) => Promise<{ ok: boolean; url?: string; title?: string; error?: string }>
+      streamCornerFetchCatalog?: () => Promise<{
+        ok: boolean
+        entries?: Array<{
+          href: string
+          title: string
+          live?: boolean
+          kind: 'live' | 'vod'
+          provider?: string
+          matchId?: string
+          league?: string
+          category?: string
+          status?: string
+          start?: string
+        }>
+        error?: string
+      }>
       catalogList?: () => Promise<DesktopPlaylistSource[]>
       catalogPut?: (source: DesktopPlaylistSource) => Promise<boolean>
       catalogDelete?: (id: string) => Promise<boolean>

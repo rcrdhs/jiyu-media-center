@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('signalDesktop', {
   probeStreams: (entries, timeoutMs) => ipcRenderer.invoke('stream:probeMany', entries, timeoutMs),
   setPlaybackHeaders: (options) => ipcRenderer.invoke('stream:setPlaybackHeaders', options),
   resolveVimeoLiveHls: (input) => ipcRenderer.invoke('vimeo:resolveLiveHls', input),
+  streamCornerFetchCatalog: () => ipcRenderer.invoke('streamCorner:fetchCatalog'),
   catalogList: () => ipcRenderer.invoke('catalog:list'),
   catalogPut: (source) => ipcRenderer.invoke('catalog:put', source),
   catalogDelete: (id) => ipcRenderer.invoke('catalog:delete', id),

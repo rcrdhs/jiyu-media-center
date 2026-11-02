@@ -107,13 +107,13 @@ function writePassAt(key: string, at: number): void {
     /* private mode */
   }
 }
+import type { StreamedSport } from '../lib/streamed'
 import {
-  fetchStreamedAllMatches,
-  fetchStreamedLiveMatches,
-  fetchStreamedSports,
-  mergeStreamedLiveCatalog,
-  type StreamedSport,
-} from '../lib/streamed'
+  fetchStreamCornerLiveCatalog,
+  fetchStreamCornerReplayCatalog,
+  isStreamCornerCatalogItem,
+  streamCornerSportsFromItems,
+} from '../lib/streamCorner'
 import { fetchPpvStLiveCatalog } from '../lib/ppvSt'
 import { fetchLivextvReplayCatalog, isLivextvReplayCatalogItem } from '../lib/livextvReplays'
 import {
@@ -161,7 +161,7 @@ interface CatalogContextValue {
   /** Crawl a torrent website into Movies / Series / Anime */
   syncTorrentWebsite: (sourceId: string) => Promise<{ added: number; error?: string }>
   syncAllTorrentWebsites: () => Promise<{ added: number; sources: number }>
-  /** Streamed.pk sport list from /api/sports (for Sports shelf filters) */
+  /** Sport chips derived from StreamCorner (+ legacy name for Sports filters) */
   streamedSports: StreamedSport[]
 }
 
@@ -456,6 +456,7 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
         (item) =>
           isLivextvReplayCatalogItem(item) ||
           isFullmatchShowsCatalogItem(item) ||
+          isStreamCornerCatalogItem(item) ||
           isLikelyEnglish(item),
       )
     },
@@ -1000,47 +1001,35 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, syncTorrentWebsite, runKidsLightPass])
 
-  // Streamed.pk + PPV.st — live sports catalogs; refresh as games start/end.
+  // StreamCorner + PPV.st / StreamFree / Futbol-x — live sports; refresh as games start/end.
   useEffect(() => {
     if (!ready || kidsMode) return
     let cancelled = false
     let failStreak = 0
     let retryTimer: number | undefined
     const refresh = async () => {
-      const [sportsResult, liveResult, popularResult, allResult, ppvResult] =
-        await Promise.all([
-          fetchStreamedSports(),
-          fetchStreamedLiveMatches(false),
-          fetchStreamedLiveMatches(true),
-          fetchStreamedAllMatches(),
-          fetchPpvStLiveCatalog(),
-        ])
+      const [cornerResult, ppvResult] = await Promise.all([
+        fetchStreamCornerLiveCatalog(),
+        fetchPpvStLiveCatalog(),
+      ])
       if (cancelled) return
-      const streamedOk = liveResult.ok || popularResult.ok || allResult.ok
+      const cornerOk = cornerResult.ok
       const ppvOk = ppvResult.ok
-      if (!streamedOk) {
-        console.warn(
-          'Streamed matches unavailable:',
-          liveResult.ok
-            ? popularResult.ok
-              ? allResult.error
-              : popularResult.error
-            : liveResult.error,
-        )
+      if (!cornerOk) {
+        console.warn('StreamCorner matches unavailable:', cornerResult.error)
       }
       if (!ppvOk) {
         console.warn('PPV.st streams unavailable:', ppvResult.error)
       }
-      const live = liveResult.ok ? liveResult.matches : []
-      const popular = popularResult.ok ? popularResult.matches : []
-      const all = allResult.ok ? allResult.matches : []
       startTransition(() => {
-        if (sportsResult.ok) setStreamedSports(sportsResult.sports)
-        if (streamedOk) setStreamedItems(mergeStreamedLiveCatalog(live, popular, all))
+        if (cornerOk) {
+          setStreamedItems(cornerResult.items)
+          setStreamedSports(streamCornerSportsFromItems(cornerResult.items))
+        }
         if (ppvOk) setPpvStItems(ppvResult.items)
       })
       // Startup / brief outages: retry soon instead of waiting for the 90s poll.
-      if (!streamedOk || !ppvOk) {
+      if (!cornerOk || !ppvOk) {
         failStreak += 1
         const delay = Math.min(30_000, 2_000 * failStreak)
         window.clearTimeout(retryTimer)
@@ -1062,20 +1051,24 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
     }
   }, [ready, kidsMode])
 
-  // Sports replays: FullMatchShows football (Playmate) + LiveXTV (non-dead parts).
+  // Sports replays: FullMatchShows + LiveXTV + StreamCorner NBA VODs.
   useEffect(() => {
     if (!ready || kidsMode) return
     let cancelled = false
     let failStreak = 0
     let retryTimer: number | undefined
     const refresh = async () => {
-      const [livextv, fms] = await Promise.all([
+      const [livextv, fms, corner] = await Promise.all([
         fetchLivextvReplayCatalog(),
         fetchFullmatchShowsReplayCatalog(),
+        fetchStreamCornerReplayCatalog(),
       ])
       if (cancelled) return
-      if (!livextv.ok && !fms.ok) {
-        console.warn('Sports replays unavailable:', livextv.error || fms.error)
+      if (!livextv.ok && !fms.ok && !corner.ok) {
+        console.warn(
+          'Sports replays unavailable:',
+          livextv.error || fms.error || corner.error,
+        )
         failStreak += 1
         const delay = Math.min(45_000, 3_000 * failStreak)
         window.clearTimeout(retryTimer)
@@ -1090,6 +1083,7 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
           mergeSportsReplayShelfItems(
             livextv.ok ? livextv.items : [],
             fms.ok ? fms.items : [],
+            corner.ok ? corner.items : [],
           ),
         )
       })

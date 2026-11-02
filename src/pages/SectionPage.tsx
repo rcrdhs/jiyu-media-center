@@ -66,7 +66,7 @@ import {
   sportsReplaySportChipsFromItems,
   sportsReplaySportId,
 } from '../lib/fullmatchShows'
-import { groupFootballByLeague } from '../lib/sportsLeagues'
+import { groupSportsSectionShelves } from '../lib/sportsLeagues'
 import {
   readSelectedSportsFilter,
   writeSelectedSportsFilter,
@@ -674,6 +674,7 @@ export function SectionPage() {
       const scheduleItems = items.filter(
         (item) =>
           (isStreamedCatalogItem(item) || isPpvStCatalogItem(item)) &&
+          !isSportsReplayCatalogItem(item) &&
           sportOk(item) &&
           match(item),
       )
@@ -712,9 +713,9 @@ export function SectionPage() {
         replayBlurb: '',
         primaryEmpty: '',
         fullEmpty: 'No live matches right now — check Upcoming or try again shortly.',
-        liveEmpty: 'No upcoming matches scheduled — Streamed / PPV.st refresh automatically.',
+        liveEmpty: 'No upcoming matches scheduled — StreamCorner / PPV.st refresh automatically.',
         replayEmpty:
-          'No recent football, boxing, cricket, or motorsport replays (last 3 days).',
+          'No recent football, basketball, boxing, cricket, or motorsport replays (last 3 days).',
         primary: [] as StreamItem[],
         fullShows: liveNow,
         live: upcoming,
@@ -1120,15 +1121,13 @@ export function SectionPage() {
     return applyUserSort(base, userSortMode)
   }, [activeShelfList, filtered, showSortMenu, userSortMode])
 
-  /** Football chip → group Live / Replay into EPL, Bundesliga, … */
-  const footballLeagueShelves = useMemo(() => {
+  /** Live / Upcoming / Replay → sport + league shelves (All / Football / …). */
+  const sportsGroupedShelves = useMemo(() => {
     if (categoryId !== 'sports') return null
-    if (sportsSportFilter !== 'football') return null
     if (shelfTab !== 'full-shows' && shelfTab !== 'live' && shelfTab !== 'replay') {
       return null
     }
-    const shelves = groupFootballByLeague(pagedList)
-    return shelves.length > 0 ? shelves : null
+    return groupSportsSectionShelves(pagedList, sportsSportFilter)
   }, [categoryId, sportsSportFilter, shelfTab, pagedList])
 
   function updateUserSortMode(mode: SectionSortMode) {
@@ -1531,7 +1530,7 @@ export function SectionPage() {
               </p>
             ) : null}
           </div>
-          {windowStart > 0 && !footballLeagueShelves ? (
+          {windowStart > 0 && !sportsGroupedShelves ? (
             <div
               ref={topSentinelRef}
               className="catalog-window-spacer"
@@ -1539,9 +1538,9 @@ export function SectionPage() {
               aria-hidden
             />
           ) : null}
-          {footballLeagueShelves ? (
+          {sportsGroupedShelves ? (
             <div className="football-league-shelves">
-              {footballLeagueShelves.map((shelf) => (
+              {sportsGroupedShelves.map((shelf) => (
                 <section key={shelf.id} className="football-league-shelf" aria-label={shelf.label}>
                   <h2 className="football-league-heading">
                     {shelf.label}
@@ -1616,7 +1615,7 @@ export function SectionPage() {
           />
         </>
       )}
-      {remaining > 0 && !footballLeagueShelves && (
+      {remaining > 0 && !sportsGroupedShelves && (
         <div ref={sentinelRef} className="infinite-scroll-sentinel" aria-hidden>
           <p className="fine-print">
             Showing {(windowStart + shown.length).toLocaleString()} of{' '}

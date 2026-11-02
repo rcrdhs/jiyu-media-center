@@ -218,7 +218,7 @@ export function isFullmatchShowsCatalogItem(item: {
   return false
 }
 
-/** Shared Replay shelf predicate (LiveXTV + FullMatchShows). */
+/** Shared Replay shelf predicate (LiveXTV + FullMatchShows + StreamCorner VOD). */
 export function isSportsReplayCatalogItem(item: {
   id?: string
   tags?: string[]
@@ -231,12 +231,14 @@ export function isSportsReplayCatalogItem(item: {
   try {
     // Avoid circular import at module init — LiveXTV ids / hosts.
     if (item.id?.startsWith('livextv-replay-')) return true
+    if (item.id?.startsWith('streamcorner-vod-')) return true
     for (const raw of [item.url, item.detailUrl]) {
       if (!raw) continue
       const host = new URL(raw).hostname.replace(/^www\./, '').toLowerCase()
       if (host.includes('livextv') || host === 'soccerfull.net' || host.endsWith('.soccerfull.net')) {
         return true
       }
+      if (host.includes('streamcorner') && /\/nba\/vod\//i.test(raw)) return true
     }
   } catch {
     /* ignore */
@@ -919,6 +921,7 @@ export async function resolveFullmatchShowsPlayForTitle(
 export function mergeSportsReplayShelfItems(
   livextv: StreamItem[],
   fms: StreamItem[],
+  streamCorner: StreamItem[] = [],
 ): StreamItem[] {
   const seen = new Set<string>()
   const out: StreamItem[] = []
@@ -928,6 +931,9 @@ export function mergeSportsReplayShelfItems(
     out.push(item)
   }
   for (const item of fms) push(item)
+  for (const item of streamCorner) {
+    if (item.tags?.includes('replay') || item.tags?.includes('streamcorner')) push(item)
+  }
   for (const item of livextv) {
     if (!isLivextvReplayCatalogItem(item)) continue
     if (isSoccerfullOnlyReplayItem(item)) continue
@@ -940,10 +946,13 @@ export function mergeSportsReplayShelfItems(
 export function sportsReplaySportId(item: StreamItem): string | null {
   if (!isSportsReplayCatalogItem(item)) return null
   const tag = item.tags?.find((t) =>
-    /^(football|boxing|cricket|motorsport)$/i.test(String(t || '')),
+    /^(football|boxing|cricket|motorsport|basketball)$/i.test(String(t || '')),
   )
   if (tag) return String(tag).toLowerCase()
   if (isFullmatchShowsCatalogItem(item)) return 'football'
+  if (item.tags?.includes('streamcorner') && item.tags?.includes('basketball')) {
+    return 'basketball'
+  }
   return null
 }
 
@@ -952,6 +961,7 @@ export function sportsReplaySportChipsFromItems(
 ): Array<{ id: string; name: string }> {
   const names: Record<string, string> = {
     football: 'Football',
+    basketball: 'Basketball',
     boxing: 'Boxing',
     cricket: 'Cricket',
     motorsport: 'Motorsport',

@@ -8737,6 +8737,157 @@ ipcMain.handle('vimeo:resolveLiveHls', async (_event, input) => {
   }
 })
 
+/** StreamCorner.st SPA schedule — hidden window, extract watch links after JS. */
+ipcMain.handle('streamCorner:fetchCatalog', async () => {
+  /** @type {import('electron').BrowserWindow | null} */
+  let win = null
+  try {
+    win = new BrowserWindow({
+      show: false,
+      width: 1400,
+      height: 900,
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        backgroundThrottling: false,
+      },
+    })
+    win.setMenuBarVisibility(false)
+    const extractScript = `(() => {
+  const out = [];
+  const seen = new Set();
+  const LINK_SEL = 'a[href*="/stream/"], a[href*="/nba/"]';
+  const clean = (t) => String(t || '').replace(/\\s+/g, ' ').trim();
+  const badTitle = (t) =>
+    !t || t.length < 3 || /^(watch\\s+(now|replay)|live|select a source|vs|away logo|home logo|logo)$/i.test(t);
+  const pathOf = (a) => (a.getAttribute('href') || '').replace(/^https?:\\/\\/[^/]+/i, '').split(/[?#]/)[0];
+  const keyOf = (path) => {
+    const m = path.match(/^\\/nba\\/(?:live|vod)\\/([^/]+)/i) || path.match(/^\\/stream\\/[^/]+\\/([^/]+)/i);
+    return m ? m[1] : path;
+  };
+  // Card = highest ancestor whose watch links all point at this one match, so a
+  // heading from a neighbouring card (e.g. a 24/7 channel) is never borrowed.
+  const cardOf = (a, key) => {
+    let card = a;
+    for (let node = a.parentElement, depth = 0; node && depth < 12; node = node.parentElement, depth++) {
+      let same = true;
+      for (const l of node.querySelectorAll(LINK_SEL)) {
+        if (keyOf(pathOf(l)) !== key) { same = false; break; }
+      }
+      if (!same) break;
+      card = node;
+    }
+    return card;
+  };
+  const leafTexts = (card) =>
+    [...card.querySelectorAll('span,p,div')].filter((el) => !el.children.length).map((el) => clean(el.textContent));
+  const fieldAfter = (card, labelRe) => {
+    for (const el of card.querySelectorAll('span,p,div')) {
+      if (el.children.length || !labelRe.test(clean(el.textContent))) continue;
+      const next = el.nextElementSibling;
+      if (next) return clean(next.textContent);
+    }
+    return '';
+  };
+  const stripTail = (text, tail) => {
+    const t = clean(tail);
+    if (t && text.toLowerCase().endsWith(' ' + t.toLowerCase())) return clean(text.slice(0, text.length - t.length));
+    return text;
+  };
+  const titleOf = (a, card, league, category) => {
+    for (const h of card.querySelectorAll('h1,h2,h3,h4')) {
+      const t = clean(h.innerText || h.textContent);
+      if (!badTitle(t)) return t;
+    }
+    const search = clean(a.getAttribute('data-search-text') || card.getAttribute('data-search-text') || '');
+    if (search) {
+      const t = stripTail(stripTail(search, category), league);
+      if (!badTitle(t)) return t;
+    }
+    for (const el of card.querySelectorAll('span,p')) {
+      const t = clean(el.textContent);
+      if (!el.children.length && /\\S\\s+(vs\\.?|v|at|@)\\s+\\S/i.test(t) && t.length < 120) return t;
+    }
+    const teams = [];
+    for (const img of card.querySelectorAll('img[alt]')) {
+      const alt = clean(img.getAttribute('alt'));
+      if (!badTitle(alt) && !/logo$/i.test(alt) && !teams.includes(alt)) teams.push(alt);
+    }
+    if (teams.length >= 2) return teams[0] + ' vs ' + teams[1];
+    if (teams.length === 1) return teams[0];
+    const t = clean(a.innerText || a.textContent);
+    return badTitle(t) || t.length > 80 || /kick off|tip off|start time|league/i.test(t) ? '' : t;
+  };
+  for (const a of document.querySelectorAll(LINK_SEL)) {
+    const path = pathOf(a);
+    if (!path || seen.has(path)) continue;
+    if (!/^\\/(?:stream|nba)\\//i.test(path)) continue;
+    seen.add(path);
+    let kind = 'live';
+    let provider = '';
+    let matchId = '';
+    let m = path.match(/^\\/nba\\/vod\\/([^/]+)/i);
+    if (m) { kind = 'vod'; provider = 'nba'; matchId = m[1]; }
+    else if ((m = path.match(/^\\/nba\\/live\\/([^/]+)/i))) { provider = 'nba'; matchId = m[1]; }
+    else if ((m = path.match(/^\\/stream\\/([^/]+)\\/([^/]+)/i))) { provider = m[1]; matchId = m[2]; }
+    if (!matchId) continue;
+    const card = cardOf(a, keyOf(path));
+    const linkText = clean(a.innerText || a.textContent);
+    const texts = leafTexts(card);
+    let league = fieldAfter(card, /^league$/i);
+    if (!league) {
+      const p = card.querySelector('p');
+      league = p ? clean(p.textContent) : '';
+    }
+    const status = texts.find((t) => /^(final|ft|full time|ended)\\b/i.test(t)) || '';
+    const dateRe = /^\\d{1,2}\\/\\d{1,2}\\/\\d{2,4}\\s+\\d{1,2}:\\d{2}\\s*[AP]M/i;
+    const start =
+      clean(a.getAttribute('data-original-time') || a.getAttribute('data-time') || '') ||
+      clean((card.querySelector('[data-original-time]') || { getAttribute: () => '' }).getAttribute('data-original-time') || '') ||
+      fieldAfter(card, /^(kick off|tip off|start time|starts?)$/i) ||
+      texts.find((t) => dateRe.test(t)) ||
+      '';
+    const category = clean(a.getAttribute('data-category') || card.getAttribute('data-category') || '');
+    const live = !/^(final|ft|full time|ended)\\b/i.test(status) && (/^LIVE\\b/i.test(linkText) || /Watch Now/i.test(linkText));
+    out.push({ href: path, title: titleOf(a, card, league, category), live, kind, provider, matchId, league, category, status, start });
+  }
+  return out;
+})()`
+    await win.loadURL('https://streamcorner.st/', {
+      userAgent: BROWSER_UA,
+      httpReferrer: 'https://streamcorner.st/',
+    })
+    const started = Date.now()
+    let entries = []
+    while (Date.now() - started < 22_000) {
+      await sleep(700)
+      try {
+        entries = await win.webContents.executeJavaScript(extractScript, true)
+      } catch {
+        entries = []
+      }
+      if (Array.isArray(entries) && entries.length >= 4) break
+    }
+    if (!Array.isArray(entries) || entries.length === 0) {
+      return { ok: false, entries: [], error: 'No StreamCorner schedule cards found' }
+    }
+    return { ok: true, entries, error: '' }
+  } catch (err) {
+    return {
+      ok: false,
+      entries: [],
+      error: err instanceof Error ? err.message : String(err),
+    }
+  } finally {
+    try {
+      if (win && !win.isDestroyed()) win.destroy()
+    } catch {
+      /* ignore */
+    }
+  }
+})
+
 ipcMain.handle('stream:probeMany', async (_event, entries, timeoutMs) => {
   const list = Array.isArray(entries) ? entries : []
   const timeout = typeof timeoutMs === 'number' ? timeoutMs : 2500

@@ -196,7 +196,7 @@ function bootLocalItems() as object
     kind: "info"
     url: ""
     poster: "pkg:/images/channel-poster_hd.png"
-    detail: "CVM needs a Vimeo token — use phone or desktop Jiyu"
+    detail: "CVM live on phone or desktop Jiyu (Vimeo HLS)"
     handle: ""
   })
   return items
@@ -280,8 +280,8 @@ sub paintSection(sectionId as string)
     setStage("Home", "Local channels")
     content.AppendChild(makeRow("Local channels", localItems))
   else if sectionId = "sports"
-    setStage("Sports", "Live matches · Futbol-x")
-    appendSportsRows(content, sportsItems)
+    setStage("Sports", "Live · Upcoming · by league")
+    appendSportsOrganized(content, sportsItems)
   else if sectionId = "series"
     setStage("TV Series", "TMDB shelves · Rive play (S1E1)")
     appendSeriesRows(content, popular, airing, trending)
@@ -416,38 +416,99 @@ sub onSyncHide()
   setSyncBar("", 100, false)
 end sub
 
-' Pack football into rows of 3 so cards align in the main stage (sidebar eats width).
-sub appendSportsRows(content as object, sports as dynamic)
+' Live first (by league), then Upcoming (by league) — mirrors desktop Sports shelves.
+sub appendSportsOrganized(content as object, sports as dynamic)
   if sports = invalid or sports.Count() = 0
-    ' One info card — empty RowList rows paint a big blank slab on this TCL.
-    content.AppendChild(makeRow("Sports · Live", [{
+    content.AppendChild(makeRow("Live", [{
       id: "sports-empty"
-      title: "No live matches"
+      title: "No matches right now"
       kind: "info"
       url: ""
       poster: "pkg:/images/channel-poster_hd.png"
-      detail: "Check back when kickoff starts"
+      detail: "Check back near kickoff"
       handle: ""
     }]))
     return
   end if
-  perRow = 3
-  total = sports.Count()
-  rowNum = 0
-  i = 0
-  while i < total
-    chunk = []
-    n = 0
-    while n < perRow and i < total
-      chunk.Push(sports[i])
-      i = i + 1
-      n = n + 1
+
+  liveItems = []
+  upcomingItems = []
+  for each it in sports
+    st = ""
+    if it.status <> invalid then st = LCase(toStrSafe(it.status))
+    if st = "upcoming" or (it.kind <> invalid and LCase(it.kind) = "upcoming")
+      upcomingItems.Push(it)
+    else
+      liveItems.Push(it)
+    end if
+  end for
+
+  if liveItems.Count() > 0
+    appendSportsByLeague(content, "Live", liveItems)
+  else
+    content.AppendChild(makeRow("Live", [{
+      id: "sports-live-empty"
+      title: "No live matches"
+      kind: "info"
+      url: ""
+      poster: "pkg:/images/channel-poster_hd.png"
+      detail: "See Upcoming below"
+      handle: ""
+    }]))
+  end if
+
+  if upcomingItems.Count() > 0
+    appendSportsByLeague(content, "Upcoming", upcomingItems)
+  end if
+end sub
+
+sub appendSportsByLeague(content as object, statusLabel as string, items as object)
+  leagues = []
+  buckets = CreateObject("roAssociativeArray")
+  for each it in items
+    league = "Football"
+    if it.league <> invalid and it.league <> "" then league = it.league
+    key = LCase(league)
+    list = buckets[key]
+    if list = invalid
+      list = []
+      leagues.Push(league)
+    end if
+    list.Push(it)
+    buckets[key] = list
+  end for
+
+  preferred = ["EPL", "LaLiga", "La Liga", "Bundesliga", "Serie A", "Ligue 1", "MLS", "UCL", "UEL"]
+  ordered = []
+  for each pref in preferred
+    pk = LCase(pref)
+    i = 0
+    while i < leagues.Count()
+      if LCase(leagues[i]) = pk
+        ordered.Push(leagues[i])
+        leagues.Delete(i)
+      else
+        i = i + 1
+      end if
     end while
-    title = "Sports · Live"
-    if rowNum > 0 then title = " "
-    content.AppendChild(makeRow(title, chunk))
-    rowNum = rowNum + 1
+  end for
+  while leagues.Count() > 0
+    best = 0
+    j = 1
+    while j < leagues.Count()
+      if LCase(leagues[j]) < LCase(leagues[best]) then best = j
+      j = j + 1
+    end while
+    ordered.Push(leagues[best])
+    leagues.Delete(best)
   end while
+
+  for each league in ordered
+    list = buckets[LCase(league)]
+    if list <> invalid and list.Count() > 0
+      appendChunkedRows(content, statusLabel + " · " + league, list, 3)
+    end if
+  end for
 end sub
 
 function makeRow(title as string, items as dynamic) as object
@@ -463,6 +524,10 @@ function makeRow(title as string, items as dynamic) as object
     episode = 1
     if it.season <> invalid then season = Int(it.season)
     if it.episode <> invalid then episode = Int(it.episode)
+    league = ""
+    if it.league <> invalid then league = it.league
+    status = ""
+    if it.status <> invalid then status = it.status
     node.AddFields({
       itemId: it.id
       title: it.title
@@ -473,6 +538,8 @@ function makeRow(title as string, items as dynamic) as object
       tmdbId: tmdbId
       season: season
       episode: episode
+      league: league
+      status: status
     })
     if it.poster <> invalid and it.poster <> ""
       node.HDPosterUrl = it.poster
@@ -511,6 +578,10 @@ sub playItem(item as object)
   else if kind = "series"
     m.status.text = "Resolving " + item.title + "…"
     startSeriesResolve(item)
+  else if kind = "upcoming"
+    detail = item.detail
+    if detail = invalid or detail = "" then detail = "Not kicked off yet"
+    m.status.text = detail
   else if kind = "nationwide" or kind = "youtube"
     playHls("https://jiyu-nnn.free-river.workers.dev/live.m3u8", item.title, "cloudflare")
   else if kind = "embed"

@@ -61,7 +61,7 @@ function buildLocalRow() as object
     kind: "info"
     url: ""
     poster: "pkg:/images/channel-poster_hd.png"
-    detail: "CVM needs a Vimeo token — use phone or desktop Jiyu"
+    detail: "CVM live on phone or desktop Jiyu (Vimeo HLS)"
     handle: ""
   })
   return items
@@ -123,18 +123,20 @@ function fetchFutbolXFootball() as object
   end if
 
   nowStamp = nowStampUtcPlus3()
+  ' Upcoming window: now → +6h (same as desktop Futbol-x shelf).
+  upcomingUntil = stampFromEpochSeconds(CreateObject("roDateTime").AsSeconds() + (3 * 3600) + (6 * 3600))
   items = []
   for each block in data.streams
     if block <> invalid and block.streams <> invalid
       for each match in block.streams
-        item = futbolXMatchItem(match, nowStamp)
+        item = futbolXMatchItem(match, nowStamp, upcomingUntil)
         if item <> invalid
           items.Push(item)
         end if
-        if items.Count() >= 10 then exit for
+        if items.Count() >= 48 then exit for
       end for
     end if
-    if items.Count() >= 10 then exit for
+    if items.Count() >= 48 then exit for
   end for
 
   return { ok: true, error: "", items: items }
@@ -179,7 +181,7 @@ function pad4(n as integer) as string
   return Str(n).Trim()
 end function
 
-function futbolXMatchItem(match as object, nowStamp as string) as object
+function futbolXMatchItem(match as object, nowStamp as string, upcomingUntil as string) as object
   if match = invalid then return invalid
   name = ""
   if match.name <> invalid then name = toStr(match.name)
@@ -222,7 +224,12 @@ function futbolXMatchItem(match as object, nowStamp as string) as object
     end if
   end if
 
-  if live <> true then return invalid
+  upcoming = false
+  if live <> true and startAt <> "" and nowStamp <> "" and upcomingUntil <> ""
+    if startAt > nowStamp and startAt <= upcomingUntil then upcoming = true
+  end if
+
+  if live <> true and upcoming <> true then return invalid
 
   tag = "Football"
   if match.tag <> invalid and toStr(match.tag) <> "" then tag = toStr(match.tag)
@@ -232,16 +239,29 @@ function futbolXMatchItem(match as object, nowStamp as string) as object
     poster = toStr(match.poster)
   end if
 
+  status = "live"
+  kind = "futbolx"
   detail = "LIVE · " + tag + " · " + feedDetail
+  if upcoming = true
+    status = "upcoming"
+    kind = "upcoming"
+    ' Kickoff display — Futbol-x stamps are UTC+3 wall times.
+    kick = startAt
+    if Len(kick) >= 16 then kick = Mid(kick, 12, 5)
+    detail = "Upcoming · " + tag + " · " + kick
+  end if
 
   return {
     id: "futbolx-" + uri
     title: name
-    kind: "futbolx"
+    kind: kind
     url: feedUrl
     poster: poster
     detail: detail
     handle: uri
+    league: tag
+    status: status
+    startsAt: startAt
   }
 end function
 

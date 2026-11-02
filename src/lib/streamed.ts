@@ -65,13 +65,25 @@ export function isStreamedCatalogItem(item: {
   id?: string
   streamedMatchId?: string
   url?: string
+  source?: string
+  tags?: string[]
 }): boolean {
+  // StreamCorner VODs belong on Replay only — never Live / Upcoming.
+  if (item.id?.startsWith('streamcorner-vod-')) return false
+  if (item.tags?.includes('replay') || item.tags?.includes('vod')) return false
+  // StreamCorner live/upcoming — keep this predicate for Sports filters.
+  if (item.id?.startsWith('streamcorner-')) return true
+  if (/^streamcorner$/i.test(String(item.source || ''))) return true
+  if (item.tags?.some((t) => /^streamcorner$/i.test(t))) return true
   if (item.streamedMatchId) return true
   if (item.id?.startsWith(STREAMED_ID_PREFIX)) return true
   try {
     if (item.url) {
       const host = new URL(item.url).hostname.replace(/^www\./, '').toLowerCase()
       if (host === 'streamed.pk' || host.endsWith('.streamed.pk')) return true
+      if ((host.includes('streamcorner') || host.includes('streamninja')) && !/\/nba\/vod\//i.test(item.url)) {
+        return true
+      }
       if (host === 'embed.st' || host.endsWith('.embed.st')) return true
     }
   } catch {
@@ -221,7 +233,11 @@ export function mergeStreamedLiveCatalog(
 export function streamedItemSportId(item: StreamItem): string | undefined {
   if (!isStreamedCatalogItem(item)) return undefined
   return item.tags?.find(
-    (t) => t && t !== 'live' && t !== 'streamed' && t !== 'popular',
+    (t) =>
+      t &&
+      !/^(live|live-now|upcoming|streamed|streamcorner|web-embed|popular|replay|vod)$/i.test(
+        t,
+      ),
   )
 }
 
@@ -339,6 +355,7 @@ export function streamedMatchesToItems(
 
 /** True when a Streamed/PPV sports row belongs on Sports → Live (not Upcoming). */
 export function isSportsLiveNowItem(item: StreamItem, nowMs = Date.now()): boolean {
+  if (item.tags?.includes('replay') || item.tags?.includes('vod')) return false
   if (isPpvStCatalogItem(item)) return isPpvStLiveNow(item, Math.floor(nowMs / 1000))
   if (isStreamedCatalogItem(item)) {
     if (item.tags?.includes('live-now')) return true
@@ -350,6 +367,7 @@ export function isSportsLiveNowItem(item: StreamItem, nowMs = Date.now()): boole
 }
 
 export function isSportsUpcomingItem(item: StreamItem, nowMs = Date.now()): boolean {
+  if (item.tags?.includes('replay') || item.tags?.includes('vod')) return false
   if (!isStreamedCatalogItem(item) && !isPpvStCatalogItem(item)) return false
   return !isSportsLiveNowItem(item, nowMs)
 }

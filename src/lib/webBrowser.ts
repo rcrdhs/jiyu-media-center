@@ -121,6 +121,7 @@ export function isWebBrowserOnlyUrl(url: string): boolean {
     if (host === 'vidsrc.me' || host.endsWith('.vidsrc.me')) return true
     if (host === 'cinextream.cc' || host.endsWith('.cinextream.cc')) return true
     if (host === 'streamed.pk' || host.endsWith('.streamed.pk')) return true
+    if (host.includes('streamcorner') || host.includes('streamninja')) return true
     if (host === 'ppv.st' || host.endsWith('.ppv.st')) return true
     if (host === 'embedindia.st' || host.endsWith('.embedindia.st')) return true
     if (host === 'embed.st' || host.endsWith('.embed.st')) return true
@@ -161,7 +162,7 @@ export function isRotatingSportsEmbedPath(pathname: string): boolean {
 export function isSportsOrReplayEmbedUrl(url: string): boolean {
   if (!url) return false
   if (
-    /embed(?:india|hd)?\.st|streamed\.pk|ppv\.st|ppvservices\.st|embed\.ppv\.st/i.test(
+    /embed(?:india|hd)?\.st|streamed\.pk|streamcorner|streamninja|ppv\.st|ppvservices\.st|embed\.ppv\.st/i.test(
       url,
     )
   ) {
@@ -175,6 +176,7 @@ export function isSportsOrReplayEmbedUrl(url: string): boolean {
     if (host === 'embedhd.st' || host.endsWith('.embedhd.st')) return true
     if (host === 'embedindia.st' || host.endsWith('.embedindia.st')) return true
     if (host === 'streamed.pk' || host.endsWith('.streamed.pk')) return true
+    if (host.includes('streamcorner') || host.includes('streamninja')) return true
     if (host === 'ppv.st' || host.endsWith('.ppv.st')) return true
     if (host === 'ppvservices.st' || host.endsWith('.ppvservices.st')) return true
     if (host === 'soccerfull.net' || host.endsWith('.soccerfull.net')) return true
@@ -210,7 +212,13 @@ export function isWebEmbedPlaybackItem(item: {
   if (item.tags?.includes('replay') && item.tags?.includes('livextv')) return true
   if (item.tags?.includes('replay') && item.tags?.includes('fullmatchshows')) return true
   if (item.streamedMatchId) return true
-  if (/^(streamed|ppv\.st|livextv|fullmatchshows)$/i.test(String(item.source || ''))) return true
+  if (
+    /^(streamed|streamcorner|ppv\.st|livextv|fullmatchshows)$/i.test(
+      String(item.source || ''),
+    )
+  ) {
+    return true
+  }
   return Boolean(item.url && isWebBrowserOnlyUrl(item.url))
 }
 
@@ -228,7 +236,9 @@ export function shouldOpenInWebBrowser(item: {
   if (item.tags?.includes('relay-hls')) return false
   if (isWebBrowserOnlyUrl(item.url)) return true
   if (item.tags?.includes('web-embed')) return true
-  return /^(streamed|ppv\.st|livextv|fullmatchshows)$/i.test(String(item.source || ''))
+  return /^(streamed|streamcorner|ppv\.st|livextv|fullmatchshows)$/i.test(
+    String(item.source || ''),
+  )
 }
 
 /** Cloudflare interstitial. Autoplay clicks and DOM reads restart the Verify spinner. */

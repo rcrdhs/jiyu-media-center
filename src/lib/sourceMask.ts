@@ -1,7 +1,7 @@
 import type { StreamItem, StreamSourceKind } from '../types'
 
 const TORRENT_HOST_RE =
-  /torlock|yts\.|yify|eztv|subsplease|torrentfunk|m2box|netmirror|freemovies\.lol|ymovies\.vip|cinetaro\.to|cinextream\.cc|1337x|rarbg|nyaa|torrentgalaxy|tgx\.|limetorrent|zooqle|piratebay|thepiratebay|magnet:?|movy\.|zenox\.|rivestream|atlantic\.|wecollege|paleoak|zenoak|torrentio|streamed\.pk|hls\.lol|streamo|shegu|bilibili\.tv|biliintl/i
+  /torlock|yts\.|yify|eztv|subsplease|torrentfunk|m2box|netmirror|freemovies\.lol|ymovies\.vip|cinetaro\.to|cinextream\.cc|1337x|rarbg|nyaa|torrentgalaxy|tgx\.|limetorrent|zooqle|piratebay|thepiratebay|magnet:?|movy\.|zenox\.|rivestream|atlantic\.|wecollege|paleoak|zenoak|torrentio|streamed\.pk|streamcorner|streamninja|hls\.lol|streamo|shegu|bilibili\.tv|biliintl/i
 
 /** True if a label/URL looks like a torrent index site. */
 export function looksLikeCatalogWebsite(text?: string | null): boolean {
