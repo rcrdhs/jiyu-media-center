@@ -4,7 +4,7 @@ import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { Capacitor } from '@capacitor/core'
 import { CATEGORIES } from '../data/catalog'
 import { usePlayback } from '../context/PlaybackContext'
-import { useWebBrowser } from '../context/WebBrowserContext'
+import { getPipLayout, useWebBrowser } from '../context/WebBrowserContext'
 import { FORCE_SAVE_CONTINUE_EVENT } from '../lib/continueWatching'
 import { APP_RELEASES, APP_VERSION_LABEL } from '../lib/appVersion'
 import { isKidsModeEnabled, subscribeKidsMode } from '../lib/kidsMode'
@@ -124,14 +124,58 @@ export function Sidebar() {
     navigate('/')
   }
 
+  // Android: the Gecko view draws above the WebView, so it would cover the Sections sheet.
+  // Full page: hide it while the sheet is open. Mini player: the sheet sits above the
+  // corner, so keep the stream on screen and playing; only hide it if the sheet really
+  // overlaps. Hiding it used to leave the mini player stopped until Expand, because
+  // closing the sheet only re-showed the full page. Re-place it in both modes on close.
+  const hiddenForMenuRef = useRef(false)
   useEffect(() => {
     if (!isAndroidShell) return
-    if (sectionsMenuOpen) {
+    if (sectionsMenuOpen && webMode !== 'pip') {
+      hiddenForMenuRef.current = true
       void androidBrowserHide({ pause: false })
       return
     }
-    if (webMode === 'page') syncBrowserView()
-  }, [sectionsMenuOpen, webMode, syncBrowserView])
+    if (sectionsMenuOpen) {
+      let frame = 0
+      const check = () => {
+        const menu = document.getElementById('sections-menu')?.getBoundingClientRect()
+        const { x, stageY, width, stageHeight } = getPipLayout()
+        const overlaps =
+          !!menu &&
+          menu.width > 2 &&
+          menu.height > 2 &&
+          menu.left < x + width &&
+          menu.right > x &&
+          menu.top < stageY + stageHeight &&
+          menu.bottom > stageY
+        if (overlaps && !hiddenForMenuRef.current) {
+          hiddenForMenuRef.current = true
+          void androidBrowserHide({ pause: false })
+        } else if (!overlaps && hiddenForMenuRef.current) {
+          hiddenForMenuRef.current = false
+          syncBrowserView()
+        }
+      }
+      // Wait for the sheet to be placed (androidMenuStyle) before measuring.
+      const schedule = () => {
+        cancelAnimationFrame(frame)
+        frame = requestAnimationFrame(() => {
+          frame = requestAnimationFrame(check)
+        })
+      }
+      schedule()
+      window.addEventListener('resize', schedule)
+      return () => {
+        cancelAnimationFrame(frame)
+        window.removeEventListener('resize', schedule)
+      }
+    }
+    const wasHidden = hiddenForMenuRef.current
+    hiddenForMenuRef.current = false
+    if (webMode === 'page' || (webMode === 'pip' && wasHidden)) syncBrowserView()
+  }, [sectionsMenuOpen, webMode, syncBrowserView, androidMenuStyle])
 
   useEffect(() => {
     if (!isAndroidShell || !sectionsMenuOpen) {

@@ -65,6 +65,7 @@ import {
 import { isTizenFrameBlockedEmbed, tizenExtractEmbed } from '../lib/tizenRelay'
 import {
   isNativeMedia3PlaybackItem,
+  isStreamFreeEmbedUrl,
   isWebEmbedPlaybackItem,
   isYouTubeUrl,
   shouldOpenInWebBrowser,
@@ -988,10 +989,13 @@ export function WatchPage() {
           item!.tags?.includes('livextv') ||
           item!.tags?.includes('fullmatchshows')
 
+        // StreamFree's JW player stays idle until the web player presses play, so the hidden
+        // Gecko sniff never sees a media URL: it only cost 8s and a second "Unwrapping" screen.
         if (
           sportsLike &&
           !isReplay &&
           !keepOthers &&
+          !isStreamFreeEmbedUrl(item!.url) &&
           isAndroidMedia3Host() &&
           canAndroidResolveEmbedMedia()
         ) {

@@ -1400,6 +1400,9 @@ function isPushAdwareHost(host, url) {
     .toLowerCase()
   const raw = String(url || '')
   if (!h) return false
+  // StreamFree's own player hosts (streamfree.top, strmfree.st). The shady-TLD + long-label
+  // rule below matched streamfree.top and blocked every StreamFree match as an ad page.
+  if (/(^|\.)(streamfree|strmfree)\.[a-z]{2,}$/i.test(h)) return false
   if (/(^|\.)(wpnxiswpuyrfn\.icu|vbcojhroxkoaf\.online)$/i.test(h)) return true
   // High-entropy label + shady TLD + ad script/path — never needed for playback.
   if (
