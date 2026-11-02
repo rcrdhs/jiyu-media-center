@@ -12,6 +12,21 @@ export const APP_VERSION_LABEL = `v${APP_VERSION}`
 /** Short milestone log — newest first — so progress is visible in-app. */
 export const APP_RELEASES: ReadonlyArray<{ version: string; summary: string }> = [
   {
+    version: '0.3.94',
+    summary:
+      'Your teams shows recent football replays again, and team names match with or without accents (München or Munich); StreamFree 24/7 channels also show under the 24/7 Streams chip, and StreamFree switches to its strmfree.st backup when the main site is down; StreamFree streams are no longer blocked as ads on PC and start faster on Android; the mini player keeps playing while the Sections menu is open; StreamCorner sports cards show the right title and league (no more “Family Guy” on NBA rows) and 24/7 TV-show channels stay out of Sports; the guide now explains the Subs - and Subs + buttons for fixing subtitle timing',
+  },
+  {
+    version: '0.3.93',
+    summary:
+      'StreamCorner NBA replays stay on the Replay shelf (not Live), and cards show the real game title instead of “Watch Replay”',
+  },
+  {
+    version: '0.3.92',
+    summary:
+      'CVM live works on phone and desktop without a locked Vimeo token path; Sports uses StreamCorner.st for live and upcoming (replacing Streamed.pk) and adds its NBA replays beside FullMatchShows; Futbol-x is kept as a backup when other sports sources fail; the optional Torrentio TV trial is removed',
+  },
+  {
     version: '0.3.91',
     summary:
       'Jiyu no longer crashes when it opens on Google TV and Android TV 11/12 boxes, and recovers instead of closing if the TV runs low on memory; the TV remote\'s D-pad now moves predictably everywhere: focus no longer gets lost after picking a section, closing the guide or changing page, and search only opens the keyboard when you press OK; Sports gets StreamFree as a new source (replacing Streamed.pk), with 24/7 channels and fights and races included, sound on and its starting-soon card; in Full mode the top bar stays reachable; PPV events reload by themselves when the stream stalls at start; Samsung TVs pick Movy streams that play smoothly and, when Movy can\'t play a movie or episode, fall back to other sources so more titles play',
