@@ -1,10 +1,7 @@
 import type { StreamItem } from '../types'
 import { isFootballSportsItem } from './sportsLeagues'
 import { LIVEXTV_REPLAY_MAX_AGE_MS } from './livextvReplays'
-import {
-  isFullmatchShowsCatalogItem,
-  isSportsReplayCatalogItem,
-} from './fullmatchShows'
+import { isSportsReplayCatalogItem } from './fullmatchShows'
 
 export type FavoriteSport = 'football' | 'basketball' | 'cricket' | 'american-football'
 
@@ -116,18 +113,44 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
+/** Fold accents so "München" / "Köln" match typed "Munchen" / "Koln". */
+function foldAccents(value: string): string {
+  return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+}
+
+/** English vs local club spellings used by replay sites (FullMatchShows: "Bayern München"). */
+const TEAM_WORD_ALIASES: Record<string, string> = {
+  munich: '(?:munich|munchen|muenchen)',
+  munchen: '(?:munich|munchen|muenchen)',
+  muenchen: '(?:munich|munchen|muenchen)',
+  cologne: '(?:cologne|koln|koeln)',
+  koln: '(?:cologne|koln|koeln)',
+  koeln: '(?:cologne|koln|koeln)',
+}
+
 function teamNamePattern(name: string): RegExp {
-  const parts = name
+  const parts = foldAccents(name)
     .trim()
     .split(/\s+/)
     .filter(Boolean)
-    .map(escapeRegExp)
+    .map((word) => TEAM_WORD_ALIASES[word.toLowerCase()] || escapeRegExp(word))
   return new RegExp(`(?:^|[^a-z0-9])${parts.join('\\s+')}(?:[^a-z0-9]|$)`, 'i')
 }
 
 function itemText(item: StreamItem): string {
   const tags = (item.tags || []).join(' ')
-  return `${item.title || ''} ${item.description || ''} ${item.eventSport || ''} ${tags}`
+  return foldAccents(
+    `${item.title || ''} ${item.description || ''} ${item.eventSport || ''} ${tags}`,
+  )
+}
+
+/** Same fixture from two replay sites (FullMatchShows + LiveXTV) - keep the first. */
+function replayFixtureKey(item: StreamItem): string {
+  return foldAccents(String(item.title || ''))
+    .toLowerCase()
+    .replace(/\b(full\s*(match|game)\s*replay|replay|highlights)\b.*$/, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
 }
 
 export function isBasketballSportsItem(item: StreamItem): boolean {
@@ -224,16 +247,20 @@ export function favoriteTeamMatches(
   if (active.length === 0) return []
   const now = Date.now()
   const seen = new Set<string>()
+  const seenReplayFixtures = new Set<string>()
   const hits: StreamItem[] = []
   for (const item of items) {
     if (seen.has(item.id)) continue
     if (!active.some((team) => itemMatchesFavorite(item, team))) continue
 
     if (isFavoriteReplay(item)) {
-      // LiveXTV-only on Your teams / Replay — skip FullMatchShows duplicates.
-      if (isFullmatchShowsCatalogItem(item)) continue
-      // Same expiry as Sports → Replay shelf (~3 days). Older VODs leave Your teams.
+      // Same expiry as Sports → Replay shelf (~3 days after publish). Older VODs leave Your teams.
       if (replayAgeMs(item, now) > REPLAY_WINDOW_MS) continue
+      // FullMatchShows is the main football replay source now (LiveXTV API is gone);
+      // only drop a second copy of the same fixture from another replay site.
+      const fixture = replayFixtureKey(item)
+      if (fixture && seenReplayFixtures.has(fixture)) continue
+      if (fixture) seenReplayFixtures.add(fixture)
       seen.add(item.id)
       hits.push(item)
       continue
