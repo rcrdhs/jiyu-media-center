@@ -4,7 +4,12 @@ import { usePlayback } from '../context/PlaybackContext'
 import { useWebBrowser } from '../context/WebBrowserContext'
 import { recordWebEmbedContinue } from '../lib/continueWatching'
 import { isZenoxUrl, zenoxWatchUrl } from '../lib/zenox'
-import { resolveFullmatchShowsPlay, type ReplayPartsInfo } from '../lib/fullmatchShows'
+import {
+  rememberReplayHost,
+  replayHostChoices,
+  resolveFullmatchShowsPlay,
+  type ReplayPartsInfo,
+} from '../lib/fullmatchShows'
 import {
   buildSearchUrl,
   isBlankBrowserUrl,
@@ -287,6 +292,7 @@ export function WebBrowserPage() {
       if (!data || typeof data !== 'object') return
       const t = Number(data.t) || 0
       const d = Number(data.d) || 0
+      noteReplayHostProgress(t)
       if (t < 5 && d <= 0) return
       recordWebEmbedContinue({
         ...continueWatch,
@@ -450,6 +456,58 @@ export function WebBrowserPage() {
   const replayParts = continueWatch?.replayParts
   const replayPartChoices =
     embedPlayer && replayParts && replayParts.parts.length > 1 ? replayParts.parts : null
+  const replayHosts = embedPlayer
+    ? replayHostChoices(replayParts, continueWatch?.playUrl || paramUrl || nav.url || '')
+    : null
+  const replayHostPicker = replayHosts && replayHosts.hosts.length > 1 ? replayHosts : null
+
+  // Remember a replay host once it has kept playing ~45 s (video time keeps up with
+  // wall time), so the next replay opens there first.
+  const hostTrialRef = useRef<{ url: string; t: number; at: number; saved: boolean } | null>(null)
+  function noteReplayHostProgress(t: number) {
+    const url = continueWatch?.replayParts ? continueWatch.playUrl || '' : ''
+    if (!url) return
+    const now = Date.now()
+    const trial = hostTrialRef.current
+    if (!trial || trial.url !== url || t + 1 < trial.t) {
+      hostTrialRef.current = { url, t, at: now, saved: false }
+      return
+    }
+    if (trial.saved) return
+    const wall = (now - trial.at) / 1000
+    if (wall >= 40 && t - trial.t >= wall * 0.85) {
+      trial.saved = true
+      rememberReplayHost(url)
+    }
+  }
+
+  /** Load a replay embed once: the route-param effect must not open it a second time. */
+  function openReplayEmbed(url: string, nextState: WebLocationState) {
+    openedParamRef.current = url
+    blankRecoverRef.current = ''
+    navigate(`/web?url=${encodeURIComponent(url)}`, { replace: true, state: nextState })
+    void openUrl(toAutoplayUrl(url))
+  }
+
+  /** Same part on another host (vidaraa / vixeo / Playmogo) - e.g. when one keeps buffering. */
+  function pickReplayHost(index: number) {
+    const info = continueWatch?.replayParts
+    const hosts = replayHosts
+    if (!continueWatch || !info || !hosts || replayPartBusy || index === hosts.current) return
+    const choice = hosts.hosts.find((h) => h.index === index)
+    if (!choice) return
+    openReplayEmbed(choice.url, {
+      from: returnTo,
+      playerMode: 'embed',
+      pipOnBack: routeState?.pipOnBack ?? true,
+      continueWatch: {
+        ...continueWatch,
+        playlistIndex: index,
+        playUrl: choice.url,
+        replayParts: { ...info, index: hosts.partIndex },
+      },
+    })
+  }
 
   /** Switch replay part in place (same Playmate-down -> Playmogo fallback as WatchPage). */
   async function pickReplayPart(index: number) {
@@ -481,11 +539,7 @@ export function WebBrowserPage() {
           replayParts: nextParts,
         },
       }
-      navigate(`/web?url=${encodeURIComponent(resolved.url)}`, {
-        replace: true,
-        state: nextState,
-      })
-      void openUrl(resolved.url)
+      openReplayEmbed(resolved.url, nextState)
     } finally {
       setReplayPartBusy(false)
     }
@@ -733,6 +787,8 @@ export function WebBrowserPage() {
             ) : null}
             <strong className="web-chrome-title">{displayTitle}</strong>
             {!embedPlayer && host ? <span className="web-chrome-host">{host}</span> : null}
+            {replayPartChoices || replayHostPicker ? (
+              <span className="web-replay-pickers">
             {replayPartChoices ? (
               <label className="web-replay-part" title="Choose which part of the match to watch">
                 <span className="sr-only">Replay part</span>
@@ -754,6 +810,32 @@ export function WebBrowserPage() {
                   ))}
                 </select>
               </label>
+            ) : null}
+            {replayHostPicker ? (
+              <label
+                className="web-replay-part web-replay-host"
+                title="Same match on another host - try one if this keeps buffering"
+              >
+                <span className="sr-only">Replay host</span>
+                <select
+                  value={replayHostPicker.current}
+                  disabled={!desktop || replayPartBusy}
+                  onFocus={() => {
+                    window.clearTimeout(chromeHideTimer.current)
+                    setChromeVisible(true)
+                  }}
+                  onBlur={revealChrome}
+                  onChange={(e) => pickReplayHost(Number(e.target.value))}
+                >
+                  {replayHostPicker.hosts.map((h) => (
+                    <option key={h.index} value={h.index}>
+                      {h.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
+              </span>
             ) : null}
           </div>
 

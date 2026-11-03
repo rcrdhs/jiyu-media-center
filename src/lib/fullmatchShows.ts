@@ -47,6 +47,49 @@ function replayHostTier(rawUrl: string): number {
   return 0
 }
 
+export type ReplayHostKey = 'playmate' | 'vidaraa' | 'vixeo' | 'playmogo'
+
+const REPLAY_HOST_BY_TIER: Record<number, ReplayHostKey> = {
+  4: 'playmate',
+  3: 'vidaraa',
+  2: 'vixeo',
+  1: 'playmogo',
+}
+
+const REPLAY_HOST_LABEL: Record<ReplayHostKey, string> = {
+  playmate: 'Playmate',
+  vidaraa: 'vidaraa',
+  vixeo: 'vixeo',
+  playmogo: 'Playmogo',
+}
+
+/** Which replay host a link plays on ('' = not a playable host). */
+export function replayHostKey(url: string): ReplayHostKey | '' {
+  return REPLAY_HOST_BY_TIER[replayHostTier(url)] || ''
+}
+
+const REPLAY_HOST_PREF_KEY = 'jiyu.replay.preferredHost.v1'
+
+/** Host that last played well (kept playing after a pick); '' = none yet. */
+export function readPreferredReplayHost(): ReplayHostKey | '' {
+  try {
+    const v = window.localStorage.getItem(REPLAY_HOST_PREF_KEY) || ''
+    return v in REPLAY_HOST_LABEL ? (v as ReplayHostKey) : ''
+  } catch {
+    return ''
+  }
+}
+
+export function rememberReplayHost(url: string): void {
+  const key = replayHostKey(url)
+  if (!key) return
+  try {
+    window.localStorage.setItem(REPLAY_HOST_PREF_KEY, key)
+  } catch {
+    /* private mode */
+  }
+}
+
 /** True when this replay link opens a player we have seen play. */
 export function isVerifiedReplayHost(url: string): boolean {
   return replayHostTier(url) >= VERIFIED_REPLAY_TIER
@@ -124,6 +167,39 @@ export type ReplayPartsInfo = {
   parts: ReplayPartChoice[]
   /** Playlist index of the part now playing. */
   index: number
+}
+
+/** One host copy of the part now playing (playlist index into ReplayPartsInfo.playlist). */
+export type ReplayHostChoice = { index: number; host: ReplayHostKey; label: string; url: string }
+
+/**
+ * Host copies (Playmate / vidaraa / vixeo / Playmogo) of the part playing now, so
+ * /web can switch host when one buffers. `partIndex` is the part picker's value.
+ */
+export function replayHostChoices(
+  info: ReplayPartsInfo | undefined,
+  playUrl: string,
+): { partIndex: number; current: number; hosts: ReplayHostChoice[] } | null {
+  const playlist = info?.playlist || []
+  if (!info || playlist.length === 0) return null
+  const playing = toMinimalReplayEmbedUrl(playUrl || '')
+  let current = playlist.findIndex((row) => row?.url && toMinimalReplayEmbedUrl(row.url) === playing)
+  if (current < 0) current = info.index
+  const key = replayPartKey(playlist[current]?.title)
+  const seen = new Set<string>()
+  const hosts: ReplayHostChoice[] = []
+  playlist.forEach((row, index) => {
+    if (!row?.url || replayPartKey(row.title) !== key) return
+    const host = replayHostKey(row.url)
+    if (!host || seen.has(host)) return
+    seen.add(host)
+    hosts.push({ index, host, label: REPLAY_HOST_LABEL[host], url: toMinimalReplayEmbedUrl(row.url) })
+  })
+  hosts.sort((a, b) => replayHostTier(b.url) - replayHostTier(a.url))
+  const playingHost = replayHostKey(playlist[current]?.url || '')
+  const currentRow = hosts.find((h) => h.host === playingHost)
+  const partIndex = info.parts.find((p) => replayPartKey(p.title) === key)?.index ?? info.index
+  return { partIndex, current: currentRow ? currentRow.index : current, hosts }
 }
 
 export function replayPartChoices(
@@ -498,7 +574,14 @@ export async function resolveFullmatchShowsPlay(
     }
   }
 
-  const first = playable[0]
+  let first = playable[0]
+  // Same part on the host that last played well (Samsung keeps its own frameable order).
+  const preferredHost = opts?.avoid ? '' : readPreferredReplayHost()
+  if (first && preferredHost && replayHostKey(first) !== preferredHost) {
+    const firstKey = keyOf(first)
+    const alt = playable.find((url) => keyOf(url) === firstKey && replayHostKey(url) === preferredHost)
+    if (alt) first = alt
+  }
   if (first && isPlaymateUrl(first) && (await isPlaymateStreamDown(first))) {
     // Playmate's own error card ("This video did not play") on every replay when
     // its HLS CDN is unreachable - same part on the next host (vidaraa, vixeo,

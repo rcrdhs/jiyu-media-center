@@ -3859,6 +3859,16 @@ html.is-android .multi-view-full.is-fullscreen {
   text-overflow: ellipsis;
 }
 
+/* Part + host pickers side by side (wrap on narrow phones). */
+.web-replay-pickers {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  align-self: flex-start;
+  gap: 0.35rem;
+  max-width: 100%;
+}
+
 /* Football replay part picker (Full match / halves / Highlights) - episode-chip look. */
 .web-replay-part {
   display: inline-flex;
@@ -3909,6 +3919,15 @@ html.is-android .multi-view-full.is-fullscreen {
 html.is-android .web-browser-page.is-embed-player.is-watching .web-replay-part select {
   font-size: 0.72rem;
   padding: 0.1rem 0.4rem;
+  /* Finger-sized tap target on phones. */
+  min-height: 2rem;
+}
+
+/* TV remote: a clear focus ring on the pickers (D-pad lands here like a button). */
+html.tv-mode .web-replay-part select:focus,
+html.tv-mode .web-replay-part select:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .web-chrome-actions .control-btn.is-active {
