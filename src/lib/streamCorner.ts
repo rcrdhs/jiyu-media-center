@@ -9,6 +9,7 @@
 
 import type { StreamItem } from '../types'
 import { androidBrowserFetchHtml, isAndroidInAppBrowser } from './androidBrowser'
+import { LIVEXTV_REPLAY_MAX_AGE_MS } from './livextvReplays'
 
 export const STREAMCORNER_ORIGIN = 'https://streamcorner.st'
 export const STREAMCORNER_ID_PREFIX = 'streamcorner-'
@@ -397,6 +398,51 @@ export function parseStreamCornerStart(raw?: string): number | undefined {
   return Number.isFinite(ms) ? ms : undefined
 }
 
+/** Replay rows without a card date: remember when Jiyu first saw them so they still age out. */
+const VOD_FIRST_SEEN_KEY = 'jiyu.streamcorner.vodFirstSeen.v1'
+const VOD_FIRST_SEEN_KEEP_MS = 7 * 24 * 60 * 60 * 1000
+
+function readVodFirstSeen(): Record<string, number> {
+  try {
+    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(VOD_FIRST_SEEN_KEY) : null
+    const parsed = raw ? JSON.parse(raw) : null
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, number>) : {}
+  } catch {
+    return {}
+  }
+}
+
+function writeVodFirstSeen(map: Record<string, number>) {
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.setItem(VOD_FIRST_SEEN_KEY, JSON.stringify(map))
+  } catch {
+    /* ignore */
+  }
+}
+
+/** First time this VOD was seen (persisted); pruned after a week. */
+export function streamCornerVodFirstSeen(matchId: string, nowMs = Date.now()): number {
+  const map = readVodFirstSeen()
+  let changed = false
+  for (const [id, at] of Object.entries(map)) {
+    if (!(Number(at) > 0) || nowMs - Number(at) > VOD_FIRST_SEEN_KEEP_MS) {
+      delete map[id]
+      changed = true
+    }
+  }
+  let at = Number(map[matchId])
+  if (!(at > 0)) {
+    at = nowMs
+    map[matchId] = at
+    changed = true
+  }
+  if (changed) writeVodFirstSeen(map)
+  return at
+}
+
+/** A game this long after tip-off counts as finished even without a "Final" badge. */
+const VOD_ASSUME_FINISHED_MS = 3 * 60 * 60 * 1000
+
 export function streamCornerEntryToItem(
   entry: StreamCornerEntry,
   nowMs = Date.now(),
@@ -435,6 +481,14 @@ export function streamCornerEntryToItem(
   const upcoming = kind === 'live' && !liveNow
 
   if (kind === 'vod') {
+    // Real game date from the card; first-seen fallback so undated rows still expire.
+    if (startsAt) {
+      // Not played yet / still on: no replay to watch.
+      if (startsAt > nowMs) return null
+      if (!final && nowMs - startsAt < VOD_ASSUME_FINISHED_MS) return null
+    }
+    const playedAt = startsAt ?? streamCornerVodFirstSeen(matchId, nowMs)
+    if (nowMs - playedAt > LIVEXTV_REPLAY_MAX_AGE_MS) return null
     return {
       id: streamCornerItemId('vod', matchId),
       title,
@@ -446,7 +500,8 @@ export function streamCornerEntryToItem(
       source: 'StreamCorner',
       sourceKind: 'builtin',
       transport: 'direct',
-      releasedAt: nowMs,
+      releasedAt: playedAt,
+      eventStartsAt: startsAt,
       eventSport: 'Basketball',
     }
   }
