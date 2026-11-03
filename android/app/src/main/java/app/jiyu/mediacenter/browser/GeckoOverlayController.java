@@ -392,6 +392,19 @@ final class GeckoOverlayController {
           currentTitle = title != null ? title : "";
           emitNav();
         }
+
+        // Android kills Gecko's content process while Jiyu sits in the background.
+        // GeckoView then closes the session, but the field stayed non-null, so every
+        // later load/unwrap went nowhere until Jiyu was restarted.
+        @Override
+        public void onCrash(GeckoSession s) {
+          main.post(() -> recoverDeadSession(s, "crash"));
+        }
+
+        @Override
+        public void onKill(GeckoSession s) {
+          main.post(() -> recoverDeadSession(s, "kill"));
+        }
       }
     );
     target.setProgressDelegate(
@@ -1484,7 +1497,9 @@ final class GeckoOverlayController {
   }
 
   void loadUrl(String url, boolean stripReferer) {
-    if (session == null || url == null || url.isEmpty()) return;
+    if (url == null || url.isEmpty()) return;
+    ensureSession();
+    if (session == null) return;
     if (isStreamRefererOnlyUrl(url) || BrowserAdBlock.shouldBlockNavigation(url)) {
       android.util.Log.w("JiyuGecko", "blocked stream-referer/ad page " + safeUrl(url));
       return;
@@ -1709,10 +1724,46 @@ final class GeckoOverlayController {
     blank();
   }
 
-  /** Reattach a session if a previous hard-reset detached it. */
+  /** Content process crashed / was killed: drop the dead session and open a fresh one. */
+  private void recoverDeadSession(GeckoSession dead, String reason) {
+    if (dead == null || dead != session) return;
+    android.util.Log.w("JiyuGecko", "content process " + reason + " - reopening session");
+    boolean wasVisible = view != null && view.getVisibility() == View.VISIBLE;
+    String reloadUrl = !lastPlayerEmbedUrl.isEmpty() ? lastPlayerEmbedUrl : currentUrl;
+    try {
+      if (view != null) view.releaseSession();
+    } catch (Throwable ignored) {}
+    try {
+      dead.close();
+    } catch (Throwable ignored) {}
+    session = null;
+    bridgePorts.clear();
+    loading = false;
+    currentUrl = "";
+    ensureSession();
+    // On screen (crash mid-play): put the player back. Hidden: next open loads fresh.
+    if (wasVisible && session != null && reloadUrl != null && !reloadUrl.isEmpty()
+      && !reloadUrl.startsWith("about:")) {
+      loadUrl(reloadUrl, shouldStripDocumentReferer(reloadUrl));
+    }
+  }
+
+  /** Reattach a session if a previous hard-reset detached it (or Gecko closed it). */
   void ensureSession() {
     if (view == null) return;
-    if (session != null) return;
+    if (session != null) {
+      boolean open = true;
+      try {
+        open = session.isOpen();
+      } catch (Throwable ignored) {}
+      if (open) return;
+      android.util.Log.w("JiyuGecko", "session was closed - reopening");
+      try {
+        view.releaseSession();
+      } catch (Throwable ignored) {}
+      session = null;
+      bridgePorts.clear();
+    }
     try {
       openFreshSession();
       view.setSession(session);
