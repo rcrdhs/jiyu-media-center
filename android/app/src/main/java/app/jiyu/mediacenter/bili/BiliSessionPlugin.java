@@ -202,7 +202,12 @@ public class BiliSessionPlugin extends Plugin {
       s.setDomStorageEnabled(true);
       s.setSupportMultipleWindows(false);
       s.setJavaScriptCanOpenWindowsAutomatically(false);
-      loginView.setWebViewClient(new WebViewClient());
+      loginView.setWebViewClient(new WebViewClient() {
+        @Override
+        public boolean onRenderProcessGone(WebView v, android.webkit.RenderProcessGoneDetail detail) {
+          return app.jiyu.mediacenter.RendererGone.release(v, "bili-login");
+        }
+      });
       loginView.setWebChromeClient(new WebChromeClient());
       CookieManager cm = CookieManager.getInstance();
       cm.setAcceptCookie(true);

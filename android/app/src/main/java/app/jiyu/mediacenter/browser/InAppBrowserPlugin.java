@@ -567,7 +567,12 @@ public class InAppBrowserPlugin extends Plugin {
       ensureUnlockChrome(unlocked, errorBox, latch, url);
       // Drop the scrape client's onPageFinished hook. It reads the challenge DOM
       // on every redirect, which makes the Verify checkbox restart forever.
-      scrapeView.setWebViewClient(new WebViewClient() {});
+      scrapeView.setWebViewClient(new WebViewClient() {
+        @Override
+        public boolean onRenderProcessGone(WebView v, android.webkit.RenderProcessGoneDetail detail) {
+          return scrapeRendererGone(v);
+        }
+      });
       final String clearanceBefore = cfClearanceValue(url);
       scrapeView.loadUrl(url);
 
@@ -802,6 +807,11 @@ public class InAppBrowserPlugin extends Plugin {
       };
       scrapeView.setWebViewClient(new WebViewClient() {
         @Override
+        public boolean onRenderProcessGone(WebView v, android.webkit.RenderProcessGoneDetail detail) {
+          return scrapeRendererGone(v);
+        }
+
+        @Override
         public void onPageFinished(WebView view, String finishedUrl) {
           view.postDelayed(deliver, 1800);
         }
@@ -899,7 +909,20 @@ public class InAppBrowserPlugin extends Plugin {
     scrapeLayoutParams.topMargin = 0;
     scrapeView.setLayoutParams(scrapeLayoutParams);
     scrapeView.setAlpha(0f);
+    // Default client until a scrape sets its own: a client without this handler
+    // makes Chromium abort the app when Android kills the WebView renderer.
+    scrapeView.setWebViewClient(new WebViewClient() {
+      @Override
+      public boolean onRenderProcessGone(WebView v, android.webkit.RenderProcessGoneDetail detail) {
+        return scrapeRendererGone(v);
+      }
+    });
     parent.addView(scrapeView);
+  }
+
+  private boolean scrapeRendererGone(WebView v) {
+    if (v == scrapeView) scrapeView = null;
+    return app.jiyu.mediacenter.RendererGone.release(v, "scrape");
   }
 
   private static boolean isHostDownPage(String html) {

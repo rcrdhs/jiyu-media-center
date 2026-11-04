@@ -33,6 +33,10 @@ public class MainActivity extends BridgeActivity {
    * so permission sheets and config changes do not kill the process mid-flight.
    */
   private boolean exitAfterLeave = false;
+  /** Page URL (with #route) when the main WebView renderer died; reopened by the recreated activity. */
+  private static volatile String restoreUrlAfterRendererGone = null;
+  private static volatile long lastRendererGoneAt = 0;
+  private boolean rendererGoneHandled = false;
 
   @Override
   public void onCreate(Bundle savedInstanceState) {
@@ -50,24 +54,18 @@ public class MainActivity extends BridgeActivity {
     super.onCreate(savedInstanceState);
     applyDarkSystemBars();
     CrashLog.showPendingIfAny(this);
-    // Low-RAM TVs can kill the WebView renderer; without a handler Chromium aborts the whole app.
+    restoreRouteAfterRendererGone();
+    // Android can drop the WebView renderer (low memory while in the background:
+    // crashed=false, or a real renderer crash: crashed=true). Without a handler
+    // Chromium aborts the whole app. Recover by rebuilding the activity and reopening
+    // the route the user was on. Only real crashes go to CrashLog (next-start dialog);
+    // an OS memory kill is routine and is only logged.
     try {
       if (bridge != null) {
         bridge.addWebViewListener(new com.getcapacitor.WebViewListener() {
           @Override
           public boolean onRenderProcessGone(android.webkit.WebView view, android.webkit.RenderProcessGoneDetail detail) {
-            boolean crashed = detail != null && detail.didCrash();
-            CrashLog.record(MainActivity.this, new RuntimeException("WebView renderer gone (crashed=" + crashed + ")"));
-            try {
-              android.view.ViewParent parent = view.getParent();
-              if (parent instanceof android.view.ViewGroup) ((android.view.ViewGroup) parent).removeView(view);
-              view.destroy();
-            } catch (Throwable ignored) {}
-            try {
-              recreate();
-            } catch (Throwable err) {
-              finish();
-            }
+            onMainRendererGone(view, detail != null && detail.didCrash());
             return true;
           }
         });
@@ -113,6 +111,57 @@ public class MainActivity extends BridgeActivity {
         }
       }
     );
+  }
+
+  private void onMainRendererGone(android.webkit.WebView view, boolean crashed) {
+    if (rendererGoneHandled) return;
+    rendererGoneHandled = true;
+    long now = android.os.SystemClock.elapsedRealtime();
+    // Died again right after a recovery: open the start page instead of the same route.
+    boolean again = lastRendererGoneAt != 0 && now - lastRendererGoneAt < 30_000;
+    lastRendererGoneAt = now;
+    String url = null;
+    try {
+      url = view != null ? view.getUrl() : null;
+    } catch (Throwable ignored) {}
+    restoreUrlAfterRendererGone = again ? null : url;
+    if (crashed) {
+      CrashLog.record(this, new RuntimeException("WebView renderer crashed (Jiyu reloaded itself)"));
+    } else {
+      android.util.Log.w("Jiyu", "WebView renderer killed by the system (low memory); reloading the app");
+    }
+    try {
+      if (view != null) {
+        android.view.ViewParent parent = view.getParent();
+        if (parent instanceof android.view.ViewGroup) ((android.view.ViewGroup) parent).removeView(view);
+        view.destroy();
+      }
+    } catch (Throwable ignored) {}
+    try {
+      recreate();
+    } catch (Throwable err) {
+      finish();
+    }
+  }
+
+  /** After a renderer-gone recreate, reopen the in-app route (#/...) the user was on. */
+  private void restoreRouteAfterRendererGone() {
+    final String url = restoreUrlAfterRendererGone;
+    restoreUrlAfterRendererGone = null;
+    if (url == null || bridge == null) return;
+    try {
+      String local = bridge.getLocalUrl();
+      if (local == null || !url.startsWith(local)) return;
+      int hash = url.indexOf('#');
+      if (hash < 0 || url.length() <= hash + 2) return;
+      final android.webkit.WebView wv = bridge.getWebView();
+      if (wv == null) return;
+      wv.post(() -> {
+        try {
+          wv.loadUrl(url);
+        } catch (Throwable ignored) {}
+      });
+    } catch (Throwable ignored) {}
   }
 
   /**

@@ -484,6 +484,11 @@ final class MultiWebHost {
     view.setWebViewClient(
       new WebViewClient() {
         @Override
+        public boolean onRenderProcessGone(WebView v, android.webkit.RenderProcessGoneDetail detail) {
+          return app.jiyu.mediacenter.RendererGone.release(v, "multi-tile");
+        }
+
+        @Override
         public WebResourceResponse shouldInterceptRequest(WebView v, WebResourceRequest request) {
           // IMPORTANT (validated scripts/sandbox-referer-recipe.cjs):
           // HttpURLConnection against embed.st often receives the dead ~1KB stub while
