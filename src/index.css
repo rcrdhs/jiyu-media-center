@@ -7677,3 +7677,37 @@ body:has(.web-browser-page.is-fullscreen) .sidebar {
     text-overflow: ellipsis;
   }
 }
+
+/* Fullscreen web/embed player: nothing scrolls, no scrollbar gutter at the right edge. The page is
+   pinned to the viewport so nothing is cut; the top bar keeps its own reveal logic. */
+html:has(.web-browser-page.is-fullscreen),
+html:has(.web-browser-page.is-fullscreen) body,
+html:has(.web-browser-page.is-fullscreen) #root,
+body:has(.web-browser-page.is-fullscreen) .app-shell,
+body:has(.web-browser-page.is-fullscreen) .main-stage {
+  overflow: hidden !important;
+  scrollbar-width: none !important;
+  scrollbar-gutter: auto !important;
+}
+
+body:has(.web-browser-page.is-fullscreen) .app-shell,
+body:has(.web-browser-page.is-fullscreen) .main-stage {
+  height: 100vh !important;
+  height: 100dvh !important;
+  min-height: 0 !important;
+  max-height: 100dvh !important;
+}
+
+body:has(.web-browser-page.is-fullscreen) .main-stage > .web-browser-page.is-fullscreen {
+  height: 100% !important;
+  min-height: 0 !important;
+  max-height: 100% !important;
+}
+
+html:has(.web-browser-page.is-fullscreen)::-webkit-scrollbar,
+html:has(.web-browser-page.is-fullscreen) body::-webkit-scrollbar,
+body:has(.web-browser-page.is-fullscreen) .main-stage::-webkit-scrollbar {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+}
