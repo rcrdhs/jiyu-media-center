@@ -127,6 +127,8 @@ export function WebBrowserPage() {
     address,
     setAddress,
     status,
+    stalled,
+    retryStalled,
     fullscreen,
     attachFrame,
     detachFrame,
@@ -1004,6 +1006,11 @@ export function WebBrowserPage() {
       {status && !(!desktop && isTizenTv() && (paramUrl || nav.url)) && (
         <div className="web-status">
           <span>{status}</span>
+          {stalled ? (
+            <button type="button" className="ghost-btn control-btn web-status-retry" onClick={() => retryStalled()}>
+              Retry
+            </button>
+          ) : null}
         </div>
       )}
 

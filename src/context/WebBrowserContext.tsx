@@ -67,6 +67,10 @@ const PIP_MARGIN = 12
 const UNWRAP_COVER_TICK_MS = 300
 const UNWRAP_COVER_MAX_MS = 30_000
 const UNWRAP_COVER_MIN_MS = 800
+/** After the cover gives up: keep checking (slowly) so a late start clears the notice. */
+const STALL_WATCH_TICK_MS = 2_500
+const STALL_WATCH_MAX_MS = 3 * 3600_000
+const STALL_MESSAGE = "No video yet - the stream didn't start. Tap Retry, or go Back and pick another source."
 
 /** Live embeds (sports / replays / YouTube live like Nationwide) get the unwrap cover. */
 function wantsUnwrapCover(url: string): boolean {
@@ -91,8 +95,11 @@ const UNWRAP_COVER_TICK_SCRIPT = `(function(){try{
 var d=document,ID='__jiyu_unwrap_cover',now=Date.now();
 if(!window.__jiyuCoverT0)window.__jiyuCoverT0=now;
 var S=window.__jiyuMoveState||(window.__jiyuMoveState=new WeakMap());
-var vids=d.getElementsByTagName('video'),live=false;
+var vids=d.getElementsByTagName('video'),live=false,mediaErr=false;
 for(var i=0;i<vids.length;i++){var v=vids[i];var r=v.getBoundingClientRect();
+var er=v.error&&v.error.code;if(er===2||er===4){var R=window.__jiyuMediaErr||(window.__jiyuMediaErr={n:0,at:0});
+if(R.n<3&&now-R.at>4000){R.n++;R.at=now;try{v.load();var pp=v.play();if(pp&&pp.catch)pp.catch(function(){});}catch(e){}}
+mediaErr=true;S.delete(v);continue;}
 if(v.paused||v.ended||v.readyState<2||r.width<120||r.height<68){S.delete(v);continue;}
 var dur=v.duration,src=String(v.currentSrc||v.src||'');
 if(v.closest&&v.closest('.ad-showing,.ad-interrupting'))continue;
@@ -106,7 +113,8 @@ var adv=(t-p.t>0.08&&t-p.t<30)||(fr-p.f>=2);
 p.n=adv?p.n+1:0;p.t=t;p.f=fr;p.at=now;
 if(p.n>=2){live=true;break;}}
 if(live){window.__jiyuUnwrapDone=true;var c0=d.getElementById(ID);if(c0&&c0.parentNode)c0.parentNode.removeChild(c0);return 'jiyu-live-playing';}
-if(window.top!==window||window.__jiyuUnwrapDone)return 'jiyu-live-idle';
+var idle=mediaErr?'jiyu-live-mediaerr':'jiyu-live-idle';
+if(window.top!==window||window.__jiyuUnwrapDone)return idle;
 if(!d.getElementById(ID)){var root=d.body||d.documentElement;if(!root)return 'jiyu-live-idle';
 var c=d.createElement('div');c.id=ID;
 c.setAttribute('style','position:fixed;inset:0;top:0;left:0;right:0;bottom:0;z-index:2147483647;background:#000;pointer-events:none;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;color:#fff;font:600 16px/1.3 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;letter-spacing:.2px');
@@ -114,7 +122,22 @@ var st=d.createElement('style');st.textContent='@keyframes __jiyuUnwrapSpin{to{t
 var sp=d.createElement('div');sp.setAttribute('style','width:34px;height:34px;border-radius:50%;border:3px solid rgba(255,255,255,.18);border-top-color:#fff;animation:__jiyuUnwrapSpin .8s linear infinite');
 var t=d.createElement('div');t.textContent='Unwrapping stream\\u2026';
 c.appendChild(st);c.appendChild(sp);c.appendChild(t);root.appendChild(c);}
-return 'jiyu-live-idle';}catch(e){return 'jiyu-live-idle';}})()`
+return idle;}catch(e){return 'jiyu-live-idle';}})()`
+
+/** Same detection / media-error recovery, never adds the cover (post-cover watch). */
+const LIVE_WATCH_SCRIPT = UNWRAP_COVER_TICK_SCRIPT.replace(
+  'if(window.top!==window||window.__jiyuUnwrapDone)return idle;',
+  'return idle;',
+)
+
+function execResultSaysMediaError(res: unknown): boolean {
+  if (!res || typeof res !== 'object') return false
+  const r = res as { result?: unknown; frameResults?: Array<{ result?: unknown }> }
+  if (String(r.result ?? '').includes('jiyu-live-mediaerr')) return true
+  return Array.isArray(r.frameResults)
+    ? r.frameResults.some((f) => String(f?.result ?? '').includes('jiyu-live-mediaerr'))
+    : false
+}
 
 const UNWRAP_COVER_REMOVE_SCRIPT = `(function(){try{window.__jiyuUnwrapDone=true;var c=document.getElementById('__jiyu_unwrap_cover');if(c&&c.parentNode)c.parentNode.removeChild(c);}catch(e){}return 'noop';})()`
 
@@ -162,6 +185,10 @@ type WebBrowserContextValue = {
   goBack: () => void
   goForward: () => void
   reload: () => void
+  /** Live embed never started playing (cover timed out): show Retry. */
+  stalled: boolean
+  /** Reopen the current live embed after a stall (fresh Gecko session if it died). */
+  retryStalled: () => void
   openInPip: (url?: string, title?: string, options?: { navigateTo?: string }) => void
   /** When true, leaving /web for another route keeps the embed in web PiP. */
   setPipOnLeave: (enabled: boolean) => void
@@ -483,6 +510,72 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
     [execInGuest],
   )
 
+  /**
+   * Stall watchdog: the guest cover is removed after UNWRAP_COVER_MAX_MS even when no
+   * video ever moved (blank embed, dead Gecko content process, offline feed), which used
+   * to leave a silent black player. Surface a Retry notice instead and keep a slow
+   * check running so a feed that starts later clears it.
+   */
+  const [stalled, setStalled] = useState(false)
+  const stallGenRef = useRef(0)
+  const clearStall = useCallback(() => {
+    stallGenRef.current += 1
+    setStalled((was) => {
+      if (was) setStatus((cur) => (cur === STALL_MESSAGE ? null : cur))
+      return false
+    })
+  }, [])
+  const beginStallWatch = useCallback(
+    (notice = true) => {
+      const gen = ++stallGenRef.current
+      const startedAt = Date.now()
+      let errTicks = 0
+      let reloads = 0
+      let lastReloadAt = 0
+      if (notice) {
+        setStalled(true)
+        setStatus(STALL_MESSAGE)
+      }
+      const hide = () => {
+        setStalled((was) => {
+          if (was) setStatus((cur) => (cur === STALL_MESSAGE ? null : cur))
+          return false
+        })
+      }
+      const tick = () => {
+        if (gen !== stallGenRef.current) return
+        if (modeRef.current !== 'page' || Date.now() - startedAt > STALL_WATCH_MAX_MS) {
+          clearStall()
+          return
+        }
+        void execInGuest(LIVE_WATCH_SCRIPT).then((res) => {
+          if (gen !== stallGenRef.current) return
+          if (execResultSaysPlaying(res)) {
+            errTicks = 0
+            hide()
+          } else if (execResultSaysMediaError(res)) {
+            // "Video playback aborted due to a network error": the page retries the
+            // <video> itself (3x); if it stays broken, quietly reload the embed page.
+            errTicks += 1
+            if (errTicks >= 6 && reloads < 3 && Date.now() - lastReloadAt > 45_000) {
+              reloads += 1
+              lastReloadAt = Date.now()
+              errTicks = 0
+              if (electron) void window.signalDesktop?.browserReload?.()
+              else if (android) void androidBrowserReload()
+            } else if (reloads >= 3 && errTicks >= 6) {
+              setStalled(true)
+              setStatus(STALL_MESSAGE)
+            }
+          }
+          window.setTimeout(tick, STALL_WATCH_TICK_MS)
+        })
+      }
+      window.setTimeout(tick, STALL_WATCH_TICK_MS)
+    },
+    [android, clearStall, electron, execInGuest],
+  )
+
   /** Keep "Unwrapping stream…" up until a <video> is really playing (≈30s cap). */
   const startUnwrapCover = useCallback(() => {
     const gen = ++unwrapGenRef.current
@@ -497,6 +590,7 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
       }
       if (Date.now() - startedAt > UNWRAP_COVER_MAX_MS) {
         stopUnwrapCover(true)
+        if (modeRef.current === 'page') beginStallWatch()
         return
       }
       busy = true
@@ -508,6 +602,8 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
         // alive until navigate commits.
         if (execResultSaysPlaying(res) && Date.now() - startedAt >= UNWRAP_COVER_MIN_MS) {
           stopUnwrapCover(true)
+          // Keep a quiet watch so a later network error is retried / reloaded.
+          if (modeRef.current === 'page') beginStallWatch(false)
           return
         }
         timer = window.setTimeout(tick, UNWRAP_COVER_TICK_MS)
@@ -515,7 +611,7 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
     }
     // First tick runs after navigate (openUrl) or on the next nav event, never on the old page.
     unwrapTickRef.current = tick
-  }, [execInGuest, stopUnwrapCover])
+  }, [beginStallWatch, execInGuest, stopUnwrapCover])
 
   /**
    * StreamFree: keep pressing JW play while its player is idle (see
@@ -943,6 +1039,7 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
         setStatus('In-app browser unavailable on this platform')
         return
       }
+      clearStall()
       // Allow a fresh autoplay cycle when retrying the same embed after PiP/hide.
       lastNudgeUrlRef.current = ''
       lastNudgeAtRef.current = 0
@@ -1018,7 +1115,7 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
         }, 1200)
       }
     },
-    [android, desktop, hostNavigate, nudgePlayback, showAt, startUnwrapCover, stopUnwrapCover],
+    [android, clearStall, desktop, hostNavigate, nudgePlayback, showAt, startUnwrapCover, stopUnwrapCover],
   )
 
   const openInPip = useCallback(
@@ -1648,6 +1745,11 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
         if (electron) void window.signalDesktop?.browserReload?.()
         else if (android) void androidBrowserReload()
       },
+      stalled,
+      retryStalled: () => {
+        const again = lastEmbedUrlRef.current || navUrlForNudgeRef.current
+        if (again) void openUrl(again)
+      },
       openInPip,
       setPipOnLeave,
       minimizeActiveEmbedToPip,
@@ -1667,6 +1769,7 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
       setContentTitle,
       address,
       status,
+      stalled,
       fullscreen,
       attachFrame,
       detachFrame,
