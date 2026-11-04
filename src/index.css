@@ -7649,3 +7649,31 @@ html.tv-mode :is(input, textarea, [contenteditable='true']) {
     }
   }
 }
+
+/* Fullscreen web/embed player: only the player bar shows - no app rail, Jiyu logo or tour ? peeking
+   over Back and the part/host pickers (desktop, narrow, TV, Android). */
+body:has(.web-browser-page.is-fullscreen) .app-shell {
+  grid-template-columns: 1fr !important;
+  grid-template-rows: 1fr !important;
+}
+
+body:has(.web-browser-page.is-fullscreen) .sidebar {
+  display: none !important;
+}
+
+/* Narrow / phone bars: part + host pickers stay on one row and shrink instead of wrapping. */
+@media (max-width: 640px) {
+  .web-replay-pickers {
+    flex-wrap: nowrap;
+    min-width: 0;
+  }
+  .web-replay-part {
+    min-width: 0;
+    flex: 0 1 auto;
+  }
+  .web-replay-part select {
+    max-width: 44vw;
+    min-width: 0;
+    text-overflow: ellipsis;
+  }
+}
