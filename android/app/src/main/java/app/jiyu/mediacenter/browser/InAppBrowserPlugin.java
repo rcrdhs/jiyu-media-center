@@ -13,6 +13,7 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.webkit.CookieManager;
+import android.webkit.ValueCallback;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
@@ -316,9 +317,18 @@ public class InAppBrowserPlugin extends Plugin {
   private static final String DESKTOP_UA =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
   private static final String DESKTOP_CHROME_FULL = "131.0.6778.69";
+  private static final String SCRAPE_OUTER_HTML_JS =
+    "(function(){try{return document.documentElement?document.documentElement.outerHTML:''}catch(e){return ''}})()";
+  /** fetchHtml must not treat this as a Cloudflare wall (empty HTML looks like a challenge). */
+  private static final String SCRAPE_VIEW_CLOSED = "Scrape WebView closed";
   private final Object fetchLock = new Object();
   private WebView scrapeView;
   private FrameLayout.LayoutParams scrapeLayoutParams;
+  /**
+   * Releases the in-flight {@link #loadScrapeHtml} latch. Page-finish and Cloudflare
+   * polls are posted delayed; renderer death and plugin destroy null this view first.
+   */
+  private Runnable scrapeHtmlAbort;
 
   private static final String STRIP_IFRAME_SANDBOX_JS =
     "(function(){try{"
@@ -450,7 +460,9 @@ public class InAppBrowserPlugin extends Plugin {
           errorBox[0] = "Interrupted";
         }
         String html = htmlBox[0] == null ? "" : htmlBox[0];
-        boolean challenge = isChallengePage(html);
+        // Empty HTML counts as a challenge. A scrape view that died first is a real error.
+        boolean viewClosed = SCRAPE_VIEW_CLOSED.equals(errorBox[0]);
+        boolean challenge = !viewClosed && isChallengePage(html);
         boolean success = !html.isEmpty() && !challenge && (statusBox[0] == 0 || (statusBox[0] >= 200 && statusBox[0] < 400));
         JSObject out = new JSObject();
         out.put("ok", success);
@@ -693,7 +705,8 @@ public class InAppBrowserPlugin extends Plugin {
       done.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
       done.setOnClickListener(v -> {
         java.util.concurrent.CountDownLatch active = unlockLatch;
-        if (active == null || active.getCount() == 0 || scrapeView == null) return;
+        final WebView view = scrapeView;
+        if (active == null || active.getCount() == 0 || view == null) return;
         String pageUrl = unlockPageUrl == null ? "" : unlockPageUrl;
         unlockDoneTaps += 1;
         if (unlockHint != null) unlockHint.setText("Checking…");
@@ -702,7 +715,8 @@ public class InAppBrowserPlugin extends Plugin {
           finishUnlockSuccess(unlockUnlockedBox, active, pageUrl);
           return;
         }
-        scrapeView.evaluateJavascript(
+        if (!evalScrapeJs(
+          view,
           "(function(){try{var h=(document.documentElement&&document.documentElement.outerHTML)||'';return h;}catch(e){return ''}})()",
           value -> {
             if (active.getCount() == 0) return;
@@ -723,7 +737,9 @@ public class InAppBrowserPlugin extends Plugin {
               unlockHint.setText("Still blocked — finish the check, then tap Done again");
             }
           }
-        );
+        ) && unlockHint != null) {
+          unlockHint.setText("Still blocked — finish the check, then tap Done again");
+        }
       });
       unlockPanel.addView(done);
       parent.addView(unlockPanel);
@@ -760,6 +776,7 @@ public class InAppBrowserPlugin extends Plugin {
     String[] errorBox,
     java.util.concurrent.CountDownLatch latch
   ) {
+    final boolean[] delivered = new boolean[] { false };
     try {
       ensureScrapeView();
       if (scrapeView == null) {
@@ -781,31 +798,30 @@ public class InAppBrowserPlugin extends Plugin {
         android.webkit.CookieManager.getInstance().setAcceptThirdPartyCookies(scrapeView, true);
       } catch (Throwable ignored) {}
 
-      final boolean[] delivered = new boolean[] { false };
+      // Bind polls to this instance. scrapeRendererGone / destroy null the field
+      // while page-finish (1.8s) and CF retries are still queued.
+      final WebView target = scrapeView;
       final int[] attempts = new int[] { 0 };
+      scrapeHtmlAbort = () -> failScrapeHtml(errorBox, statusBox, latch, delivered);
       Runnable deliver = () -> {
         if (delivered[0]) return;
-        scrapeView.evaluateJavascript(
-          "(function(){try{return document.documentElement?document.documentElement.outerHTML:''}catch(e){return ''}})()",
-          value -> {
-            String html = unwrapJsString(value);
-            attempts[0] += 1;
-            // Wait out CF auto-challenge a few times before giving up.
-            if (isChallengePage(html) && attempts[0] < 14) {
-              main.postDelayed(() -> {
-                if (!delivered[0]) deliverHtmlPoll(scrapeView, htmlBox, statusBox, errorBox, latch, delivered, attempts);
-              }, 1500);
-              return;
-            }
-            if (delivered[0]) return;
-            delivered[0] = true;
-            htmlBox[0] = html;
-            if (statusBox[0] == 0 && !html.isEmpty() && !isChallengePage(html)) statusBox[0] = 200;
-            latch.countDown();
+        if (!evalScrapeJs(target, SCRAPE_OUTER_HTML_JS, value -> {
+          if (delivered[0]) return;
+          String html = unwrapJsString(value);
+          attempts[0] += 1;
+          // Wait out CF auto-challenge a few times before giving up.
+          if (isChallengePage(html) && attempts[0] < 14) {
+            main.postDelayed(() -> {
+              if (!delivered[0]) deliverHtmlPoll(target, htmlBox, statusBox, errorBox, latch, delivered, attempts);
+            }, 1500);
+            return;
           }
-        );
+          finishScrapeHtml(htmlBox, statusBox, latch, delivered, html);
+        })) {
+          failScrapeHtml(errorBox, statusBox, latch, delivered);
+        }
       };
-      scrapeView.setWebViewClient(new WebViewClient() {
+      target.setWebViewClient(new WebViewClient() {
         @Override
         public boolean onRenderProcessGone(WebView v, android.webkit.RenderProcessGoneDetail detail) {
           return scrapeRendererGone(v);
@@ -813,7 +829,8 @@ public class InAppBrowserPlugin extends Plugin {
 
         @Override
         public void onPageFinished(WebView view, String finishedUrl) {
-          view.postDelayed(deliver, 1800);
+          // Main looper, not the WebView: destroy() does not drop this poll.
+          main.postDelayed(deliver, 1800);
         }
 
         @Override
@@ -853,11 +870,14 @@ public class InAppBrowserPlugin extends Plugin {
       } catch (Throwable ignored) {}
 
       if (extra.isEmpty()) {
-        scrapeView.loadUrl(url);
+        target.loadUrl(url);
       } else {
-        scrapeView.loadUrl(url, extra);
+        target.loadUrl(url, extra);
       }
     } catch (Throwable t) {
+      if (delivered[0]) return;
+      scrapeHtmlAbort = null;
+      delivered[0] = true;
       errorBox[0] = t.getMessage() != null ? t.getMessage() : "WebView fetch failed";
       statusBox[0] = 500;
       latch.countDown();
@@ -873,23 +893,75 @@ public class InAppBrowserPlugin extends Plugin {
     boolean[] delivered,
     int[] attempts
   ) {
-    if (delivered[0] || view == null) return;
-    view.evaluateJavascript(
-      "(function(){try{return document.documentElement?document.documentElement.outerHTML:''}catch(e){return ''}})()",
-      value -> {
-        String html = unwrapJsString(value);
-        attempts[0] += 1;
-        if (isChallengePage(html) && attempts[0] < 12) {
-          main.postDelayed(() -> deliverHtmlPoll(view, htmlBox, statusBox, errorBox, latch, delivered, attempts), 1500);
-          return;
-        }
-        if (delivered[0]) return;
-        delivered[0] = true;
-        htmlBox[0] = html;
-        if (statusBox[0] == 0 && !html.isEmpty() && !isChallengePage(html)) statusBox[0] = 200;
-        latch.countDown();
+    if (delivered[0]) return;
+    if (!evalScrapeJs(view, SCRAPE_OUTER_HTML_JS, value -> {
+      if (delivered[0]) return;
+      String html = unwrapJsString(value);
+      attempts[0] += 1;
+      if (isChallengePage(html) && attempts[0] < 12) {
+        main.postDelayed(() -> deliverHtmlPoll(view, htmlBox, statusBox, errorBox, latch, delivered, attempts), 1500);
+        return;
       }
-    );
+      finishScrapeHtml(htmlBox, statusBox, latch, delivered, html);
+    })) {
+      failScrapeHtml(errorBox, statusBox, latch, delivered);
+    }
+  }
+
+  /**
+   * Evaluate JS on the live scrape WebView. Returns false when that view was
+   * already nulled or destroyed (renderer kill, plugin destroy) so callers can
+   * release the fetch latch instead of NPEing in evaluateJavascript.
+   */
+  private boolean evalScrapeJs(WebView view, String script, ValueCallback<String> callback) {
+    if (view == null || view != scrapeView) return false;
+    try {
+      if (view.getParent() == null) return false;
+      view.evaluateJavascript(script, callback);
+      return true;
+    } catch (Throwable ignored) {
+      return false;
+    }
+  }
+
+  private void finishScrapeHtml(
+    String[] htmlBox,
+    int[] statusBox,
+    java.util.concurrent.CountDownLatch latch,
+    boolean[] delivered,
+    String html
+  ) {
+    if (delivered[0]) return;
+    delivered[0] = true;
+    scrapeHtmlAbort = null;
+    htmlBox[0] = html;
+    if (statusBox[0] == 0 && html != null && !html.isEmpty() && !isChallengePage(html)) statusBox[0] = 200;
+    latch.countDown();
+  }
+
+  private void failScrapeHtml(
+    String[] errorBox,
+    int[] statusBox,
+    java.util.concurrent.CountDownLatch latch,
+    boolean[] delivered
+  ) {
+    if (delivered[0]) return;
+    delivered[0] = true;
+    scrapeHtmlAbort = null;
+    if (errorBox[0] == null || errorBox[0].isEmpty()) {
+      errorBox[0] = SCRAPE_VIEW_CLOSED;
+    }
+    if (statusBox[0] == 0) statusBox[0] = 500;
+    latch.countDown();
+  }
+
+  private void abortScrapeHtml() {
+    Runnable abort = scrapeHtmlAbort;
+    scrapeHtmlAbort = null;
+    if (abort == null) return;
+    try {
+      abort.run();
+    } catch (Throwable ignored) {}
   }
 
   @android.annotation.SuppressLint("SetJavaScriptEnabled")
@@ -921,8 +993,12 @@ public class InAppBrowserPlugin extends Plugin {
   }
 
   private boolean scrapeRendererGone(WebView v) {
-    if (v == scrapeView) scrapeView = null;
-    return app.jiyu.mediacenter.RendererGone.release(v, "scrape");
+    boolean ours = v != null && v == scrapeView;
+    if (ours) scrapeView = null;
+    boolean handled = app.jiyu.mediacenter.RendererGone.release(v, "scrape");
+    // Field is already null, so queued polls no-op — release the fetch latch now.
+    if (ours) abortScrapeHtml();
+    return handled;
   }
 
   private static boolean isHostDownPage(String html) {
@@ -1798,6 +1874,7 @@ public class InAppBrowserPlugin extends Plugin {
   @Override
   protected void handleOnDestroy() {
     main.post(() -> {
+      abortScrapeHtml();
       hideUnlockChrome();
       if (unlockPanel != null) {
         try {
@@ -1805,12 +1882,14 @@ public class InAppBrowserPlugin extends Plugin {
         } catch (Throwable ignored) {}
         unlockPanel = null;
       }
-      if (scrapeView != null) {
+      // Null before destroy so a re-entered poll cannot evaluateJavascript on this instance.
+      WebView dyingScrape = scrapeView;
+      scrapeView = null;
+      if (dyingScrape != null) {
         try {
-          ((ViewGroup) scrapeView.getParent()).removeView(scrapeView);
-          scrapeView.destroy();
+          ((ViewGroup) dyingScrape.getParent()).removeView(dyingScrape);
+          dyingScrape.destroy();
         } catch (Throwable ignored) {}
-        scrapeView = null;
       }
       if (gecko != null) {
         try {
