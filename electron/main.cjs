@@ -1023,6 +1023,228 @@ const BROWSER_PPV_START_RETRY_SCRIPT = (() => {
   }
 })()
 
+/**
+ * StreamCorner watch pages: clear anti-adblock, pick a source, hide chat/site
+ * chrome, and pin the player iframe so Jiyu shows only the stream.
+ */
+const BROWSER_STREAMCORNER_BOOT_SCRIPT = `(() => {
+  try {
+    const host = String(location.hostname || '').replace(/^www\\./i, '').toLowerCase();
+    if (
+      !/(^|\\.)streamcorner\\.(st|foo|cloud|fun)$/i.test(host) &&
+      !/(^|\\.)streamninja\\.(st|foo|cloud|fun)$/i.test(host)
+    ) {
+      return 'skip';
+    }
+    if (window !== window.top) return 'skip-frame';
+    if (window.__jiyuCornerBoot) return 'bound';
+    window.__jiyuCornerBoot = true;
+
+    // Anti-adblock full-page shield (#dontfoid) blocks source clicks and gates
+    // the player iframe — soft ad-shield leaves it alone, so clear it here.
+    const clearBlockers = () => {
+      try {
+        let style = document.getElementById('jiyu-corner-clear-blockers');
+        if (!style) {
+          style = document.createElement('style');
+          style.id = 'jiyu-corner-clear-blockers';
+          style.textContent =
+            '#dontfoid,[id*="dontfo"],[class*="dontfo"]{display:none!important;visibility:hidden!important;pointer-events:none!important;opacity:0!important;width:0!important;height:0!important;max-width:0!important;max-height:0!important;}';
+          ;(document.documentElement || document.head || document.body)?.appendChild(style);
+        }
+        for (const el of document.querySelectorAll('#dontfoid,[id*="dontfo"],[class*="dontfo"]')) {
+          try {
+            el.style.setProperty('display', 'none', 'important');
+            el.style.setProperty('pointer-events', 'none', 'important');
+            el.remove();
+          } catch (_) {}
+        }
+      } catch (_) {}
+    };
+
+    const hideChat = () => {
+      try {
+        const btn = [...document.querySelectorAll('button,a,[role=button]')].find((el) =>
+          /^\\s*Hide Chat\\s*$/i.test(String(el.innerText || el.textContent || '')),
+        );
+        if (btn) btn.click();
+      } catch (_) {}
+      try {
+        let style = document.getElementById('jiyu-corner-hide-chat');
+        if (!style) {
+          style = document.createElement('style');
+          style.id = 'jiyu-corner-hide-chat';
+          style.textContent =
+            '#player-chat,#player-chat-content{display:none!important;width:0!important;max-width:0!important;min-width:0!important;height:0!important;max-height:0!important;overflow:hidden!important;opacity:0!important;pointer-events:none!important;}';
+          ;(document.documentElement || document.head || document.body)?.appendChild(style);
+        }
+        const chat = document.getElementById('player-chat');
+        if (chat) {
+          chat.style.setProperty('display', 'none', 'important');
+          chat.setAttribute('data-jiyu-hide-chat', '1');
+        }
+      } catch (_) {}
+    };
+
+    const findPlayerFrame = () => {
+      try {
+        return [...document.querySelectorAll('iframe')].find((f) => {
+          const src = String(f.src || f.getAttribute('src') || '');
+          if (!src || /^(javascript:|about:)/i.test(src)) return false;
+          if (/streamcorner-chat|chatroom=/i.test(src)) return false;
+          const r = f.getBoundingClientRect();
+          return r.width > 120 && r.height > 80;
+        }) || null;
+      } catch (_) {
+        return null;
+      }
+    };
+
+    // Collapse StreamCorner chrome so only the stream fills Jiyu's browser tile.
+    const focusPlayerOnly = () => {
+      try {
+        const player = findPlayerFrame();
+        if (!player) return false;
+        try {
+          const theater = [...document.querySelectorAll('button,a,[role=button]')].find((el) =>
+            /^\\s*Theater Mode\\s*$/i.test(String(el.innerText || el.textContent || '')),
+          );
+          if (theater) theater.click();
+        } catch (_) {}
+        let style = document.getElementById('jiyu-corner-player-only');
+        if (!style) {
+          style = document.createElement('style');
+          style.id = 'jiyu-corner-player-only';
+          style.textContent = [
+            'html.jiyu-corner-only,html.jiyu-corner-only body{margin:0!important;padding:0!important;overflow:hidden!important;background:#000!important;width:100%!important;height:100%!important;}',
+            'html.jiyu-corner-only .stream-navbar,html.jiyu-corner-only header,html.jiyu-corner-only nav,html.jiyu-corner-only footer,',
+            'html.jiyu-corner-only #player-chat,html.jiyu-corner-only #player-chat-content,html.jiyu-corner-only .night-page-backdrop,',
+            'html.jiyu-corner-only [class*="reminder"],html.jiyu-corner-only aside{display:none!important;}',
+            'html.jiyu-corner-only iframe.jiyu-corner-player{position:fixed!important;inset:0!important;width:100vw!important;height:100vh!important;',
+            'max-width:none!important;max-height:none!important;border:0!important;z-index:2147483000!important;background:#000!important;}',
+          ].join('');
+          ;(document.documentElement || document.head || document.body)?.appendChild(style);
+        }
+        document.documentElement.classList.add('jiyu-corner-only');
+        player.classList.add('jiyu-corner-player');
+        player.style.setProperty('position', 'fixed', 'important');
+        player.style.setProperty('inset', '0', 'important');
+        player.style.setProperty('width', '100vw', 'important');
+        player.style.setProperty('height', '100vh', 'important');
+        player.style.setProperty('z-index', '2147483000', 'important');
+        let node = player.parentElement;
+        while (node && node !== document.documentElement) {
+          try {
+            node.style.setProperty('margin', '0', 'important');
+            node.style.setProperty('padding', '0', 'important');
+            node.style.setProperty('border', '0', 'important');
+            node.style.setProperty('width', '100%', 'important');
+            node.style.setProperty('height', '100%', 'important');
+            node.style.setProperty('max-width', 'none', 'important');
+            node.style.setProperty('max-height', 'none', 'important');
+            node.style.setProperty('overflow', 'hidden', 'important');
+            node.style.setProperty('background', '#000', 'important');
+            if (node.parentElement) {
+              for (const sib of [...node.parentElement.children]) {
+                if (sib === node) continue;
+                if (/^(SCRIPT|STYLE|LINK|META)$/i.test(sib.tagName || '')) continue;
+                if (sib.id && /^jiyu-corner-/i.test(sib.id)) continue;
+                sib.style.setProperty('display', 'none', 'important');
+                sib.setAttribute('data-jiyu-corner-hide', '1');
+              }
+            }
+          } catch (_) {}
+          node = node.parentElement;
+        }
+        return true;
+      } catch (_) {
+        return false;
+      }
+    };
+
+    let sourceIdx = 0;
+    const pickSource = () => {
+      try {
+        clearBlockers();
+        if (findPlayerFrame()) {
+          focusPlayerOnly();
+          return 'has-player';
+        }
+        const sources = [...document.querySelectorAll('button.stream-source-btn')];
+        if (sources.length) {
+          const i = Math.min(sourceIdx, sources.length - 1);
+          sources[i].click();
+          sourceIdx = (i + 1) % sources.length;
+          // Center PLAY may still be required after a source is selected.
+          const play = [...document.querySelectorAll('button,a,[role=button]')].find((el) =>
+            /^\\s*PLAY\\s*$/i.test(String(el.innerText || el.textContent || '')),
+          );
+          if (play) play.click();
+          return 'source';
+        }
+        const play = [...document.querySelectorAll('button,a,[role=button]')].find((el) =>
+          /^\\s*PLAY\\s*$/i.test(String(el.innerText || el.textContent || '')),
+        );
+        if (play) {
+          play.click();
+          return 'play';
+        }
+        return 'wait';
+      } catch (_) {
+        return 'error';
+      }
+    };
+
+    clearBlockers();
+    hideChat();
+    pickSource();
+    let n = 0;
+    let hadPlayer = false;
+    const tick = window.setInterval(() => {
+      n += 1;
+      try {
+        clearBlockers();
+        hideChat();
+        const st = pickSource();
+        if (st === 'has-player') {
+          if (!hadPlayer) hadPlayer = true;
+          focusPlayerOnly();
+          // Give the iframe a few seconds; if still no moving video the sports
+          // autoplay kick handles play(). Stop rotating sources once mounted.
+          if (n >= 16) window.clearInterval(tick);
+          return;
+        }
+        // No player after a few source tries — keep rotating through the list.
+        if (n >= 40) window.clearInterval(tick);
+      } catch (_) {
+        window.clearInterval(tick);
+      }
+    }, 1200);
+    return 'ok';
+  } catch (_) {
+    return 'error';
+  }
+})();`
+
+function scheduleStreamCornerBoot(contents) {
+  if (!contents || contents.isDestroyed?.()) return
+  let url = ''
+  try {
+    url = contents.getURL() || ''
+  } catch {
+    return
+  }
+  if (!isStreamCornerSiteUrl(url)) return
+  const run = () => {
+    if (!contents || contents.isDestroyed?.()) return
+    void contents.executeJavaScript(BROWSER_STREAMCORNER_BOOT_SCRIPT, true).catch(() => {})
+  }
+  run()
+  setTimeout(run, 600)
+  setTimeout(run, 1800)
+  setTimeout(run, 4000)
+}
+
 async function installBrowserFrameScript(contents, script) {
   if (!contents || contents.isDestroyed()) return
   const frames = collectContentFrames(contents, { maxFrames: 10 })
@@ -1575,6 +1797,7 @@ function isPlayerEmbedHost(url) {
       host.endsWith('.playmate.to') ||
       host === 'playmogo.com' ||
       host.endsWith('.playmogo.com') ||
+      isStreamCornerSiteHost(host) ||
       // DoodStream-style VOD mirrors used by LiveXTV replays.
       /^\/[de]\/[a-z0-9]{6,}/i.test(path) ||
       host.includes('netmirror') ||
@@ -1773,12 +1996,34 @@ function isRotatingSportsEmbedPath(pathname) {
   return /^\/embed\/[a-z0-9](?:[\w.-]{2,}|[\w.-]*\/[\w.-]+)/i.test(String(pathname || ''))
 }
 
+/** StreamCorner / StreamNinja watch pages (not their rotating player CDN iframes). */
+function isStreamCornerSiteHost(host) {
+  const h = String(host || '')
+    .replace(/^www\./i, '')
+    .toLowerCase()
+  if (!h) return false
+  return (
+    /(^|\.)streamcorner\.(st|foo|cloud|fun)$/i.test(h) ||
+    /(^|\.)streamninja\.(st|foo|cloud|fun)$/i.test(h)
+  )
+}
+
+function isStreamCornerSiteUrl(url) {
+  try {
+    return isStreamCornerSiteHost(new URL(String(url || '')).hostname)
+  } catch {
+    return false
+  }
+}
+
 function isSportsEmbedHost(url) {
   try {
     const parsed = new URL(url)
     const host = parsed.hostname.replace(/^www\./i, '').toLowerCase()
     // PPV/Streamed iframe mirrors rotate off embed.st (e.g. taifood-blog.asia/embed/…).
     if (isRotatingSportsEmbedPath(parsed.pathname || '')) return true
+    // Keep StreamCorner OFF this list: shouldBlockSportsThirdParty would kill its
+    // rotating player CDN iframes. Soft-shield + autoplay use isStreamCornerSiteUrl.
     return (
       host === 'embed.st' ||
       host.endsWith('.embed.st') ||
@@ -1805,7 +2050,11 @@ function isSportsEmbedHost(url) {
  * excluded, so soccerfull/Dood loaded a frame then sat paused.
  */
 function needsSportsStyleAutoplay(url) {
-  return isSportsEmbedHost(url) || isReplayAdSensitiveUrl(url)
+  return (
+    isSportsEmbedHost(url) ||
+    isReplayAdSensitiveUrl(url) ||
+    isStreamCornerSiteUrl(url)
+  )
 }
 
 /**
@@ -1816,6 +2065,7 @@ function isReplayAdSensitiveUrl(url) {
   try {
     const parsed = new URL(String(url || ''))
     const host = parsed.hostname.replace(/^www\./i, '').toLowerCase()
+    if (isStreamCornerSiteHost(host)) return true
     if (host === 'soccerfull.net' || host.endsWith('.soccerfull.net')) return true
     if (host.includes('livextv')) return true
     if (host === 'footreplays.com' || host.endsWith('.footreplays.com')) return true
@@ -1921,8 +2171,10 @@ function collectContentFrames(contents, options = {}) {
     const url = String(frame.url || '')
     let score = 1
     if (!url || url === 'about:blank') score = 0
+    else if (/streamcorner-chat|chatroom=/i.test(url)) score = -20
     else if (isSportsEmbedHost(url) || isReplayAdSensitiveUrl(url)) score = 20
-    else if (/player|embed|stream|hls|video/i.test(url)) score = 8
+    else if (/player|embed|hls|video|\/nba\b|\/live\b|bitmovin|jwplayer/i.test(url)) score = 12
+    else if (/stream/i.test(url) && !/streamcorner-chat/i.test(url)) score = 8
     else if (isLikelyAdFrameUrl(url)) score = -50
     return { frame, score }
   })
@@ -1941,7 +2193,38 @@ const BROWSER_AD_SHIELD_SCRIPT = `(() => {
     if (!host || /^about:/i.test(String(location.protocol || ''))) return 'skip-blank';
     // Live sports + LiveXTV / soccerfull / DoodStream VODs detect .adsbox bait
     // and blocked googlesyndication — soft shield only (FS block + popup trap).
+    // StreamCorner player iframes sit on rotating CDNs; soft-shield them when the
+    // top page is StreamCorner, otherwise the hard shield blanks the video and
+    // only chat remains visible in Jiyu. Cross-origin frames cannot read
+    // top.location — use ancestorOrigins (Chromium) then referrer. Main process
+    // can also force soft via __JIYU_FORCE_SOFT__ when the parent URL is known.
+    const forceSoft = __JIYU_FORCE_SOFT__;
+    let topHost = '';
+    try {
+      topHost = String(window.top.location.hostname || '').replace(/^www\\./i, '').toLowerCase();
+    } catch (_) {}
+    try {
+      if (!topHost && location.ancestorOrigins && location.ancestorOrigins.length) {
+        topHost = String(new URL(location.ancestorOrigins[0]).hostname || '')
+          .replace(/^www\\./i, '')
+          .toLowerCase();
+      }
+    } catch (_) {}
+    try {
+      if (!topHost && document.referrer) {
+        topHost = String(new URL(document.referrer).hostname || '')
+          .replace(/^www\\./i, '')
+          .toLowerCase();
+      }
+    } catch (_) {}
+    const streamCornerTop =
+      /(^|\\.)streamcorner\\.(st|foo|cloud|fun)$/i.test(topHost) ||
+      /(^|\\.)streamninja\\.(st|foo|cloud|fun)$/i.test(topHost);
     const replayAds =
+      forceSoft ||
+      streamCornerTop ||
+      /(^|\\.)streamcorner\\.(st|foo|cloud|fun)$/i.test(host) ||
+      /(^|\\.)streamninja\\.(st|foo|cloud|fun)$/i.test(host) ||
       /(^|\\.)embed(?:hd)?\\.st$/i.test(host) ||
       /(^|\\.)embedindia\\.st$/i.test(host) ||
       /(^|\\.)streamed\\.pk$/i.test(host) ||
@@ -2734,6 +3017,17 @@ function scheduleRiveEmbedAuto(contents) {
   setTimeout(run, 2500)
 }
 
+function browserAdShieldScriptForPage(pageUrl) {
+  const forceSoft =
+    isStreamCornerSiteUrl(pageUrl) ||
+    isReplayAdSensitiveUrl(pageUrl) ||
+    isSportsEmbedHost(pageUrl)
+  return BROWSER_AD_SHIELD_SCRIPT.replace(
+    '__JIYU_FORCE_SOFT__',
+    forceSoft ? 'true' : 'false',
+  )
+}
+
 async function installBrowserAdShield(contents) {
   if (!contents || contents.isDestroyed()) return
   let pageUrl = ''
@@ -2745,10 +3039,11 @@ async function installBrowserAdShield(contents) {
   if (!isSportsEmbedHost(pageUrl) && !/embedindia|embed\.st|ppv\.st|streamed\.pk/i.test(pageUrl)) {
     // Still install on blank→embed navigations via frame scripts below.
   }
+  const script = browserAdShieldScriptForPage(pageUrl)
   const frames = collectContentFrames(contents, { maxFrames: 10 })
   for (const frame of frames) {
     try {
-      await raceFrameExec(frame.executeJavaScript(BROWSER_AD_SHIELD_SCRIPT, true), 1500)
+      await raceFrameExec(frame.executeJavaScript(script, true), 1500)
     } catch {
       /* timeout / ignore */
     }
@@ -4850,6 +5145,7 @@ function installWebBrowserHandlers(view) {
     emitNav()
     scheduleBrowserWheelVolume(view.webContents)
     scheduleBrowserAdShield(view.webContents)
+    scheduleStreamCornerBoot(view.webContents)
     scheduleRiveEmbedAuto(view.webContents)
     scheduleWebBrowserSportsAutoplay(view.webContents)
   })
@@ -4858,6 +5154,7 @@ function installWebBrowserHandlers(view) {
     emitNav()
     scheduleBrowserWheelVolume(view.webContents)
     scheduleBrowserAdShield(view.webContents)
+    scheduleStreamCornerBoot(view.webContents)
     scheduleRiveEmbedAuto(view.webContents)
     scheduleWebBrowserSportsAutoplay(view.webContents)
   })
@@ -4881,6 +5178,12 @@ function installWebBrowserHandlers(view) {
       setTimeout(() => {
         try {
           if (!frame.isDestroyed?.()) {
+            let pageUrl = ''
+            try {
+              pageUrl = view.webContents.getURL() || ''
+            } catch {
+              pageUrl = ''
+            }
             void frame.executeJavaScript(
               BROWSER_WHEEL_VOLUME_SCRIPT.replace(
                 'window.__jiyuVolLevel = 1;',
@@ -4888,7 +5191,7 @@ function installWebBrowserHandlers(view) {
               ),
               true,
             )
-            void frame.executeJavaScript(BROWSER_AD_SHIELD_SCRIPT, true)
+            void frame.executeJavaScript(browserAdShieldScriptForPage(pageUrl), true)
             if (BROWSER_LIVE_REWIND_GUARD_SCRIPT) {
               void frame.executeJavaScript(BROWSER_LIVE_REWIND_GUARD_SCRIPT, true)
             }
@@ -5207,11 +5510,13 @@ function ensureMultiWebView(id) {
   view.webContents.on('did-stop-loading', () => {
     if (!isTile()) return
     scheduleBrowserAdShield(view.webContents)
+    scheduleStreamCornerBoot(view.webContents)
     scheduleRiveEmbedAuto(view.webContents)
     scheduleMultiWebAutoplay(key)
   })
   view.webContents.on('dom-ready', () => {
     if (!isTile()) return
+    scheduleStreamCornerBoot(view.webContents)
     scheduleRiveEmbedAuto(view.webContents)
     scheduleMultiWebAutoplay(key)
   })

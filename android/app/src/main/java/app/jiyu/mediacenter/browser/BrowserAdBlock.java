@@ -177,6 +177,8 @@ final class BrowserAdBlock {
     if (host.equals("streamed.pk") || host.endsWith(".streamed.pk")) return true;
     if (host.equals("ppv.st") || host.endsWith(".ppv.st")) return true;
     if (host.equals("ppvservices.st") || host.endsWith(".ppvservices.st")) return true;
+    if (host.matches("(?i)(.*\\.)?streamcorner\\.(st|foo|cloud|fun)")) return true;
+    if (host.matches("(?i)(.*\\.)?streamninja\\.(st|foo|cloud|fun)")) return true;
     if (host.equals("rivestream.ru") || host.endsWith(".rivestream.ru")) return true;
     if (host.equals("fstream365.com") || host.endsWith(".fstream365.com")) return true;
     if (host.equals("vsembed.ru") || host.endsWith(".vsembed.ru")) return true;

@@ -199,6 +199,86 @@ final class MultiWebHost {
       + "document.querySelectorAll('iframe').forEach(fix);"
       + "return 'ok';}catch(e){return 'error';}})();";
 
+  /**
+   * StreamCorner watch pages: auto-pick first source and hide chat so the tile
+   * shows the player instead of streamcorner-chat.pages.dev.
+   */
+  private static final String STREAMCORNER_BOOT_JS =
+    "(function(){try{"
+      + "var host=String(location.hostname||'').replace(/^www\\./i,'').toLowerCase();"
+      + "if(!/(^|\\.)streamcorner\\.(st|foo|cloud|fun)$/i.test(host)"
+      + "&&!/(^|\\.)streamninja\\.(st|foo|cloud|fun)$/i.test(host))return 'skip';"
+      + "if(window!==window.top)return 'skip-frame';"
+      + "if(window.__jiyuCornerBoot)return 'bound';window.__jiyuCornerBoot=1;"
+      + "function clearBlockers(){try{"
+      + "var style=document.getElementById('jiyu-corner-clear-blockers');"
+      + "if(!style){style=document.createElement('style');style.id='jiyu-corner-clear-blockers';"
+      + "style.textContent='#dontfoid,[id*=\"dontfo\"],[class*=\"dontfo\"]{display:none!important;visibility:hidden!important;pointer-events:none!important;opacity:0!important;}';"
+      + "(document.documentElement||document.head||document.body).appendChild(style);}"
+      + "var nodes=document.querySelectorAll('#dontfoid,[id*=\"dontfo\"],[class*=\"dontfo\"]');"
+      + "for(var i=0;i<nodes.length;i++){try{nodes[i].remove();}catch(e){}}"
+      + "}catch(e){}}"
+      + "function hideChat(){try{"
+      + "var btns=document.querySelectorAll('button,a,[role=button]');"
+      + "for(var i=0;i<btns.length;i++){"
+      + "var t=String(btns[i].innerText||btns[i].textContent||'');"
+      + "if(/^\\s*Hide Chat\\s*$/i.test(t)){btns[i].click();break;}}"
+      + "var style=document.getElementById('jiyu-corner-hide-chat');"
+      + "if(!style){style=document.createElement('style');style.id='jiyu-corner-hide-chat';"
+      + "style.textContent='#player-chat,#player-chat-content{display:none!important;width:0!important;height:0!important;overflow:hidden!important;opacity:0!important;pointer-events:none!important;}';"
+      + "(document.documentElement||document.head||document.body).appendChild(style);}"
+      + "var chat=document.getElementById('player-chat');"
+      + "if(chat){chat.style.setProperty('display','none','important');}"
+      + "}catch(e){}}"
+      + "function findPlayer(){try{var fs=document.querySelectorAll('iframe');"
+      + "for(var i=0;i<fs.length;i++){var src=String(fs[i].src||'');"
+      + "if(!src||/^(javascript:|about:)/i.test(src)||/streamcorner-chat|chatroom=/i.test(src))continue;"
+      + "var r=fs[i].getBoundingClientRect();if(r.width>120&&r.height>80)return fs[i];}return null;}catch(e){return null;}}"
+      + "function focusPlayer(){try{var player=findPlayer();if(!player)return false;"
+      + "var tbs=document.querySelectorAll('button,a,[role=button]');"
+      + "for(var i=0;i<tbs.length;i++){if(/^\\s*Theater Mode\\s*$/i.test(String(tbs[i].innerText||''))){tbs[i].click();break;}}"
+      + "var style=document.getElementById('jiyu-corner-player-only');"
+      + "if(!style){style=document.createElement('style');style.id='jiyu-corner-player-only';"
+      + "style.textContent='html.jiyu-corner-only,html.jiyu-corner-only body{margin:0!important;padding:0!important;overflow:hidden!important;background:#000!important;width:100%!important;height:100%!important;}"
+      + "html.jiyu-corner-only .stream-navbar,html.jiyu-corner-only header,html.jiyu-corner-only nav,html.jiyu-corner-only footer,"
+      + "html.jiyu-corner-only #player-chat,html.jiyu-corner-only #player-chat-content,html.jiyu-corner-only .night-page-backdrop,"
+      + "html.jiyu-corner-only [class*=\"reminder\"],html.jiyu-corner-only aside{display:none!important;}"
+      + "html.jiyu-corner-only iframe.jiyu-corner-player{position:fixed!important;inset:0!important;width:100vw!important;height:100vh!important;"
+      + "max-width:none!important;max-height:none!important;border:0!important;z-index:2147483000!important;background:#000!important;}';"
+      + "(document.documentElement||document.head||document.body).appendChild(style);}"
+      + "document.documentElement.classList.add('jiyu-corner-only');"
+      + "player.classList.add('jiyu-corner-player');"
+      + "player.style.setProperty('position','fixed','important');"
+      + "player.style.setProperty('inset','0','important');"
+      + "player.style.setProperty('width','100vw','important');"
+      + "player.style.setProperty('height','100vh','important');"
+      + "player.style.setProperty('z-index','2147483000','important');"
+      + "var node=player.parentElement;"
+      + "while(node&&node!==document.documentElement){"
+      + "node.style.setProperty('margin','0','important');node.style.setProperty('padding','0','important');"
+      + "node.style.setProperty('width','100%','important');node.style.setProperty('height','100%','important');"
+      + "node.style.setProperty('overflow','hidden','important');node.style.setProperty('background','#000','important');"
+      + "if(node.parentElement){var kids=node.parentElement.children;"
+      + "for(var s=0;s<kids.length;s++){var sib=kids[s];if(sib===node)continue;"
+      + "if(/^(SCRIPT|STYLE|LINK|META)$/i.test(sib.tagName||''))continue;"
+      + "if(sib.id&&/^jiyu-corner-/i.test(sib.id))continue;"
+      + "sib.style.setProperty('display','none','important');}}"
+      + "node=node.parentElement;}return true;}catch(e){return false;}}"
+      + "function pick(){try{clearBlockers();if(findPlayer()){focusPlayer();return 'has-player';}"
+      + "var sources=document.querySelectorAll('button.stream-source-btn');"
+      + "if(sources.length){sources[0].click();"
+      + "var bs=document.querySelectorAll('button,a,[role=button]');"
+      + "for(var j=0;j<bs.length;j++){if(/^\\s*PLAY\\s*$/i.test(String(bs[j].innerText||''))){bs[j].click();break;}}"
+      + "return 'source';}"
+      + "var bs=document.querySelectorAll('button,a,[role=button]');"
+      + "for(var i=0;i<bs.length;i++){if(/^\\s*PLAY\\s*$/i.test(String(bs[i].innerText||''))){bs[i].click();return 'play';}}"
+      + "return 'wait';}catch(e){return 'error';}}"
+      + "clearBlockers();hideChat();pick();var n=0;"
+      + "var tick=setInterval(function(){n++;clearBlockers();hideChat();var st=pick();"
+      + "if(st==='has-player'){focusPlayer();if(n>=16)clearInterval(tick);return;}"
+      + "if(n>=30)clearInterval(tick);},900);"
+      + "return 'ok';}catch(e){return 'error';}})();";
+
   /** Compact Electron scheduleBrowserAdShield / EMBED_AD_HIDE + fake notification popups. */
   private static final String AD_HIDE_JS =
     "(function(){try{"
@@ -449,6 +529,12 @@ final class MultiWebHost {
     view.evaluateJavascript(HARD_UNSANDBOX_JS, null);
     view.evaluateJavascript(HIDE_SANDBOX_COMPLAINT_JS, null);
     view.evaluateJavascript(AD_HIDE_JS, null);
+    try {
+      String u = view.getUrl();
+      if (u != null && (u.contains("streamcorner") || u.contains("streamninja"))) {
+        view.evaluateJavascript(STREAMCORNER_BOOT_JS, null);
+      }
+    } catch (Throwable ignored) {}
   }
 
   private static final Pattern SANDBOX_ATTR =

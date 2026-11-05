@@ -354,6 +354,8 @@ public class InAppBrowserPlugin extends Plugin {
       || u.contains("embedindia.st")
       || u.contains("streamed.pk")
       || u.contains("ppv.st")
+      || u.contains("streamcorner")
+      || u.contains("streamninja")
       || u.contains("fstream")
       || u.contains("vsembed")
       || u.contains("soccerfull")
