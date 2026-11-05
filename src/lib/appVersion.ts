@@ -12,6 +12,11 @@ export const APP_VERSION_LABEL = `v${APP_VERSION}`
 /** Short milestone log — newest first — so progress is visible in-app. */
 export const APP_RELEASES: ReadonlyArray<{ version: string; summary: string }> = [
   {
+    version: '0.3.96',
+    summary:
+      'StreamCorner and StreamNinja watch pages open the player by themselves (pick a source, hide chat, clear the blocker, theater mode) on Android Gecko, multi-view and PC; Android scrape pages no longer crash with an unexpected-close dialog when the WebView is already gone',
+  },
+  {
     version: '0.3.95',
     summary:
       'Replays: pick the host (vidaraa, vixeo or Playmogo) next to the part picker on phones, Android TV and PC, and the next replay opens on the host that last worked; StreamCorner NBA replays show the real game date and hide games not finished yet; replays and live embeds no longer need a Jiyu restart after Android closes the player in the background; live streams that stall or show a network error retry by themselves, then show No video yet with a Retry button instead of a black screen; Android closing the app view for low memory no longer shows a false Jiyu closed unexpectedly message and reopens the page you were on; fullscreen on PC shows only the player bar (no side menu, logo or ? button over Back) and no scrollbar',
