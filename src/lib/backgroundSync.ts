@@ -1,11 +1,12 @@
 /**
- * Keep a catalog sync alive when the user leaves Jiyu and comes back.
- * Android holds a foreground service, desktop turns off window throttling,
- * and Samsung TV asks to keep the CPU. Progress is saved so a killed
- * process can finish the remaining sources on the next open.
+ * Keep a catalog sync alive while Jiyu stays open, including picture-in-picture.
+ * Closing the app (PiP dismiss, Back→exit, Recents swipe) cancels it and drops
+ * the Android notification. A process kill that is not a user close can still
+ * finish the remaining sources on the next open.
  */
 
 import { Capacitor, registerPlugin } from '@capacitor/core'
+import { shouldResumePendingCatalog } from './catalogClosePolicy'
 
 const JOB_KEY = 'jiyu.catalog.sync-job'
 
@@ -13,6 +14,7 @@ type SyncJob = { ids: string[]; done: string[] }
 
 type CatalogSyncPlugin = {
   setActive: (options: { active: boolean }) => Promise<void>
+  consumeCloseCancel: () => Promise<{ cancel?: boolean }>
 }
 
 const CatalogSync = registerPlugin<CatalogSyncPlugin>('CatalogSync')
@@ -78,6 +80,34 @@ export function pendingSyncSourceIds(): string[] {
   const job = readJob()
   if (!job) return []
   return job.ids.filter((id) => !job.done.includes(id))
+}
+
+/**
+ * True once, after Jiyu was closed (PiP dismiss, Back→exit, Recents swipe).
+ * The interrupted job is dropped so the next open does not restart it.
+ */
+export async function consumeCatalogCloseCancel(): Promise<boolean> {
+  try {
+    if (!Capacitor.isNativePlatform() || Capacitor.getPlatform() !== 'android') return false
+  } catch {
+    return false
+  }
+  try {
+    const result = await CatalogSync.consumeCloseCancel()
+    if (!result?.cancel) return false
+    clearSyncJob()
+    return true
+  } catch {
+    return false
+  }
+}
+
+export function shouldResumeCatalogJob(opts: {
+  closedByAppExit: boolean
+  pendingSourceIds: readonly string[]
+  syncAlreadyRunning: boolean
+}): boolean {
+  return shouldResumePendingCatalog(opts)
 }
 
 function tizenPower(active: boolean): void {

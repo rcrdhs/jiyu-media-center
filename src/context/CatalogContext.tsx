@@ -70,14 +70,17 @@ import {
   type TorrentSyncProgress,
 } from '../lib/torrentSync'
 import {
+  bindCatalogCloseCancel,
   enqueueTorrentSyncTask,
   getTorrentSyncControlState,
 } from '../lib/torrentSyncControl'
 import {
   bindBackgroundSyncResume,
   clearSyncJob,
+  consumeCatalogCloseCancel,
   onCatalogSyncResumeRequested,
   pendingSyncSourceIds,
+  shouldResumeCatalogJob,
 } from '../lib/backgroundSync'
 import { clearTorrentSyncStatus, setTorrentSyncMessage } from '../lib/torrentSyncStatus'
 import { isKidsModeEnabled, subscribeKidsMode } from '../lib/kidsMode'
@@ -828,12 +831,22 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready])
 
-  // Finish a sync that was still going when Jiyu was closed or the process was killed.
+  // Finish a sync that was still going when the process died without a user close.
+  // PiP dismiss, Back→exit, and Recents removal set a native flag and do not resume.
   useEffect(() => {
     if (!ready) return
     bindBackgroundSyncResume()
+    bindCatalogCloseCancel()
     const resume = () => {
-      if (getTorrentSyncControlState().active) return
+      if (
+        !shouldResumeCatalogJob({
+          closedByAppExit: false,
+          pendingSourceIds: pendingSyncSourceIds(),
+          syncAlreadyRunning: getTorrentSyncControlState().active,
+        })
+      ) {
+        return
+      }
       const ids = pendingSyncSourceIds()
       if (ids.length === 0) return
       const websites = loadTorrentSources()
@@ -868,9 +881,21 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
         window.setTimeout(() => clearTorrentSyncStatus(), 2500)
       })
     }
-    const stop = onCatalogSyncResumeRequested(resume)
-    resume()
-    return stop
+    let stop = () => {}
+    let cancelled = false
+    void consumeCatalogCloseCancel().then((closed) => {
+      if (cancelled) return
+      if (closed) {
+        clearSyncJob()
+        return
+      }
+      stop = onCatalogSyncResumeRequested(resume)
+      resume()
+    })
+    return () => {
+      cancelled = true
+      stop()
+    }
   }, [ready, reloadTorrentCatalog])
 
   // SubsPlease publishes new anime throughout the day. Refresh its all-shows

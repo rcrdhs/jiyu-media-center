@@ -11,11 +11,10 @@ import android.os.Build;
 import android.os.IBinder;
 
 /**
- * Keeps the process in the foreground while a catalog sync is running,
- * so leaving Jiyu does not freeze the update.
- *
- * Must not use START_STICKY — a system restart after sync ends would leave
- * "Updating the catalog" pinned forever with no JS session holding it.
+ * Notification while the page is actually updating the catalog.
+ * This service does not crawl sources. The page starts it and stops it.
+ * It is not sticky: a restart with no live session must not leave
+ * "Updating the catalog" pinned. Closing Jiyu stops the service too.
  */
 public class CatalogSyncService extends Service {
   static final String CHANNEL_ID = "jiyu.catalog.sync";

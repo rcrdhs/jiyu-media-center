@@ -54,6 +54,24 @@ final class GeckoMultiHost {
     return active;
   }
 
+  /** Stop multiview audio. Does not blank tiles; activity destroy releases them. */
+  void pauseForDismiss() {
+    active = false;
+    heartbeatOn = false;
+    for (Tile tile : tiles.values()) {
+      if (tile.media != null) {
+        try {
+          tile.media.pause();
+        } catch (Throwable ignored) {}
+      }
+      if (tile.session != null) {
+        try {
+          tile.session.setActive(false);
+        } catch (Throwable ignored) {}
+      }
+    }
+  }
+
   void show(
     GeckoOverlayController gecko,
     String id,

@@ -1759,6 +1759,19 @@ final class GeckoOverlayController {
     }
   }
 
+  /** Pause in-page media. Cross-origin embeds stop when the session is closed. */
+  void pauseMediaForDismiss() {
+    evaluateJavascript(
+      "(function(){try{var nodes=document.querySelectorAll('video,audio');"
+        + "for(var i=0;i<nodes.length;i++){try{nodes[i].pause();}catch(e){}}"
+        + "return 'paused';}catch(e){return 'error';}})()",
+      null
+    );
+    try {
+      if (session != null) session.setActive(false);
+    } catch (Throwable ignored) {}
+  }
+
   void blank() {
     // about:blank is white. Prefer a real black document via byte data —
     // the data:text/html,string form can paint white empty pages in GeckoView

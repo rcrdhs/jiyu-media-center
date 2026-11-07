@@ -1,6 +1,5 @@
 import {
-  deleteTorrentItemsByIds,
-  deleteTorrentItemsForSource,
+  commitTorrentCatalogChange,
   listTorrentItemsForSource,
   loadTorrentCatalogMeta,
   saveTorrentCatalogMeta,
@@ -571,8 +570,10 @@ export async function syncTorrentSource(
             )
             return { ...prev, ...item, tags, description: item.description || prev.description }
           })
-          await deleteTorrentItemsByIds(kidsPlan.deleteIds)
-          await upsertInBatches(lightWrite)
+          await commitTorrentCatalogChange({
+            deleteIds: kidsPlan.deleteIds,
+            upserts: lightWrite,
+          })
           savedCount = lightWrite.length
         } else {
         const merged = [...items, ...keptPopular, ...keptKids]
@@ -622,8 +623,10 @@ export async function syncTorrentSource(
               return { ...item, tags }
             })
 
-        await deleteTorrentItemsByIds([...staleNewIds, ...kidsPlan.deleteIds])
-        await upsertInBatches(mergedForWrite)
+        await commitTorrentCatalogChange({
+          deleteIds: [...staleNewIds, ...kidsPlan.deleteIds],
+          upserts: mergedForWrite,
+        })
         savedCount = mergedForWrite.length
         }
       } else if (lightPass) {
@@ -636,13 +639,15 @@ export async function syncTorrentSource(
           const staleKidsShowIds = existing
             .filter((item) => isKidsShowItem(item) && !incomingIds.has(item.id))
             .map((item) => item.id)
-          await deleteTorrentItemsByIds(staleKidsShowIds)
+          await commitTorrentCatalogChange({ deleteIds: staleKidsShowIds, upserts: items })
+        } else {
+          await upsertInBatches(items)
         }
-        await upsertInBatches(items)
         savedCount = items.length
       } else {
-        // One replace at the end (batched) — mid-sync IDB writes were freezing Jiyu.
-        // Cancel is ignored once delete starts so we never leave an empty shelf.
+        // One replace at the end. Delete and insert share a transaction so closing
+        // the app mid-save rolls back instead of leaving an empty shelf.
+        // Cancel is ignored once that transaction starts.
         // If the curated Kids Shows feed failed empty, keep the previous Kids shelf.
         const existing = await listTorrentItemsForSource(source.id)
         const kidsShowSyncOk = items.some(isKidsShowItem)
@@ -650,8 +655,7 @@ export async function syncTorrentSource(
           ? []
           : existing.filter((item) => isKidsShowItem(item))
         const merged = [...items, ...keptKidsShows]
-        await deleteTorrentItemsForSource(source.id)
-        await upsertInBatches(merged)
+        await commitTorrentCatalogChange({ deleteSourceId: source.id, upserts: merged })
         savedCount = merged.length
       }
 
