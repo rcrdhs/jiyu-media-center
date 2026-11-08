@@ -117,6 +117,14 @@ export function Sidebar() {
     // Hiding here races the PiP resize and leaves a black corner after the stream pauses.
     if (webMode === 'page') minimizeActiveEmbedToPip()
     setSectionsMenuOpen(false)
+    // Sections-menu hide can finish after PiP show and leave Mute/Full/Expand
+    // with no Gecko stage — re-place the corner a few times so show wins.
+    if (isAndroidShell && (webMode === 'pip' || webMode === 'page')) {
+      hiddenForMenuRef.current = false
+      window.setTimeout(() => syncBrowserView(), 0)
+      window.setTimeout(() => syncBrowserView(), 120)
+      window.setTimeout(() => syncBrowserView(), 360)
+    }
   }
 
   function goHome() {

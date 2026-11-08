@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { useLocation } from 'react-router-dom'
 import { getPipLayout, useWebBrowser } from '../context/WebBrowserContext'
 import {
   androidBrowserGetVolume,
@@ -9,6 +10,7 @@ import { isPlaceholderBrowserTitle } from '../lib/webBrowser'
 
 /** Floating chrome for web-browser PiP (native WebContentsView draws the page). */
 export function WebBrowserPip() {
+  const location = useLocation()
   const {
     mode,
     nav,
@@ -57,6 +59,21 @@ export function WebBrowserPip() {
     window.addEventListener('resize', sync)
     return () => window.removeEventListener('resize', sync)
   }, [mode, fullscreen, syncBrowserView])
+
+  // Android: section changes can leave Mute/Full/Expand up while a stale
+  // menu-hide keeps Gecko GONE. Re-place the stage whenever the route moves.
+  useEffect(() => {
+    if (mode !== 'pip' || fullscreen) return
+    if (!isAndroidInAppBrowser()) return
+    setLayout(getPipLayout())
+    syncBrowserView()
+    const t1 = window.setTimeout(() => syncBrowserView(), 80)
+    const t2 = window.setTimeout(() => syncBrowserView(), 280)
+    return () => {
+      window.clearTimeout(t1)
+      window.clearTimeout(t2)
+    }
+  }, [mode, fullscreen, location.pathname, syncBrowserView])
 
   function setEmbedVolume(percent: number) {
     const pct = Math.max(0, Math.min(100, Math.round(percent)))

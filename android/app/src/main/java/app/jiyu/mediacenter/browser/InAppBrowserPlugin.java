@@ -61,6 +61,13 @@ public class InAppBrowserPlugin extends Plugin {
   private int pipTop;
   private int pipW;
   private int pipH;
+  /**
+   * Serializes show vs hide on the main queue. Sections-menu hide can finish
+   * after PiP showAt and leave Mute/Full/Expand chrome with no Gecko stage —
+   * whichever call bumps this last wins.
+   */
+  private final java.util.concurrent.atomic.AtomicInteger surfaceEpoch =
+    new java.util.concurrent.atomic.AtomicInteger(0);
   private FrameLayout host;
   private FrameLayout.LayoutParams layoutParams;
   /** Full-screen Cloudflare Verify chrome (banner + Done/Cancel). */
@@ -83,8 +90,13 @@ public class InAppBrowserPlugin extends Plugin {
 
   @PluginMethod
   public void show(PluginCall call) {
+    final int epoch = surfaceEpoch.incrementAndGet();
     main.post(() -> {
       try {
+        if (epoch != surfaceEpoch.get()) {
+          call.resolve(ok());
+          return;
+        }
         // PiP showAt() is queued when /web unmounts. It must not tear down
         // Multiview or shrink the shared Gecko surface back to the corner.
         if (geckoMultiActive) {
@@ -103,6 +115,10 @@ public class InAppBrowserPlugin extends Plugin {
         applyBounds(call);
         ensureUsableBounds();
         gecko.setVisibility(View.VISIBLE);
+        try {
+          View v = gecko.getView();
+          if (v != null) v.bringToFront();
+        } catch (Throwable ignored) {}
         gecko.resume();
         notifyNav();
         call.resolve(ok());
@@ -143,7 +159,12 @@ public class InAppBrowserPlugin extends Plugin {
   public void hide(PluginCall call) {
     boolean blank = Boolean.TRUE.equals(call.getBoolean("blank", false));
     boolean pause = Boolean.TRUE.equals(call.getBoolean("pause", true));
+    final int epoch = surfaceEpoch.incrementAndGet();
     main.post(() -> {
+      if (epoch != surfaceEpoch.get()) {
+        call.resolve(ok());
+        return;
+      }
       if (gecko == null) {
         call.resolve(ok());
         return;
@@ -574,6 +595,7 @@ public class InAppBrowserPlugin extends Plugin {
       // Keep Gecko from eating Verify taps if a prior stream left it visible.
       if (gecko != null) {
         try {
+          surfaceEpoch.incrementAndGet();
           gecko.setVisibility(View.GONE);
           gecko.pause();
         } catch (Throwable ignored) {}
@@ -1151,6 +1173,7 @@ public class InAppBrowserPlugin extends Plugin {
               try {
                 gecko.pause();
               } catch (Throwable ignored) {}
+              surfaceEpoch.incrementAndGet();
               gecko.setVisibility(View.GONE);
               // Reset probe parking so a later /web show/navigate is full-size.
               resetOverlayBounds();
@@ -1166,6 +1189,7 @@ public class InAppBrowserPlugin extends Plugin {
                 gecko.resume();
               } catch (Throwable ignored) {}
               resetOverlayBounds();
+              surfaceEpoch.incrementAndGet();
               gecko.setVisibility(View.GONE);
               out.put("ok", false);
               out.put("error", error != null ? error : "No media URL");
@@ -1678,6 +1702,7 @@ public class InAppBrowserPlugin extends Plugin {
    */
   private void hideSingleForMulti() {
     if (gecko == null) return;
+    surfaceEpoch.incrementAndGet();
     try {
       gecko.killMediaAndBlank();
     } catch (Throwable t) {
