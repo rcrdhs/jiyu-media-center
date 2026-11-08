@@ -816,6 +816,8 @@ export function Player({
     busy: boolean
   } | null>(null)
   const tryHlsFallbackRef = useRef<(resumeAt: number) => Promise<boolean>>(async () => false)
+  /** One movie re-resolve after Atlantic's Warp page, so we don't loop on it. */
+  const movieWarpFallbackRef = useRef('')
   /** Active hls.js instance — used to nudge startLoad after Resume seeks. */
   const hlsInstanceRef = useRef<Hls | null>(null)
   /** Cap mid-episode HLS remounts so a dead CDN can't reload-loop forever. */
@@ -7389,12 +7391,22 @@ export function Player({
       for (const engine of refererDocument ? [] : engines) {
         if (cancelled) return
         // Playlist body was that same error page. Do not hand it to <video src>.
+        // Android's native player also cannot send Atlantic's Referer, so the
+        // CDN answers with this page and the WebView can show it full screen.
+        const atlanticPlayback =
+          ATLANTIC_HLS_URL_RE.test(activePlaylistItem.url || '') ||
+          activePlaybackReferrerRef.current === ATLANTIC_PLAY_REFERER ||
+          item.httpReferrer === ATLANTIC_PLAY_REFERER
         if (
           engine === 'native' &&
-          (isAtlanticWarpPlaylistError(hlsError) || isAtlanticWarpPlaylistError(lastError))
+          (isAtlanticWarpPlaylistError(hlsError) ||
+            isAtlanticWarpPlaylistError(lastError) ||
+            (isAndroidShell() && atlanticPlayback))
         ) {
-          lastError = 'Atlantic showed its error page instead of the video.'
-          hlsError = lastError
+          if (!lastError || lastError === 'Playback failed.') {
+            lastError = 'Atlantic showed its error page instead of the video.'
+          }
+          hlsError = hlsError || lastError
           break
         }
         cleanupPlayers()
@@ -7631,6 +7643,22 @@ export function Player({
           void selectPlaylistItemRef.current(playlistIndex, {
             force: true,
             rotateTorrent: true,
+          })
+          return
+        }
+        if (
+          item.category === 'movies' &&
+          movieWarpFallbackRef.current !== item.id &&
+          (isAtlanticWarpPlaylistError(lastError) ||
+            isAtlanticWarpPlaylistError(hlsError) ||
+            /error page instead of the video/i.test(lastError))
+        ) {
+          movieWarpFallbackRef.current = item.id
+          setError(null)
+          setStatus('Trying another source…')
+          void selectPlaylistItemRef.current(playlistIndex, {
+            force: true,
+            rotateSource: true,
           })
           return
         }

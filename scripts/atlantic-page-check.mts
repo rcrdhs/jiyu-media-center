@@ -21,6 +21,13 @@ assert.equal(
 )
 assert.equal(looksLikeAtlanticWarpPage('#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nhttps://cdn.example/a.m3u8'), false)
 assert.equal(looksLikeAtlanticWarpPage(''), false)
+// Exact page photographed on the Mastertech Android TV after a movie was selected.
+assert.equal(
+  looksLikeAtlanticWarpPage(
+    "atlantic.st\nIf you're using Cloudflare Warp VPN, please disable it, and refresh your page\nIf you're on an unblocked school proxy, use 'classroom.best' instead",
+  ),
+  true,
+)
 
 assert.equal(isStreamRefererDocumentUrl('https://atlantic.st/'), true)
 assert.equal(isStreamRefererDocumentUrl('https://www.atlantic.st/watch/1'), true)
