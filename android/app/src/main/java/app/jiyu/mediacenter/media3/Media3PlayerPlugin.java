@@ -148,6 +148,18 @@ public class Media3PlayerPlugin extends Plugin {
     super.handleOnDestroy();
   }
 
+  /** Stop and release ExoPlayer when the user closes picture-in-picture or the app. */
+  public void shutdownPlayback() {
+    Runnable job = () -> {
+      if (player != null) {
+        player.destroy();
+        player = null;
+      }
+    };
+    if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) job.run();
+    else main.post(job);
+  }
+
   private void ensureOverlay() {
     FrameLayout parent = contentHost();
     if (parent == null) return;

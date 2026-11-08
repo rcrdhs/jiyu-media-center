@@ -81,6 +81,44 @@ export async function listTorrentItemsForSource(sourceId: string): Promise<Strea
   })
 }
 
+/**
+ * Delete and upsert in one IndexedDB transaction.
+ * A close that kills the page aborts the transaction, so a source replace
+ * cannot wipe the shelf and then die before the new rows are stored.
+ * Upserts alone (cold-start flushes) stay as separate additive batches.
+ */
+export async function commitTorrentCatalogChange(change: {
+  deleteSourceId?: string
+  deleteIds?: readonly string[]
+  upserts?: readonly StreamItem[]
+}): Promise<void> {
+  const deleteIds = change.deleteIds ?? []
+  const upserts = change.upserts ?? []
+  if (!change.deleteSourceId && deleteIds.length === 0 && upserts.length === 0) return
+  const db = await openDb()
+  const tx = db.transaction(STORE, 'readwrite')
+  const store = tx.objectStore(STORE)
+  const done = txDone(tx)
+  const writeRest = () => {
+    for (const id of deleteIds) {
+      if (id) store.delete(id)
+    }
+    for (const item of upserts) store.put(item)
+  }
+  // Schedule follow-up requests inside onsuccess. Awaiting a request and then
+  // writing lets IndexedDB commit the transaction before the new requests exist.
+  if (change.deleteSourceId) {
+    const req = store.index('torrentSourceId').getAllKeys(change.deleteSourceId)
+    req.onsuccess = () => {
+      for (const key of req.result ?? []) store.delete(key)
+      writeRest()
+    }
+  } else {
+    writeRest()
+  }
+  await done
+}
+
 export async function deleteTorrentItemsByIds(ids: string[]): Promise<void> {
   if (ids.length === 0) return
   const batchSize = 400

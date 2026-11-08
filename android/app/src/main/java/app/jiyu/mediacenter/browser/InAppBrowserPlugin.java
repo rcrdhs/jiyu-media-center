@@ -1827,11 +1827,31 @@ public class InAppBrowserPlugin extends Plugin {
             gecko.setLayoutParams(layoutParams);
             pipBoundsSaved = false;
           }
-          gecko.resume();
+          if (active) gecko.resume();
         }
         if (active && multi != null) multi.resumeVisible();
       } catch (Throwable ignored) {}
     });
+  }
+
+  /**
+   * System picture-in-picture was closed. Stop embed audio. The Capacitor
+   * page is left up long enough for the catalog cancel script.
+   */
+  public void onHostPipDismissed() {
+    Runnable job = () -> {
+      try {
+        if (gecko != null) {
+          gecko.pauseMediaForDismiss();
+          gecko.destroy();
+          gecko = null;
+        }
+        if (geckoMulti != null) geckoMulti.pauseForDismiss();
+        if (multi != null) multi.pauseVisible();
+      } catch (Throwable ignored) {}
+    };
+    if (Looper.myLooper() == Looper.getMainLooper()) job.run();
+    else main.post(job);
   }
 
   private void notifyNav() {

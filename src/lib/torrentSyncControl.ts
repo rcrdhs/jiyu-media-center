@@ -118,6 +118,17 @@ export function resumeTorrentSync(): void {
   wakePauseWaiters()
 }
 
+let closeCancelBound = false
+
+/** Fired by Android when Jiyu actually closes. Stops at the next safe checkpoint. */
+export function bindCatalogCloseCancel(): void {
+  if (closeCancelBound || typeof window === 'undefined') return
+  closeCancelBound = true
+  window.addEventListener('jiyu:cancel-catalog-sync', () => {
+    cancelTorrentSync()
+  })
+}
+
 export function cancelTorrentSync(): void {
   syncQueueEpoch += 1
   clearSyncJob()

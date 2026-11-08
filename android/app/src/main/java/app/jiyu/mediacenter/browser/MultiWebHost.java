@@ -501,6 +501,16 @@ final class MultiWebHost {
     resumeAllVisible();
   }
 
+  /** Pause embed tiles when the user closes the app out of picture-in-picture. */
+  void pauseVisible() {
+    for (WebView v : tiles.values()) {
+      if (v == null) continue;
+      try {
+        v.onPause();
+      } catch (Throwable ignored) {}
+    }
+  }
+
   /** Keep every visible tile resumed (Electron backgroundThrottling:false). */
   private void resumeAllVisible() {
     for (WebView v : tiles.values()) {

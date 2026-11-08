@@ -140,7 +140,9 @@ public class AppChromePlugin extends Plugin {
     }
     activity.runOnUiThread(() -> {
       try {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+        if (activity instanceof MainActivity) {
+          ((MainActivity) activity).closeFromExplicitExit();
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
           activity.finishAndRemoveTask();
         } else {
           activity.finish();
@@ -163,12 +165,16 @@ public class AppChromePlugin extends Plugin {
    */
   @PluginMethod
   public void setHomePip(PluginCall call) {
-    homePipEnabled = Boolean.TRUE.equals(call.getBoolean("enabled", false));
+    boolean requested = Boolean.TRUE.equals(call.getBoolean("enabled", false));
     Integer width = call.getInt("width", 16);
     Integer height = call.getInt("height", 9);
     pipWidth = width != null && width > 0 ? width : 16;
     pipHeight = height != null && height > 0 ? height : 9;
     Activity activity = getActivity();
+    if (activity instanceof MainActivity) {
+      requested = ((MainActivity) activity).allowsHomePipRequest(requested);
+    }
+    homePipEnabled = requested;
     if (activity != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
       activity.runOnUiThread(() -> applyPipParamsWhenSafe(activity, 0));
     }
@@ -200,7 +206,22 @@ public class AppChromePlugin extends Plugin {
   }
 
   public boolean isHomePipEnabled() {
-    return homePipEnabled;
+    if (!homePipEnabled) return false;
+    Activity activity = getActivity();
+    if (activity instanceof MainActivity) {
+      return ((MainActivity) activity).allowsHomePipRequest(true);
+    }
+    return true;
+  }
+
+  /** PiP was dismissed or the app is exiting. autoEnter must not snap the window back. */
+  public void suppressHomePipForClose() {
+    homePipEnabled = false;
+    Activity activity = getActivity();
+    if (activity == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
+    try {
+      activity.setPictureInPictureParams(buildPipParams());
+    } catch (Throwable ignored) {}
   }
 
   public PictureInPictureParams buildPipParams() {

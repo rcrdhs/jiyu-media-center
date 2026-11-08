@@ -10,6 +10,7 @@ import android.view.View;
 import android.view.Window;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
+import android.webkit.WebView;
 
 import androidx.activity.OnBackPressedCallback;
 import androidx.core.splashscreen.SplashScreen;
@@ -17,6 +18,8 @@ import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
 
 import com.getcapacitor.BridgeActivity;
+
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import app.jiyu.mediacenter.bili.BiliSessionPlugin;
 import app.jiyu.mediacenter.browser.InAppBrowserPlugin;
@@ -28,9 +31,13 @@ public class MainActivity extends BridgeActivity {
   private volatile long pipExitSettleUntil = 0;
   /** Home was pressed and we asked the system to enter picture-in-picture. */
   private boolean pipTransition = false;
+  private final PipCloseDecider pipClose = new PipCloseDecider();
+  /** Close (PiP dismiss or explicit exit) already started. Blocks JS from re-arming PiP. */
+  private boolean closeStarted = false;
   /**
-   * Home / leave with nothing playing and no catalog sync — finish after onStop
+   * Home / leave with nothing playing — finish after onStop
    * so permission sheets and config changes do not kill the process mid-flight.
+   * A catalog sync does not keep the task. Closing cancels the sync.
    */
   private boolean exitAfterLeave = false;
   /** Page URL (with #route) when the main WebView renderer died; reopened by the recreated activity. */
@@ -271,7 +278,8 @@ public class MainActivity extends BridgeActivity {
   }
 
   /**
-   * Device Home: playing → system PiP; syncing → stay in background; otherwise exit.
+   * Device Home: playing → system PiP (not a close). Otherwise the app exits
+   * and an in-progress catalog update is cancelled.
    */
   @Override
   public void onUserLeaveHint() {
@@ -296,9 +304,15 @@ public class MainActivity extends BridgeActivity {
       }
       return;
     }
-    // Catalog sync needs the WebView process — do not finish while it is held.
-    if (CatalogSyncPlugin.isSyncHoldActive()) return;
+    // Catalog sync needs the page. Home into PiP is not a close, so the sync
+    // keeps running there. Home with nothing playing closes the app.
     exitAfterLeave = true;
+  }
+
+  @Override
+  public void onStart() {
+    super.onStart();
+    pipClose.onStart(inPipNow());
   }
 
   @Override
@@ -306,18 +320,15 @@ public class MainActivity extends BridgeActivity {
     super.onStop();
     boolean leave = exitAfterLeave;
     exitAfterLeave = false;
-    if (!leave || isChangingConfigurations() || isFinishing()) return;
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && isInPictureInPictureMode()) return;
-    if (CatalogSyncPlugin.isSyncHoldActive()) return;
-    try {
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-        finishAndRemoveTask();
-      } else {
-        finish();
-      }
-    } catch (Throwable ignored) {
-      finish();
+    PipCloseDecider.Action pipAction =
+      pipClose.onStop(isChangingConfigurations(), isFinishing() || closeStarted, inPipNow());
+    if (pipAction == PipCloseDecider.Action.DISMISS) {
+      beginClose("pip-dismiss");
+      return;
     }
+    if (!leave || isChangingConfigurations() || isFinishing() || closeStarted) return;
+    if (inPipNow()) return;
+    beginClose("leave");
   }
 
   @Override
@@ -325,18 +336,30 @@ public class MainActivity extends BridgeActivity {
     super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig);
     pipTransition = isInPictureInPictureMode;
     exitAfterLeave = false;
-    if (isInPictureInPictureMode) keepWebViewPlaying();
+    if (isInPictureInPictureMode && !closeStarted) keepWebViewPlaying();
     // Keep this window long enough that focus/resume and PiP-param updates
     // cannot land mid-expand. Those calls make Android re-enter PiP.
     pipExitSettleUntil = isInPictureInPictureMode ? 0 : System.currentTimeMillis() + 2_000;
+    PipCloseDecider.Action action = pipClose.onPictureInPictureModeChanged(isInPictureInPictureMode);
     AppChromePlugin chrome = chromePlugin();
     if (chrome != null) chrome.onPictureInPictureModeChanged(isInPictureInPictureMode);
+    if (action == PipCloseDecider.Action.DISMISS) beginClose("pip-dismiss");
   }
 
   @Override
   public void onResume() {
     super.onResume();
+    pipClose.onResume(inPipNow());
     applyDarkSystemBars();
+  }
+
+  @Override
+  public void onDestroy() {
+    if (!isChangingConfigurations() && AppClosePolicy.cancelsCatalogSync(false, false, false, true)) {
+      CatalogSyncPlugin.markAppClosed(this);
+      dispatchCloseToPage();
+    }
+    super.onDestroy();
   }
 
   @Override
@@ -393,14 +416,16 @@ public class MainActivity extends BridgeActivity {
 
   @Override
   public void onPause() {
-    boolean hold = pipTransition || (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && isInPictureInPictureMode());
+    boolean inPip = inPipNow();
+    pipClose.onPause(inPip || pipTransition);
+    boolean hold = !closeStarted && (pipTransition || (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && inPip));
     super.onPause();
     // Capacitor pauses the WebView here, which pauses HTML video. PiP stays visible.
     if (hold) {
       keepWebViewPlaying();
       try {
         getWindow().getDecorView().postDelayed(() -> {
-          if (isFinishing()) return;
+          if (isFinishing() || closeStarted) return;
           if (pipTransition || isInPictureInPictureMode()) keepWebViewPlaying();
         }, 250);
       } catch (Throwable ignored) {}
@@ -477,10 +502,106 @@ public class MainActivity extends BridgeActivity {
   }
 
   private void keepWebViewPlaying() {
+    if (closeStarted || pipClose.isDismissCommitted()) return;
     try {
       if (getBridge() == null || getBridge().getWebView() == null) return;
       getBridge().getWebView().onResume();
       getBridge().getWebView().resumeTimers();
+    } catch (Throwable ignored) {}
+  }
+
+  /** JS asked to leave after Back→exit. Same close as a PiP dismiss. */
+  void closeFromExplicitExit() {
+    beginClose("exit");
+  }
+
+  boolean allowsHomePipRequest(boolean requested) {
+    return requested && !closeStarted && !pipClose.isDismissCommitted();
+  }
+
+  private boolean inPipNow() {
+    return Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && isInPictureInPictureMode();
+  }
+
+  /**
+   * Stop playback, cancel an in-progress catalog update, drop its notification,
+   * and remove the task. Home into PiP and expanding PiP do not call this.
+   */
+  private void beginClose(String reason) {
+    if (closeStarted || isFinishing() || isChangingConfigurations()) return;
+    if (!AppClosePolicy.finishAndRemoveTask(
+      "pip-dismiss".equals(reason),
+      "leave".equals(reason) || "exit".equals(reason),
+      false,
+      false
+    )) {
+      return;
+    }
+    closeStarted = true;
+    android.util.Log.i("Jiyu", "Closing app (" + reason + ")");
+    CatalogSyncPlugin.markAppClosed(this);
+    AppChromePlugin chrome = chromePlugin();
+    if (chrome != null) chrome.suppressHomePipForClose();
+    stopOverlayPlayback();
+    final AtomicBoolean finished = new AtomicBoolean(false);
+    Runnable finishTask = () -> {
+      if (!finished.compareAndSet(false, true)) return;
+      pauseCapacitorWebView();
+      if (isFinishing() || isDestroyed()) return;
+      try {
+        finishAndRemoveTask();
+      } catch (Throwable ignored) {
+        finish();
+      }
+    };
+    dispatchCloseToPage();
+    try {
+      View decor = getWindow() != null ? getWindow().getDecorView() : null;
+      if (decor != null) decor.postDelayed(finishTask, 200);
+      else finishTask.run();
+    } catch (Throwable ignored) {
+      finishTask.run();
+    }
+  }
+
+  /** Save continue-progress and cancel the catalog sync before the page is destroyed. */
+  private void dispatchCloseToPage() {
+    try {
+      if (getBridge() == null || getBridge().getWebView() == null) return;
+      WebView web = getBridge().getWebView();
+      web.evaluateJavascript(
+        "(function(){try{window.dispatchEvent(new Event('jiyu:force-save-continue'));}catch(e){}"
+          + "try{window.dispatchEvent(new Event('jiyu:cancel-catalog-sync'));}catch(e){}"
+          + "try{document.querySelectorAll('video,audio').forEach(function(m){try{m.pause();}catch(e){}});}catch(e){}"
+          + "return 1;})()",
+        null
+      );
+    } catch (Throwable ignored) {}
+  }
+
+  private void pauseCapacitorWebView() {
+    try {
+      if (getBridge() == null || getBridge().getWebView() == null) return;
+      WebView web = getBridge().getWebView();
+      web.onPause();
+      web.pauseTimers();
+    } catch (Throwable ignored) {}
+  }
+
+  private void stopOverlayPlayback() {
+    try {
+      if (getBridge() == null) return;
+      if (getBridge().getPlugin("Media3Player") != null) {
+        Media3PlayerPlugin media3 =
+          (Media3PlayerPlugin) getBridge().getPlugin("Media3Player").getInstance();
+        if (media3 != null) media3.shutdownPlayback();
+      }
+    } catch (Throwable ignored) {}
+    try {
+      if (getBridge() == null || getBridge().getPlugin("InAppBrowser") == null) return;
+      InAppBrowserPlugin browser =
+        (InAppBrowserPlugin) getBridge().getPlugin("InAppBrowser").getInstance();
+      if (browser != null) browser.onHostPipDismissed();
     } catch (Throwable ignored) {}
   }
 
