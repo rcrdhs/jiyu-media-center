@@ -241,6 +241,15 @@ export function shouldOpenInWebBrowser(item: {
   )
 }
 
+/**
+ * The embed site itself refused the document (HTTP 451). Not a stall and not
+ * something a pointer click can start. The guest watch script in
+ * WebBrowserContext uses the same two phrases.
+ */
+export function isEmbedLegalBlockText(text: string | undefined | null): boolean {
+  return /error\s*451|unavailable for legal reasons/i.test(String(text || ''))
+}
+
 /** Cloudflare interstitial. Autoplay clicks and DOM reads restart the Verify spinner. */
 export function isCloudflareChallengeTarget(url?: string, title?: string): boolean {
   const blob = `${url || ''} ${title || ''}`.toLowerCase()
