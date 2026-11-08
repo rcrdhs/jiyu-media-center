@@ -12,6 +12,11 @@ export const APP_VERSION_LABEL = `v${APP_VERSION}`
 /** Short milestone log — newest first — so progress is visible in-app. */
 export const APP_RELEASES: ReadonlyArray<{ version: string; summary: string }> = [
   {
+    version: '0.3.97',
+    summary:
+      'Closing system PiP stops playback and closes the task; expanding or stashing keeps playback going. Catalog updates continue in the app and PiP, cancel on true exit, and remove their notification on exit or completion. Catalog shelves save safely and playback progress flushes before closing. Android section changes keep the floating Gecko player visible.',
+  },
+  {
     version: '0.3.96',
     summary:
       'StreamCorner and StreamNinja watch pages open the player by themselves (pick a source, hide chat, clear the blocker, theater mode) on Android Gecko, multi-view and PC; Android scrape pages no longer crash with an unexpected-close dialog when the WebView is already gone',
