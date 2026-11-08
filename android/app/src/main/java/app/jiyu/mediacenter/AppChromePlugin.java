@@ -96,6 +96,39 @@ public class AppChromePlugin extends Plugin {
     call.resolve(out);
   }
 
+  /**
+   * Fire TV / Android TV will not open the keyboard for a WebView field that was
+   * focused with inputmode=none, or for a password field after a script focus.
+   * OK on a text field calls this while that field is already focused.
+   */
+  @PluginMethod
+  public void showSoftInput(PluginCall call) {
+    Activity activity = getActivity();
+    if (activity == null) {
+      call.reject("Activity unavailable");
+      return;
+    }
+    activity.runOnUiThread(() -> {
+      JSObject out = new JSObject();
+      try {
+        View web = getBridge() != null ? getBridge().getWebView() : null;
+        if (web != null) {
+          web.requestFocus();
+          android.view.inputmethod.InputMethodManager imm =
+            (android.view.inputmethod.InputMethodManager)
+              activity.getSystemService(android.content.Context.INPUT_METHOD_SERVICE);
+          if (imm != null) {
+            imm.showSoftInput(web, android.view.inputmethod.InputMethodManager.SHOW_FORCED);
+          }
+        }
+        out.put("ok", true);
+        call.resolve(out);
+      } catch (Throwable t) {
+        call.reject(t.getMessage() != null ? t.getMessage() : "Keyboard failed");
+      }
+    });
+  }
+
   /** TV remote media keys (play/pause, ffwd, rewind, …) → JS `mediaKey` event. */
   public void emitMediaKey(String key) {
     JSObject data = new JSObject();

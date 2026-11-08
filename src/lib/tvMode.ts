@@ -20,6 +20,7 @@ export const TV_MODE_EVENT = 'jiyu:tv-mode'
 
 type AppChromeTvPlugin = {
   getDeviceInfo?: () => Promise<{ tv?: boolean }>
+  showSoftInput?: () => Promise<{ ok?: boolean }>
   addListener: (
     event: 'mediaKey',
     listener: (data: { key?: string }) => void,
@@ -136,6 +137,14 @@ function apply(on: boolean) {
 
 export function isTvMode(): boolean {
   return current
+}
+
+/** Ask Android TV / Fire TV to show the keyboard for the focused WebView field. */
+export function showTvSoftKeyboard(): void {
+  if (!isAndroidNative()) return
+  const fn = AppChromeTv.showSoftInput
+  if (typeof fn !== 'function') return
+  void fn().catch(() => undefined)
 }
 
 /**

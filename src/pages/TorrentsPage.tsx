@@ -37,6 +37,7 @@ import {
   type TorrentSource,
 } from '../lib/torrents'
 import { guessVodCategory } from '../lib/continueWatching'
+import { isTvMode } from '../lib/tvMode'
 import { getViewingQuality, resolveRequestedQuality } from '../lib/viewingQuality'
 import {
   isTorrentPlaybackAvailable,
@@ -436,7 +437,7 @@ export function TorrentsPage({ embedded = false }: TorrentsPageProps) {
           <input
             className="search-input guide-search"
             type="password"
-            placeholder="Passphrase"
+            placeholder={isTvMode() ? 'Passphrase — press OK to type' : 'Passphrase'}
             value={passphrase}
             onChange={(e) => {
               setPassphrase(e.target.value)
