@@ -7889,3 +7889,96 @@ html.tv-mode.is-android .sidebar.sidebar-android .side-library {
     overflow-y: hidden;
   }
 }
+
+/* Android TV: sections stay listed on the left. Phones keep the icon rail
+   and open sections from the menu button. Fullscreen playback stays edge to edge. */
+html.tv-mode.is-android {
+  --tv-rail: 12.25rem;
+}
+
+html.tv-mode.is-android .app-shell {
+  grid-template-columns: var(--tv-rail) 1fr;
+  grid-template-rows: 1fr;
+}
+
+html.tv-mode.is-android .sidebar.sidebar-android {
+  width: var(--tv-rail);
+  max-width: var(--tv-rail);
+  flex-direction: column;
+  align-items: stretch;
+  height: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+html.tv-mode.is-android .sidebar-android .brand-row,
+html.tv-mode.is-android .sidebar-android .brand-btn {
+  flex-direction: row;
+  justify-content: flex-start;
+  align-items: center;
+}
+
+html.tv-mode.is-android .sidebar-android .brand-name {
+  display: block;
+  font-size: 1rem;
+}
+
+html.tv-mode.is-android .sidebar-android .sections-menu-wrap {
+  display: none;
+}
+
+html.tv-mode.is-android .sidebar-android .sidebar-chrome {
+  order: 1;
+}
+
+html.tv-mode.is-android .sidebar-android .side-nav,
+html.tv-mode.is-android .sidebar-android .side-nav[hidden] {
+  order: 2;
+  display: flex !important;
+  position: static !important;
+  inset: auto !important;
+  width: auto !important;
+  max-width: none !important;
+  max-height: none !important;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  margin: 0;
+  padding: 0.15rem 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+html.tv-mode.is-android .sidebar-android .side-nav-group,
+html.tv-mode.is-android .sidebar-android .nav-link {
+  width: 100%;
+}
+
+html.tv-mode.is-android .sidebar-android .nav-link {
+  min-height: 2.15rem;
+  padding: 0.32rem 0.45rem;
+  font-size: 0.84rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+html.tv-mode.is-android .sidebar-android .side-footer {
+  order: 3;
+  margin-top: auto;
+}
+
+html.tv-mode.is-android .player-dock,
+html.tv-mode.is-android .global-player-layer,
+html.tv-mode.is-android .catalog-sync-bar.is-android-float {
+  left: calc(var(--tv-rail) + max(0.5rem, env(safe-area-inset-left, 0px))) !important;
+}
+
+html.tv-mode.is-android body:has(.player-shell:not(.player-shell-pip):not(.player-shell-tile)) .player-dock,
+html.tv-mode.is-android body:has(.player-shell:not(.player-shell-pip):not(.player-shell-tile)) .global-player-layer,
+html.tv-mode.is-android body:has(.web-browser-page.is-embed-player.is-watching) .player-dock,
+html.tv-mode.is-android body:has(.web-browser-page.is-embed-player.is-watching) .global-player-layer {
+  left: 0 !important;
+}

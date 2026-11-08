@@ -98,6 +98,10 @@ function measureJs() {
   const sbCss = getComputedStyle(railEl)
   const play = document.querySelector('.card-check-btn').getBoundingClientRect()
   const lib = document.querySelector('.side-library').getBoundingClientRect()
+  const nav = document.querySelector('.side-nav')
+  const home = nav?.querySelector('.nav-link') || null
+  const homeRect = home ? home.getBoundingClientRect() : null
+  const navDisplay = nav ? getComputedStyle(nav).display : 'none'
   const inside = (r) =>
     r.left >= -1 && r.top >= -1 && r.right <= window.innerWidth + 1 && r.bottom <= window.innerHeight + 1
   const probe = document.createElement('div')
@@ -116,6 +120,19 @@ function measureJs() {
     rail: { x: Math.round(rail.x), w: Math.round(rail.width), h: Math.round(rail.height), cssH: sbCss.height, display: sbCss.display, flex: sbCss.flexDirection, shellH: Math.round(shell.height), inside: inside(rail) },
     play: { w: Math.round(play.width), h: Math.round(play.height), inside: inside(play) },
     lib: { w: Math.round(lib.width), h: Math.round(lib.height), inside: inside(lib) },
+    sectionLink: homeRect
+      ? {
+          display: navDisplay,
+          text: (home.textContent || '').trim(),
+          x: Math.round(homeRect.x),
+          w: Math.round(homeRect.width),
+          inRail:
+            navDisplay !== 'none' &&
+            homeRect.width > 36 &&
+            homeRect.left >= rail.left - 6 &&
+            homeRect.right <= rail.right + 6,
+        }
+      : null,
     playerMin,
   }
 }
@@ -207,7 +224,16 @@ check(
   `w ${tv960.cont.cardW}`,
 )
 check('android tv 960 favorite cards are not half the screen', tv960.fav.cardW > 0 && tv960.fav.cardW <= 300, `w ${tv960.fav.cardW}`)
-check('android tv 960 rail stays on screen', tv960.rail.inside && tv960.rail.w >= 70 && tv960.rail.w <= 110 && tv960.rail.h >= 500, JSON.stringify(tv960.rail))
+check(
+  'android tv 960 lists sections in the left rail',
+  tv960.rail.inside &&
+    tv960.rail.w >= 180 &&
+    tv960.rail.w <= 260 &&
+    tv960.rail.h >= 500 &&
+    tv960.sectionLink?.inRail === true &&
+    tv960.sectionLink.text === 'Home',
+  JSON.stringify({ rail: tv960.rail, section: tv960.sectionLink }),
+)
 check('android tv 960 play-next control is readable', tv960.play.h >= 32 && tv960.play.w >= 48, JSON.stringify(tv960.play))
 check('android tv 960 library control is on screen', tv960.lib.inside && tv960.lib.h >= 32, JSON.stringify(tv960.lib))
 
@@ -223,13 +249,13 @@ check('tizen keeps 5 section tiles and the wide sidebar', tizen1920.tiles.cols =
 check('tizen catalog is not the android-tv 124px grid', tizen1920.catalog.cardW >= 165, `w ${tizen1920.catalog.cardW}`)
 
 check('phone portrait is not tv density', phonePort.tiles.cols === 3 && phonePort.rail.w >= 300 && phonePort.rail.h < 320, `tiles ${phonePort.tiles.cols} rail ${phonePort.rail.w}x${phonePort.rail.h}`)
-check('phone landscape keeps 3 tiles and the icon rail', phoneLand.tiles.cols === 3 && phoneLand.rail.w < 120, `tiles ${phoneLand.tiles.cols} rail ${phoneLand.rail.w}`)
+check('phone landscape keeps 3 tiles and the icon rail', phoneLand.tiles.cols === 3 && phoneLand.rail.w < 120 && phoneLand.sectionLink?.display === 'none', `tiles ${phoneLand.tiles.cols} rail ${phoneLand.rail.w} section ${phoneLand.sectionLink?.display}`)
 check('tablet landscape keeps 3 section tiles', tablet.tiles.cols === 3, `cols ${tablet.tiles.cols} w ${tablet.tiles.cardW}`)
 check('tablet catalog cards stay larger than android tv 1280', tablet.catalog.cardW > tv1280.catalog.cardW + 20, `tablet ${tablet.catalog.cardW} tv ${tv1280.catalog.cardW}`)
 check('desktop keeps 5 tiles and the text sidebar', desktop.tiles.cols === 5 && desktop.rail.w >= 200, `tiles ${desktop.tiles.cols} rail ${desktop.rail.w}`)
 check(
   'narrow android tv rail still on screen',
-  tv640.rail.inside && tv640.rail.h >= 300 && tv640.lib.inside && tv640.play.h >= 30 && tv640.catalog.cols >= 3,
+  tv640.rail.inside && tv640.rail.h >= 300 && tv640.lib.inside && tv640.play.h >= 30 && tv640.catalog.cols >= 2,
   JSON.stringify({ rail: tv640.rail, lib: tv640.lib, playH: tv640.play.h, cols: tv640.catalog.cols }),
 )
 
