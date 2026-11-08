@@ -106,7 +106,10 @@ import { resolveDonghuaPlay } from '../lib/donghuaResolve'
 import { biliSubtitleHeaders, isBiliSubtitleUrl } from '../lib/biliSubs'
 import {
   ATLANTIC_PLAY_REFERER,
+  ATLANTIC_WARP_PLAYLIST_ERROR,
+  isAtlanticWarpPlaylistError,
   isMovyStreamUrl,
+  isStreamRefererDocumentUrl,
   resolveAtlanticPlay,
 } from '../lib/atlanticHls'
 import { ensureEpisodeSoftSubtitles } from '../lib/softSubs'
@@ -7114,6 +7117,27 @@ export function Player({
         })
         hls.on(Hls.Events.ERROR, (_event, data) => {
           if (cancelled || !hls) return
+          // The CDN answered with Atlantic's error page. Retrying it only
+          // delays the failure, and the native <video> fallback would load
+          // that page as the document (the blue atlantic.st screen).
+          const responseText =
+            (data as { response?: { text?: string }; error?: { message?: string } }).response
+              ?.text ||
+            (data as { error?: { message?: string } }).error?.message ||
+            ''
+          if (isAtlanticWarpPlaylistError(responseText)) {
+            if (settled) return
+            settled = true
+            window.clearTimeout(loadTimer)
+            try {
+              hls.destroy()
+            } catch {
+              /* ignore */
+            }
+            hls = null
+            reject(new Error(ATLANTIC_WARP_PLAYLIST_ERROR))
+            return
+          }
           // Non-fatal buffer underrun — nudge the loader instead of sitting idle
           // (VOD resume seeks often stall here until the user force-retries).
           if (!data.fatal && data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR) {
@@ -7355,8 +7379,24 @@ export function Player({
       }
       let lastError = 'Playback failed.'
       let hlsError: string | null = null
-      for (const engine of engines) {
+      // The site origin is a Referer, not a video. Loading it spends the native
+      // timeout and can replace the app with the blue error page.
+      const refererDocument = isStreamRefererDocumentUrl(activePlaylistItem.url)
+      if (refererDocument) {
+        lastError = 'Atlantic showed its error page instead of the video.'
+        hlsError = lastError
+      }
+      for (const engine of refererDocument ? [] : engines) {
         if (cancelled) return
+        // Playlist body was that same error page. Do not hand it to <video src>.
+        if (
+          engine === 'native' &&
+          (isAtlanticWarpPlaylistError(hlsError) || isAtlanticWarpPlaylistError(lastError))
+        ) {
+          lastError = 'Atlantic showed its error page instead of the video.'
+          hlsError = lastError
+          break
+        }
         cleanupPlayers()
         try {
           await runners[engine]()

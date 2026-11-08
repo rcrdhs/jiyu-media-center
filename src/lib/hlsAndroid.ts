@@ -15,7 +15,7 @@ import Hls, {
   type LoaderStats,
 } from 'hls.js'
 import { Capacitor, CapacitorHttp } from '@capacitor/core'
-import { looksLikeAtlanticWarpPage } from './atlanticHls'
+import { ATLANTIC_WARP_PLAYLIST_ERROR, looksLikeAtlanticWarpPage } from './atlanticHls'
 
 export function isAndroidCapacitor(): boolean {
   try {
@@ -205,7 +205,7 @@ export function createAndroidSafeHlsLoader(
               {
                 code: res.status || 502,
                 text: looksLikeAtlanticWarpPage(body)
-                  ? 'Atlantic Warp interstitial (not HLS)'
+                  ? ATLANTIC_WARP_PLAYLIST_ERROR
                   : 'Invalid HLS playlist (CDN not ready)',
               },
               context,
