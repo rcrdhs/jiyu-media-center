@@ -7839,6 +7839,47 @@ html.tv-mode.is-android .sidebar.sidebar-android .side-library {
     grid-auto-columns: minmax(8.4rem, 10rem);
   }
 
+  /* Short TV (960×540): hero + one Continue card otherwise fills the screen
+     and the Sections row never appears. Keep Continue, drop the blurbs,
+     and shorten the artwork so the first tile row fits. */
+  @media (max-height: 620px) {
+    html.tv-mode.is-android .hero {
+      margin-bottom: 0.35rem;
+    }
+
+    html.tv-mode.is-android .hero h1 {
+      font-size: 1.2rem;
+    }
+
+    html.tv-mode.is-android .home-search-wrap {
+      margin-top: 0.3rem;
+    }
+
+    html.tv-mode.is-android .section-block {
+      margin-top: 0.4rem;
+    }
+
+    html.tv-mode.is-android .section-head p,
+    html.tv-mode.is-android .continue-watching .section-head p {
+      display: none;
+    }
+
+    html.tv-mode.is-android .continue-card {
+      gap: 0.25rem;
+    }
+
+    html.tv-mode.is-android .continue-card-art {
+      aspect-ratio: auto;
+      height: 4.4rem;
+    }
+
+    html.tv-mode.is-android .continue-card-body h3 {
+      font-size: 0.82rem;
+      line-height: 1.25;
+      -webkit-line-clamp: 1;
+    }
+  }
+
   /* After the sports :has() rule so Your teams stays a scrolling row. */
   html.tv-mode.is-android .favorite-matches .catalog-grid {
     grid-template-columns: none;
