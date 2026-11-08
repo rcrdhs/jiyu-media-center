@@ -31,6 +31,11 @@ type InAppBrowserPlugin = {
   fetchHtml: (options: {
     url: string
     headers?: Record<string, string>
+    /**
+     * Keep reading the scrape WebView until root-relative /stream or /nba
+     * links exist (StreamCorner SPA). Other callers omit this.
+     */
+    untilWatchLinks?: boolean
   }) => Promise<{
     ok: boolean
     content?: string
@@ -184,7 +189,7 @@ export async function androidBrowserGetState(): Promise<BrowserNavState | null> 
 
 export async function androidBrowserFetchHtml(
   url: string,
-  options?: { headers?: Record<string, string> },
+  options?: { headers?: Record<string, string>; untilWatchLinks?: boolean },
 ): Promise<{
   ok: boolean
   content: string
@@ -194,6 +199,7 @@ export async function androidBrowserFetchHtml(
   const result = await NativeBrowser.fetchHtml({
     url,
     headers: options?.headers,
+    untilWatchLinks: options?.untilWatchLinks ? true : undefined,
   })
   return {
     ok: Boolean(result.ok),
