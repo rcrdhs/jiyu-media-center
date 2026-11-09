@@ -3,8 +3,10 @@
  * Replaces the retired Streamed.pk catalog. Play opens the site watch page in
  * Jiyu Web Browser (same path as PPV.st embeds).
  *
- * Catalog is scraped from the rendered homepage (SPA). Desktop uses a hidden
- * Electron window; Android uses the scrape WebView (outerHTML after JS).
+ * Catalog is scraped from the rendered homepage (SPA). The first HTML response
+ * is an empty shell (no /stream or /nba links). Desktop polls a hidden window
+ * until watch links exist. Android must do the same in the scrape WebView —
+ * a single outerHTML read 1.8s after load often returns that shell.
  */
 
 import type { StreamItem } from '../types'
@@ -655,7 +657,7 @@ async function fetchEntriesAndroid(): Promise<
   }
   let lastError = 'StreamCorner unavailable'
   for (const origin of STREAMCORNER_MIRRORS) {
-    const result = await androidBrowserFetchHtml(`${origin}/`)
+    const result = await androidBrowserFetchHtml(`${origin}/`, { untilWatchLinks: true })
     if (!result.ok || !result.content) {
       lastError = result.error || `HTTP ${result.status}`
       continue

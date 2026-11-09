@@ -5,6 +5,7 @@ import android.content.Context;
 import android.graphics.Color;
 import android.media.AudioManager;
 import android.graphics.Typeface;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.TypedValue;
@@ -466,13 +467,18 @@ public class InAppBrowserPlugin extends Plugin {
     }
     final String target = url.trim();
     final JSObject headersObj = call.getObject("headers", new JSObject());
+    // StreamCorner only. The homepage shell is a normal 200, so the usual
+    // "first non-challenge HTML" return happens before the schedule paints.
+    final boolean untilWatchLinks = call.getBoolean("untilWatchLinks", false);
     new Thread(() -> {
       synchronized (fetchLock) {
         final String[] htmlBox = new String[] { "" };
         final int[] statusBox = new int[] { 0 };
         final String[] errorBox = new String[] { "" };
         final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
-        main.post(() -> loadScrapeHtml(target, headersObj, htmlBox, statusBox, errorBox, latch));
+        main.post(() -> loadScrapeHtml(
+          target, headersObj, htmlBox, statusBox, errorBox, latch, untilWatchLinks
+        ));
         try {
           if (!latch.await(40, java.util.concurrent.TimeUnit.SECONDS)) {
             errorBox[0] = "Page load timed out";
@@ -792,13 +798,54 @@ public class InAppBrowserPlugin extends Plugin {
     return Math.round(value * density);
   }
 
+  /**
+   * Same budget as the desktop StreamCorner window (about 22s). The outer
+   * fetch latch is 40s, so this still returns before that timeout.
+   */
+  private static final long WATCH_LINK_DEADLINE_MS = 22_000L;
+
+  /**
+   * @param untilWatchLinks when true, do not treat the SPA shell as done.
+   *        Other scrapes keep the old "first non-challenge document" return.
+   */
+  private static boolean scrapeShouldKeepWaiting(
+    String html,
+    boolean untilWatchLinks,
+    long deadlineMs,
+    int attempts,
+    int challengeAttemptCap
+  ) {
+    if (untilWatchLinks) {
+      if (System.currentTimeMillis() >= deadlineMs || attempts >= 40) return false;
+      return isChallengePage(html) || !StreamCornerScrape.htmlHasWatchLinks(html);
+    }
+    return isChallengePage(html) && attempts < challengeAttemptCap;
+  }
+
+  private static void wakeScrapeView(WebView view) {
+    if (view == null) return;
+    // Off-screen (alpha 0, shifted left) so it does not cover playback. Without
+    // this, Android throttles that WebView and the SPA never paints cards
+    // inside the snapshot window. resumeTimers is process-wide and only resumes.
+    try {
+      view.onResume();
+      view.resumeTimers();
+    } catch (Throwable ignored) {}
+    try {
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        view.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false);
+      }
+    } catch (Throwable ignored) {}
+  }
+
   private void loadScrapeHtml(
     String url,
     JSObject headersObj,
     String[] htmlBox,
     int[] statusBox,
     String[] errorBox,
-    java.util.concurrent.CountDownLatch latch
+    java.util.concurrent.CountDownLatch latch,
+    boolean untilWatchLinks
   ) {
     final boolean[] delivered = new boolean[] { false };
     try {
@@ -826,6 +873,7 @@ public class InAppBrowserPlugin extends Plugin {
       // while page-finish (1.8s) and CF retries are still queued.
       final WebView target = scrapeView;
       final int[] attempts = new int[] { 0 };
+      final long linkDeadline = System.currentTimeMillis() + WATCH_LINK_DEADLINE_MS;
       scrapeHtmlAbort = () -> failScrapeHtml(errorBox, statusBox, latch, delivered);
       Runnable deliver = () -> {
         if (delivered[0]) return;
@@ -833,11 +881,17 @@ public class InAppBrowserPlugin extends Plugin {
           if (delivered[0]) return;
           String html = unwrapJsString(value);
           attempts[0] += 1;
-          // Wait out CF auto-challenge a few times before giving up.
-          if (isChallengePage(html) && attempts[0] < 14) {
+          // CF wall, or (StreamCorner) the shell that loads before watch links.
+          if (scrapeShouldKeepWaiting(html, untilWatchLinks, linkDeadline, attempts[0], 14)) {
+            final int delay = isChallengePage(html) ? 1500 : 700;
             main.postDelayed(() -> {
-              if (!delivered[0]) deliverHtmlPoll(target, htmlBox, statusBox, errorBox, latch, delivered, attempts);
-            }, 1500);
+              if (!delivered[0]) {
+                deliverHtmlPoll(
+                  target, htmlBox, statusBox, errorBox, latch, delivered, attempts,
+                  untilWatchLinks, linkDeadline
+                );
+              }
+            }, delay);
             return;
           }
           finishScrapeHtml(htmlBox, statusBox, latch, delivered, html);
@@ -893,6 +947,7 @@ public class InAppBrowserPlugin extends Plugin {
         if (!extra.containsKey("Referer")) extra.put("Referer", origin);
       } catch (Throwable ignored) {}
 
+      wakeScrapeView(target);
       if (extra.isEmpty()) {
         target.loadUrl(url);
       } else {
@@ -915,15 +970,21 @@ public class InAppBrowserPlugin extends Plugin {
     String[] errorBox,
     java.util.concurrent.CountDownLatch latch,
     boolean[] delivered,
-    int[] attempts
+    int[] attempts,
+    boolean untilWatchLinks,
+    long linkDeadline
   ) {
     if (delivered[0]) return;
     if (!evalScrapeJs(view, SCRAPE_OUTER_HTML_JS, value -> {
       if (delivered[0]) return;
       String html = unwrapJsString(value);
       attempts[0] += 1;
-      if (isChallengePage(html) && attempts[0] < 12) {
-        main.postDelayed(() -> deliverHtmlPoll(view, htmlBox, statusBox, errorBox, latch, delivered, attempts), 1500);
+      if (scrapeShouldKeepWaiting(html, untilWatchLinks, linkDeadline, attempts[0], 12)) {
+        final int delay = isChallengePage(html) ? 1500 : 700;
+        main.postDelayed(() -> deliverHtmlPoll(
+          view, htmlBox, statusBox, errorBox, latch, delivered, attempts,
+          untilWatchLinks, linkDeadline
+        ), delay);
         return;
       }
       finishScrapeHtml(htmlBox, statusBox, latch, delivered, html);
