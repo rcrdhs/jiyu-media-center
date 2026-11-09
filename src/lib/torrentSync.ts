@@ -35,7 +35,23 @@ import {
   type CatalogFeed,
   type TorrentSource,
 } from './torrents'
-import { isTmdbTvFeedUrl } from './tmdbTv'
+import { isCinetaroUrl } from './cinetaro'
+import { isYmoviesUrl } from './ymovies'
+import { isZenoxUrl, ZENOX_SOURCE_ID } from './zenox'
+import {
+  fetchTmdbTvCatalogLinks,
+  isTmdbAnimeFullFeedUrl,
+  isTmdbKidsShowsFeedUrl,
+  isTmdbTvAiringFeedUrl,
+  isTmdbTvByYearFeedUrl,
+  isTmdbTvFeedUrl,
+  isTmdbTvPopularFeedUrl,
+  isTmdbTvTrendingFeedUrl,
+  tmdbTvFeedKind,
+  TMDB_ANIME_SOURCE_ID,
+  TMDB_KIDS_SOURCE_ID,
+  TMDB_TV_SOURCE_ID,
+} from './tmdbTv'
 import { isZenoxAnimationFeedUrl } from './zenox'
 import {
   isKidsMovieItem,
@@ -279,6 +295,83 @@ export async function syncTorrentSource(
           `${shelfName} on shelves · ${byId.size.toLocaleString()} titles`,
           true,
         )
+        continue
+      }
+
+      // TMDB TV / Kids Shows: no Cloudflare. Paint each page so the shelf is not
+      // empty for the whole 10k crawl, and a later timeout keeps the first pages.
+      if (isTmdbTvFeedUrl(feed.url)) {
+        pages += 1
+        const kind = tmdbTvFeedKind(feed.url)
+        const shelfName = kind === 'kids' ? 'Kids Shows' : kind === 'anime' ? 'Anime' : 'TV Series'
+        let flushChain: Promise<void> = Promise.resolve()
+        const outcome = await fetchTmdbTvCatalogLinks(
+          kind,
+          (done, total) => {
+            const now = Date.now()
+            if (done === total || done === 0 || now - lastProgressAt >= 600) {
+              lastProgressAt = now
+              onProgress?.({
+                sourceId: source.id,
+                label: source.label,
+                page: pages,
+                added: byId.size,
+                percent: Math.min(
+                  97,
+                  Math.round(feedBase + (total > 0 ? done / total : 0) * feedSpan * 0.97),
+                ),
+                message: `${shelfName}: loading titles… ${done.toLocaleString()}/${Math.max(total, 1).toLocaleString()}`,
+              })
+            }
+          },
+          (batch) => {
+            let added = 0
+            for (const link of batch) {
+              const item = linkToCatalogItem(link, source, feed.category, feed.shelfTag)
+              if (!byId.has(item.id)) {
+                byId.set(item.id, item)
+                added += 1
+              }
+            }
+            if (added === 0) return
+            flushChain = flushChain
+              .then(() =>
+                flushPartialToShelves(
+                  Math.min(96, Math.round(feedBase + feedSpan * 0.5)),
+                  `${shelfName} on shelves · ${byId.size.toLocaleString()} titles`,
+                ),
+              )
+              .then(() => undefined)
+          },
+        )
+        await flushChain
+        if (outcome.links.length === 0 && byId.size === 0) {
+          lastError = outcome.error || `${source.label}: no ${shelfName}`
+          const state = feedState.get(feed)
+          if (state) state.errored = true
+          continue
+        }
+        for (const link of outcome.links) {
+          const item = linkToCatalogItem(link, source, feed.category, feed.shelfTag)
+          if (!byId.has(item.id)) byId.set(item.id, item)
+        }
+        const state = feedState.get(feed)
+        if (state) state.complete = true
+        await flushPartialToShelves(
+          Math.min(97, Math.round(feedBase + feedSpan * 0.97)),
+          `${shelfName} on shelves · ${byId.size.toLocaleString()} titles`,
+          true,
+        )
+        if (byId.size > 0 || outcome.links.length > 0) {
+          onProgress?.({
+            sourceId: source.id,
+            label: source.label,
+            page: pages,
+            added: byId.size,
+            percent: Math.min(97, Math.round(feedBase + feedSpan * 0.97)),
+            message: `${shelfName} ready · ${byId.size.toLocaleString()} titles`,
+          })
+        }
         continue
       }
 
@@ -719,13 +812,39 @@ export async function syncTorrentSource(
   }
 }
 
-/** Lower = sooner. TV Series first, then Anime, then Movies, then anything else. */
+/**
+ * Lower = sooner.
+ * Kids Shows and TV Series are TMDB (no Cloudflare) and were stuck behind YTS
+ * plus Cinetaro/YMovies Verify, so those shelves stayed empty on Android TV.
+ * Cloudflare backups run last so a Verify prompt cannot block them.
+ */
 function torrentSyncPriority(source: TorrentSource): number {
-  if (isEztvSource(source.url, source.label)) return 0
-  if (isTorrentFunkUrl(source.url)) return 1
-  if (isSubsPleaseUrl(source.url)) return 2
-  if (isYtsSource(source.url, source.label)) return 3
-  return 4
+  const url = source.url || ''
+  const id = source.id || ''
+  if (id === TMDB_KIDS_SOURCE_ID || isTmdbKidsShowsFeedUrl(url)) return 0
+  if (
+    id === TMDB_TV_SOURCE_ID ||
+    isTmdbTvPopularFeedUrl(url) ||
+    isTmdbTvAiringFeedUrl(url) ||
+    isTmdbTvTrendingFeedUrl(url) ||
+    isTmdbTvByYearFeedUrl(url)
+  ) {
+    return 1
+  }
+  if (id === TMDB_ANIME_SOURCE_ID || isTmdbAnimeFullFeedUrl(url)) return 2
+  if (isEztvSource(url, source.label)) return 3
+  if (isSubsPleaseUrl(url)) return 4
+  if (isYtsSource(url, source.label)) return 5
+  if (
+    isCinetaroUrl(url) ||
+    isYmoviesUrl(url) ||
+    id === ZENOX_SOURCE_ID ||
+    isZenoxUrl(url)
+  ) {
+    return 9
+  }
+  if (isTorrentFunkUrl(url)) return 6
+  return 7
 }
 
 export async function syncAllTorrentSources(
