@@ -65,7 +65,7 @@ import {
   type SubtitleCue,
 } from '../lib/subtitles'
 import { getPerformanceKnobs } from '../lib/deviceProfile'
-import { isTizenTv } from '../lib/tvMode'
+import { isTizenTv, isTvMode } from '../lib/tvMode'
 import { resolveTizenReplayPart } from '../lib/fullmatchShows'
 import { hasRealDebridToken } from '../lib/debridSettings'
 import {
@@ -5368,8 +5368,8 @@ export function Player({
       const levelsSnap = hls.levels
       const preference = getViewingQuality()
       const isHevcLevel = (level: (typeof levelsSnap)[number]) =>
-        /hev1|hvc1|h265|hevc/i.test(String(level.codecs || level.videoCodec || ''))
-      // Electron paints black for HEVC — prefer AVC when both exist.
+        /hev1|hvc1|h265|hevc|dvhe|dvh1/i.test(String(level.codecs || level.videoCodec || ''))
+      // Electron and Fire TV paint black/blue for HEVC and Dolby Vision — prefer AVC.
       const avcLevels = levelsSnap
         .map((level, index) => ({ index, height: level.height || 0, hevc: isHevcLevel(level) }))
         .filter((level) => !level.hevc)
@@ -5379,12 +5379,19 @@ export function Player({
         hevc: isHevcLevel(level),
       }))).filter((level) => level.height > 0)
       const levels = [...pool].sort((a, b) => a.height - b.height)
+      const hevcAtOrBelow = (capIndex: number) =>
+        levelsSnap.some((level, index) => index <= capIndex && isHevcLevel(level))
       if (levels.length === 0) {
         // No height metadata — still avoid locking onto a HEVC track when AVC exists.
         if (avcLevels.length > 0) {
-          hls.autoLevelCapping = Math.max(...avcLevels.map((l) => l.index))
-          if (preference !== 'auto') hls.currentLevel = avcLevels[avcLevels.length - 1].index
-          else hls.currentLevel = -1
+          const cap = Math.max(...avcLevels.map((l) => l.index))
+          hls.autoLevelCapping = cap
+          // ABR uses every index up to the cap, including a lower HEVC rendition.
+          if (preference !== 'auto' || hevcAtOrBelow(cap)) {
+            hls.currentLevel = avcLevels[avcLevels.length - 1].index
+          } else {
+            hls.currentLevel = -1
+          }
         }
         return
       }
@@ -5396,7 +5403,9 @@ export function Player({
       const selected =
         [...levels].reverse().find((level) => level.height <= capHeight) ?? levels[0]
       hls.autoLevelCapping = selected.index
-      if (preference !== 'auto') {
+      // autoLevelCapping is an index, not a codec filter. A lower HEVC rung
+      // stays eligible and Fire TV plays its audio with a blank picture.
+      if (preference !== 'auto' || (avcLevels.length > 0 && hevcAtOrBelow(selected.index))) {
         hls.currentLevel = selected.index
       } else {
         hls.currentLevel = -1
@@ -5528,10 +5537,11 @@ export function Player({
       const el = videoRef.current
       if (!el || cancelled) return false
       const hasFrame = el.videoWidth > 0 && el.videoHeight > 0
-      // Live IPTV can paint while videoWidth is briefly 0, or report frames
-      // without a useful width — don't leave the opaque full-player overlay up
-      // (PiP hides that overlay, which is why picture only appeared there).
+      // Live IPTV can paint while videoWidth is briefly 0. VOD must not use
+      // that shortcut: Fire TV advances currentTime and HTML subtitles on an
+      // HEVC rendition while videoWidth stays 0.
       const playingWithData =
+        isLivePlaybackItem(item) &&
         !el.paused &&
         el.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
         (el.currentTime > 0.2 || (el.played?.length ?? 0) > 0)
@@ -5571,6 +5581,7 @@ export function Player({
         if (!audioOnly) {
           // Playing with data but no dimensions yet — still clear the cover.
           if (
+            isLivePlaybackItem(item) &&
             !el.paused &&
             el.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
             Date.now() - startedAt > 900
@@ -5586,7 +5597,7 @@ export function Player({
           audioOnlyHealAttempts += 1
           const healLevels = hls.levels
           const isHevc = (level: (typeof healLevels)[number]) =>
-            /hev1|hvc1|h265|hevc/i.test(String(level.codecs || level.videoCodec || ''))
+            /hev1|hvc1|h265|hevc|dvhe|dvh1/i.test(String(level.codecs || level.videoCodec || ''))
           const next = healLevels.findIndex(
             (level, index) => index !== hls!.currentLevel && !isHevc(level),
           )
@@ -8494,7 +8505,7 @@ export function Player({
           playsInline
           onDoubleClick={isPip ? undefined : toggleFullscreen}
           style={
-            fittedVideo
+            fittedVideo && !(isAndroidShell() && isTvMode())
               ? {
                   width: fittedVideo.width,
                   height: fittedVideo.height,

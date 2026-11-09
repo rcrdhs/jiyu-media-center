@@ -5687,6 +5687,21 @@ html.is-android .player-shell:-webkit-full-screen .player-video {
   transform: none !important;
 }
 
+/* Fire TV paints audio and the HTML subtitle line, and leaves the picture
+   blank, when the video element is a grid item. */
+html.tv-mode.is-android .player-stage {
+  display: block;
+}
+
+html.tv-mode.is-android .player-video {
+  position: absolute;
+  inset: 0;
+  width: 100% !important;
+  height: 100% !important;
+  max-width: none !important;
+  max-height: none !important;
+}
+
 .player-subtitles {
   position: absolute;
   left: 50%;
