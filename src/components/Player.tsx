@@ -65,7 +65,7 @@ import {
   type SubtitleCue,
 } from '../lib/subtitles'
 import { getPerformanceKnobs } from '../lib/deviceProfile'
-import { isTizenTv } from '../lib/tvMode'
+import { isTizenTv, isTvMode } from '../lib/tvMode'
 import { resolveTizenReplayPart } from '../lib/fullmatchShows'
 import { hasRealDebridToken } from '../lib/debridSettings'
 import {
@@ -106,7 +106,10 @@ import { resolveDonghuaPlay } from '../lib/donghuaResolve'
 import { biliSubtitleHeaders, isBiliSubtitleUrl } from '../lib/biliSubs'
 import {
   ATLANTIC_PLAY_REFERER,
+  ATLANTIC_WARP_PLAYLIST_ERROR,
+  isAtlanticWarpPlaylistError,
   isMovyStreamUrl,
+  isStreamRefererDocumentUrl,
   resolveAtlanticPlay,
 } from '../lib/atlanticHls'
 import { ensureEpisodeSoftSubtitles } from '../lib/softSubs'
@@ -813,6 +816,8 @@ export function Player({
     busy: boolean
   } | null>(null)
   const tryHlsFallbackRef = useRef<(resumeAt: number) => Promise<boolean>>(async () => false)
+  /** One movie re-resolve after Atlantic's Warp page, so we don't loop on it. */
+  const movieWarpFallbackRef = useRef('')
   /** Active hls.js instance — used to nudge startLoad after Resume seeks. */
   const hlsInstanceRef = useRef<Hls | null>(null)
   /** Cap mid-episode HLS remounts so a dead CDN can't reload-loop forever. */
@@ -5363,8 +5368,8 @@ export function Player({
       const levelsSnap = hls.levels
       const preference = getViewingQuality()
       const isHevcLevel = (level: (typeof levelsSnap)[number]) =>
-        /hev1|hvc1|h265|hevc/i.test(String(level.codecs || level.videoCodec || ''))
-      // Electron paints black for HEVC — prefer AVC when both exist.
+        /hev1|hvc1|h265|hevc|dvhe|dvh1/i.test(String(level.codecs || level.videoCodec || ''))
+      // Electron and Fire TV paint black/blue for HEVC and Dolby Vision — prefer AVC.
       const avcLevels = levelsSnap
         .map((level, index) => ({ index, height: level.height || 0, hevc: isHevcLevel(level) }))
         .filter((level) => !level.hevc)
@@ -5374,12 +5379,19 @@ export function Player({
         hevc: isHevcLevel(level),
       }))).filter((level) => level.height > 0)
       const levels = [...pool].sort((a, b) => a.height - b.height)
+      const hevcAtOrBelow = (capIndex: number) =>
+        levelsSnap.some((level, index) => index <= capIndex && isHevcLevel(level))
       if (levels.length === 0) {
         // No height metadata — still avoid locking onto a HEVC track when AVC exists.
         if (avcLevels.length > 0) {
-          hls.autoLevelCapping = Math.max(...avcLevels.map((l) => l.index))
-          if (preference !== 'auto') hls.currentLevel = avcLevels[avcLevels.length - 1].index
-          else hls.currentLevel = -1
+          const cap = Math.max(...avcLevels.map((l) => l.index))
+          hls.autoLevelCapping = cap
+          // ABR uses every index up to the cap, including a lower HEVC rendition.
+          if (preference !== 'auto' || hevcAtOrBelow(cap)) {
+            hls.currentLevel = avcLevels[avcLevels.length - 1].index
+          } else {
+            hls.currentLevel = -1
+          }
         }
         return
       }
@@ -5391,7 +5403,9 @@ export function Player({
       const selected =
         [...levels].reverse().find((level) => level.height <= capHeight) ?? levels[0]
       hls.autoLevelCapping = selected.index
-      if (preference !== 'auto') {
+      // autoLevelCapping is an index, not a codec filter. A lower HEVC rung
+      // stays eligible and Fire TV plays its audio with a blank picture.
+      if (preference !== 'auto' || (avcLevels.length > 0 && hevcAtOrBelow(selected.index))) {
         hls.currentLevel = selected.index
       } else {
         hls.currentLevel = -1
@@ -5523,10 +5537,11 @@ export function Player({
       const el = videoRef.current
       if (!el || cancelled) return false
       const hasFrame = el.videoWidth > 0 && el.videoHeight > 0
-      // Live IPTV can paint while videoWidth is briefly 0, or report frames
-      // without a useful width — don't leave the opaque full-player overlay up
-      // (PiP hides that overlay, which is why picture only appeared there).
+      // Live IPTV can paint while videoWidth is briefly 0. VOD must not use
+      // that shortcut: Fire TV advances currentTime and HTML subtitles on an
+      // HEVC rendition while videoWidth stays 0.
       const playingWithData =
+        isLivePlaybackItem(item) &&
         !el.paused &&
         el.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
         (el.currentTime > 0.2 || (el.played?.length ?? 0) > 0)
@@ -5566,6 +5581,7 @@ export function Player({
         if (!audioOnly) {
           // Playing with data but no dimensions yet — still clear the cover.
           if (
+            isLivePlaybackItem(item) &&
             !el.paused &&
             el.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
             Date.now() - startedAt > 900
@@ -5581,7 +5597,7 @@ export function Player({
           audioOnlyHealAttempts += 1
           const healLevels = hls.levels
           const isHevc = (level: (typeof healLevels)[number]) =>
-            /hev1|hvc1|h265|hevc/i.test(String(level.codecs || level.videoCodec || ''))
+            /hev1|hvc1|h265|hevc|dvhe|dvh1/i.test(String(level.codecs || level.videoCodec || ''))
           const next = healLevels.findIndex(
             (level, index) => index !== hls!.currentLevel && !isHevc(level),
           )
@@ -7114,6 +7130,27 @@ export function Player({
         })
         hls.on(Hls.Events.ERROR, (_event, data) => {
           if (cancelled || !hls) return
+          // The CDN answered with Atlantic's error page. Retrying it only
+          // delays the failure, and the native <video> fallback would load
+          // that page as the document (the blue atlantic.st screen).
+          const responseText =
+            (data as { response?: { text?: string }; error?: { message?: string } }).response
+              ?.text ||
+            (data as { error?: { message?: string } }).error?.message ||
+            ''
+          if (isAtlanticWarpPlaylistError(responseText)) {
+            if (settled) return
+            settled = true
+            window.clearTimeout(loadTimer)
+            try {
+              hls.destroy()
+            } catch {
+              /* ignore */
+            }
+            hls = null
+            reject(new Error(ATLANTIC_WARP_PLAYLIST_ERROR))
+            return
+          }
           // Non-fatal buffer underrun — nudge the loader instead of sitting idle
           // (VOD resume seeks often stall here until the user force-retries).
           if (!data.fatal && data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR) {
@@ -7355,8 +7392,34 @@ export function Player({
       }
       let lastError = 'Playback failed.'
       let hlsError: string | null = null
-      for (const engine of engines) {
+      // The site origin is a Referer, not a video. Loading it spends the native
+      // timeout and can replace the app with the blue error page.
+      const refererDocument = isStreamRefererDocumentUrl(activePlaylistItem.url)
+      if (refererDocument) {
+        lastError = 'Atlantic showed its error page instead of the video.'
+        hlsError = lastError
+      }
+      for (const engine of refererDocument ? [] : engines) {
         if (cancelled) return
+        // Playlist body was that same error page. Do not hand it to <video src>.
+        // Android's native player also cannot send Atlantic's Referer, so the
+        // CDN answers with this page and the WebView can show it full screen.
+        const atlanticPlayback =
+          ATLANTIC_HLS_URL_RE.test(activePlaylistItem.url || '') ||
+          activePlaybackReferrerRef.current === ATLANTIC_PLAY_REFERER ||
+          item.httpReferrer === ATLANTIC_PLAY_REFERER
+        if (
+          engine === 'native' &&
+          (isAtlanticWarpPlaylistError(hlsError) ||
+            isAtlanticWarpPlaylistError(lastError) ||
+            (isAndroidShell() && atlanticPlayback))
+        ) {
+          if (!lastError || lastError === 'Playback failed.') {
+            lastError = 'Atlantic showed its error page instead of the video.'
+          }
+          hlsError = hlsError || lastError
+          break
+        }
         cleanupPlayers()
         try {
           await runners[engine]()
@@ -7591,6 +7654,22 @@ export function Player({
           void selectPlaylistItemRef.current(playlistIndex, {
             force: true,
             rotateTorrent: true,
+          })
+          return
+        }
+        if (
+          item.category === 'movies' &&
+          movieWarpFallbackRef.current !== item.id &&
+          (isAtlanticWarpPlaylistError(lastError) ||
+            isAtlanticWarpPlaylistError(hlsError) ||
+            /error page instead of the video/i.test(lastError))
+        ) {
+          movieWarpFallbackRef.current = item.id
+          setError(null)
+          setStatus('Trying another source…')
+          void selectPlaylistItemRef.current(playlistIndex, {
+            force: true,
+            rotateSource: true,
           })
           return
         }
@@ -8426,7 +8505,7 @@ export function Player({
           playsInline
           onDoubleClick={isPip ? undefined : toggleFullscreen}
           style={
-            fittedVideo
+            fittedVideo && !(isAndroidShell() && isTvMode())
               ? {
                   width: fittedVideo.width,
                   height: fittedVideo.height,

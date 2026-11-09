@@ -140,6 +140,14 @@ final class GeckoOverlayController {
   private String currentUrl = "";
   /** Last known player/embed URL — restore if an ad hijacks the top-level document. */
   private String lastPlayerEmbedUrl = "";
+  /** How many times the current embed bounced onto atlantic.st / movy.sx. */
+  private int streamRefererBounces = 0;
+  /** Cover stays up while that error page is the committed document. */
+  private boolean coveringStreamReferer = false;
+  private long streamRefererLeaveAt = 0;
+  /** Page starts minus stops, so an older error page cannot drop the cover. */
+  private int pageLoadsInFlight = 0;
+  private String lastStartedUrl = "";
   /** URL we already sent the start taps for. Buffering must not tap again. */
   private String playTapUrl = "";
   private String currentTitle = "";
@@ -487,6 +495,17 @@ final class GeckoOverlayController {
         @Override
         public void onPageStart(GeckoSession s, String url) {
           loading = true;
+          pageLoadsInFlight += 1;
+          lastStartedUrl = url != null ? url : "";
+          // A committed atlantic.st / movy.sx document is the blue error page.
+          // Keep the cover up and leave it; do not adopt it as the current page.
+          if (url != null && BrowserAdBlock.shouldBlockNavigation(url)) {
+            coveringStreamReferer = true;
+            showLoadCover(true);
+            leaveStreamRefererDocument(url, "page-start");
+            return;
+          }
+          coveringStreamReferer = false;
           if (url != null && !url.isEmpty()) currentUrl = url;
           emitNav();
         }
@@ -494,9 +513,19 @@ final class GeckoOverlayController {
         @Override
         public void onPageStop(GeckoSession s, boolean success) {
           loading = false;
+          pageLoadsInFlight = Math.max(0, pageLoadsInFlight - 1);
+          String live = currentUrl != null ? currentUrl : "";
+          // An older atlantic.st stop must not uncover the page while the
+          // restore load is still starting.
+          if (pageLoadsInFlight > 0) return;
+          if (coveringStreamReferer || BrowserAdBlock.shouldBlockNavigation(lastStartedUrl)
+            || BrowserAdBlock.shouldBlockNavigation(live)) {
+            showLoadCover(true);
+            return;
+          }
+          streamRefererBounces = 0;
           showLoadCover(false);
           emitNav();
-          String live = currentUrl != null ? currentUrl : "";
           if (live.contains("streamcorner") || live.contains("streamninja")) {
             main.post(() -> evaluateJavascript(STREAMCORNER_BOOT_JS, null));
             main.postDelayed(() -> evaluateJavascript(STREAMCORNER_BOOT_JS, null), 1200);
@@ -593,7 +622,8 @@ final class GeckoOverlayController {
           if (url != null && !url.isEmpty()) {
             if (BrowserAdBlock.shouldBlockNavigation(url)) {
               android.util.Log.w("JiyuGecko", "restore after location hijack " + safeUrl(url));
-              restorePlayerEmbedIfNeeded("location");
+              showLoadCover(true);
+              leaveStreamRefererDocument(url, "location");
               return;
             }
             currentUrl = url;
@@ -711,6 +741,38 @@ final class GeckoOverlayController {
     if (silentAtOpen) settings.contextId("jiyu-silent");
     GeckoSessionSettings sessionSettings = settings.build();
     GeckoSession tile = new GeckoSession(sessionSettings);
+    tile.setNavigationDelegate(
+      new GeckoSession.NavigationDelegate() {
+        @Override
+        public GeckoResult<AllowOrDeny> onLoadRequest(
+          GeckoSession s,
+          GeckoSession.NavigationDelegate.LoadRequest request
+        ) {
+          if (request != null && BrowserAdBlock.shouldBlockNavigation(request.uri)) {
+            android.util.Log.w("JiyuGecko", "denied tile stream-referer " + safeUrl(request.uri));
+            return GeckoResult.fromValue(AllowOrDeny.DENY);
+          }
+          if (request != null && BrowserAdBlock.isExternalAppScheme(request.uri)) {
+            return GeckoResult.fromValue(AllowOrDeny.DENY);
+          }
+          return GeckoResult.fromValue(AllowOrDeny.ALLOW);
+        }
+
+        @Override
+        public GeckoResult<AllowOrDeny> onSubframeLoadRequest(
+          GeckoSession s,
+          GeckoSession.NavigationDelegate.LoadRequest request
+        ) {
+          if (request != null && (
+            BrowserAdBlock.shouldBlockNavigation(request.uri)
+              || BrowserAdBlock.isExternalAppScheme(request.uri)
+          )) {
+            return GeckoResult.fromValue(AllowOrDeny.DENY);
+          }
+          return GeckoResult.fromValue(AllowOrDeny.ALLOW);
+        }
+      }
+    );
     tile.setPermissionDelegate(
       new GeckoSession.PermissionDelegate() {
         @Override
@@ -1574,6 +1636,40 @@ final class GeckoOverlayController {
     if (lastPlayerEmbedUrl.equals(currentUrl)) return;
     android.util.Log.i("JiyuGecko", "restoring embed after " + reason + " → " + safeUrl(lastPlayerEmbedUrl));
     main.post(() -> loadUrl(lastPlayerEmbedUrl, shouldStripDocumentReferer(lastPlayerEmbedUrl)));
+  }
+
+  /**
+   * atlantic.st / movy.sx (and other blocked documents) paint a full-screen
+   * error page. Cover it. Restore the previous embed once; a second bounce
+   * means that embed only leads back here, so stop instead of reloading.
+   */
+  private void leaveStreamRefererDocument(String url, String reason) {
+    showLoadCover(true);
+    coveringStreamReferer = true;
+    long now = android.os.SystemClock.uptimeMillis();
+    if (now - streamRefererLeaveAt < 750) return;
+    streamRefererLeaveAt = now;
+    streamRefererBounces += 1;
+    String back = lastPlayerEmbedUrl == null ? "" : lastPlayerEmbedUrl;
+    boolean canRestore =
+      streamRefererBounces <= 1
+        && !back.isEmpty()
+        && !back.equals(url)
+        && !BrowserAdBlock.shouldBlockNavigation(back);
+    android.util.Log.w(
+      "JiyuGecko",
+      "leaving stream-referer page (" + reason + ", bounce " + streamRefererBounces + ") "
+        + safeUrl(url)
+    );
+    if (canRestore) {
+      final String restore = back;
+      main.post(() -> loadUrl(restore, shouldStripDocumentReferer(restore)));
+      return;
+    }
+    streamRefererBounces = 0;
+    lastPlayerEmbedUrl = "";
+    if (url != null && url.equals(currentUrl)) currentUrl = "";
+    main.post(this::blank);
   }
 
   void loadUrl(String url, boolean stripReferer) {

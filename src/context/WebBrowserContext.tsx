@@ -45,6 +45,7 @@ import {
   androidBrowserReload,
   androidBrowserSetBounds,
   androidBrowserShow,
+  androidBrowserTvPointer,
   isAndroidInAppBrowser,
   isInAppBrowserAvailable,
 } from '../lib/androidBrowser'
@@ -71,6 +72,8 @@ const UNWRAP_COVER_MIN_MS = 800
 const STALL_WATCH_TICK_MS = 2_500
 const STALL_WATCH_MAX_MS = 3 * 3600_000
 const STALL_MESSAGE = "No video yet - the stream didn't start. Tap Retry, or go Back and pick another source."
+const LEGAL_BLOCK_MESSAGE =
+  'This site refused the page for legal reasons (Error 451). Nothing will play here. Go Back and pick another listing.'
 
 /** Live embeds (sports / replays / YouTube live like Nationwide) get the unwrap cover. */
 function wantsUnwrapCover(url: string): boolean {
@@ -93,6 +96,12 @@ function wantsUnwrapCover(url: string): boolean {
  */
 const UNWRAP_COVER_TICK_SCRIPT = `(function(){try{
 var d=document,ID='__jiyu_unwrap_cover',now=Date.now();
+var legal=(d.title||'');
+try{legal+=' '+((d.body&&d.body.innerText)||'').slice(0,800);}catch(e){}
+if(/error\\s*451|unavailable for legal reasons/i.test(legal)){
+  var cL=d.getElementById(ID);if(cL&&cL.parentNode)cL.parentNode.removeChild(cL);
+  return 'jiyu-live-legal';
+}
 if(!window.__jiyuCoverT0)window.__jiyuCoverT0=now;
 var S=window.__jiyuMoveState||(window.__jiyuMoveState=new WeakMap());
 var vids=d.getElementsByTagName('video'),live=false,mediaErr=false;
@@ -129,6 +138,15 @@ const LIVE_WATCH_SCRIPT = UNWRAP_COVER_TICK_SCRIPT.replace(
   'if(window.top!==window||window.__jiyuUnwrapDone)return idle;',
   'return idle;',
 )
+
+function execResultSaysLegalBlock(res: unknown): boolean {
+  if (!res || typeof res !== 'object') return false
+  const r = res as { result?: unknown; frameResults?: Array<{ result?: unknown }> }
+  if (String(r.result ?? '').includes('jiyu-live-legal')) return true
+  return Array.isArray(r.frameResults)
+    ? r.frameResults.some((f) => String(f?.result ?? '').includes('jiyu-live-legal'))
+    : false
+}
 
 function execResultSaysMediaError(res: unknown): boolean {
   if (!res || typeof res !== 'object') return false
@@ -550,6 +568,12 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
         }
         void execInGuest(LIVE_WATCH_SCRIPT).then((res) => {
           if (gen !== stallGenRef.current) return
+          if (execResultSaysLegalBlock(res)) {
+            setStalled(true)
+            setStatus(LEGAL_BLOCK_MESSAGE)
+            void androidBrowserTvPointer('off')
+            return
+          }
           if (execResultSaysPlaying(res)) {
             errTicks = 0
             hide()
@@ -598,6 +622,13 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
       void execInGuest(UNWRAP_COVER_TICK_SCRIPT).then((res) => {
         busy = false
         if (gen !== unwrapGenRef.current) return
+        if (execResultSaysLegalBlock(res)) {
+          stopUnwrapCover(true)
+          setStalled(true)
+          setStatus(LEGAL_BLOCK_MESSAGE)
+          void androidBrowserTvPointer('off')
+          return
+        }
         // Ignore "playing" in the first moments: the previous document can still be
         // alive until navigate commits.
         if (execResultSaysPlaying(res) && Date.now() - startedAt >= UNWRAP_COVER_MIN_MS) {

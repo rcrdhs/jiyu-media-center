@@ -18,7 +18,7 @@ import {
   androidBrowserTvPointer,
   type TvPointerMode,
 } from './androidBrowser'
-import { onTvMediaKey } from './tvMode'
+import { onTvMediaKey, showTvSoftKeyboard } from './tvMode'
 
 type Dir = 'up' | 'down' | 'left' | 'right'
 
@@ -398,16 +398,25 @@ function restoreInputMode(el: HTMLElement) {
   el.removeAttribute(IME_ORIG_ATTR)
 }
 
-/** OK on a locked field: restore its input mode and re-focus so the IME shows. */
+/** OK on a locked field: restore its input mode and ask Android TV for the keyboard.
+ * Blur-then-focus does not open the Fire TV IME, and it drops the OK key. */
 function openIme(el: HTMLElement) {
   el.setAttribute(IME_LOCK_ATTR, 'open')
   restoreInputMode(el)
+  // Fire TV has no password keyboard. Keep the field masked (type=password)
+  // but ask for the text keyboard.
+  if (el instanceof HTMLInputElement && (el.type || '').toLowerCase() === 'password') {
+    el.setAttribute('inputmode', 'text')
+  }
   try {
-    el.blur()
     el.focus({ preventScroll: true })
   } catch {
     el.focus()
   }
+  showTvSoftKeyboard()
+  window.setTimeout(() => {
+    if (document.activeElement === el) showTvSoftKeyboard()
+  }, 80)
   if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
     try {
       const end = el.value.length

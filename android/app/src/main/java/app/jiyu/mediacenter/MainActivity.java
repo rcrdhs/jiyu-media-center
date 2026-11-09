@@ -59,6 +59,7 @@ public class MainActivity extends BridgeActivity {
     registerPlugin(BiliSessionPlugin.class);
     registerPlugin(app.jiyu.mediacenter.sync.SyncSecretPlugin.class);
     super.onCreate(savedInstanceState);
+    pinTvTextZoom();
     applyDarkSystemBars();
     CrashLog.showPendingIfAny(this);
     restoreRouteAfterRendererGone();
@@ -351,6 +352,21 @@ public class MainActivity extends BridgeActivity {
     super.onResume();
     pipClose.onResume(inPipNow());
     applyDarkSystemBars();
+    if (!inPipOrSettling()) pinTvTextZoom();
+  }
+
+  /**
+   * The TV layout is sized in CSS px for the density-scaled WebView viewport.
+   * A system font scale above 100% multiplies that root size and blows the
+   * shelves up again. Phones keep the system text size.
+   */
+  private void pinTvTextZoom() {
+    if (!TvMode.isTv(this)) return;
+    try {
+      if (getBridge() == null || getBridge().getWebView() == null) return;
+      android.webkit.WebSettings settings = getBridge().getWebView().getSettings();
+      if (settings.getTextZoom() != 100) settings.setTextZoom(100);
+    } catch (Throwable ignored) {}
   }
 
   @Override

@@ -5687,6 +5687,21 @@ html.is-android .player-shell:-webkit-full-screen .player-video {
   transform: none !important;
 }
 
+/* Fire TV paints audio and the HTML subtitle line, and leaves the picture
+   blank, when the video element is a grid item. */
+html.tv-mode.is-android .player-stage {
+  display: block;
+}
+
+html.tv-mode.is-android .player-video {
+  position: absolute;
+  inset: 0;
+  width: 100% !important;
+  height: 100% !important;
+  max-width: none !important;
+  max-height: none !important;
+}
+
 .player-subtitles {
   position: absolute;
   left: 50%;
@@ -7710,4 +7725,275 @@ body:has(.web-browser-page.is-fullscreen) .main-stage::-webkit-scrollbar {
   display: none !important;
   width: 0 !important;
   height: 0 !important;
+}
+
+/* ------------------------------------------------------------------------
+   Android TV / Fire TV content density.
+   Phones, tablets, desktop, and Samsung Tizen are not matched:
+   these rules require html.tv-mode AND html.is-android together.
+   Tizen is tv-mode without is-android (1920×1080 CSS, desktop sidebar).
+   The player shell is not restyled here.
+
+   Evidence (browser, real stylesheet, Android landscape rail):
+   html.is-android forces section tiles to exactly 3 columns that stretch,
+   and tv-mode adds 18px root type plus overscan padding on top of .page.
+   A 1080p panel at density 2 (Fire TV's WebView, and common Android TV
+   boxes) is a 960×540 CSS viewport. There the rail is 4.75rem and the
+   padded stage fits about three 175px catalog cards, each ~300px tall,
+   so one row fills a 540px-tall screen. The same 3-column tile rule
+   stretches Home sections to ~540px wide on a 1920 CSS-px Android TV.
+   ------------------------------------------------------------------------ */
+
+html.tv-mode.is-android .section-tiles {
+  grid-template-columns: repeat(auto-fill, minmax(8.1rem, 1fr));
+  gap: 0.45rem;
+}
+
+/* Sports "Your teams" is two half-width cards on phones. On a TV those
+   cards grow with the stage (hundreds of CSS px). Keep a couch-sized card
+   and let the row scroll. */
+html.tv-mode.is-android .favorite-matches .catalog-grid {
+  grid-template-columns: none;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(12.5rem, 15.5rem);
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* Icon rail: keep D-pad targets inside the 4.75rem column. The focus ring
+   is inset, so it stays on the control instead of being clipped. */
+html.tv-mode.is-android .sidebar.sidebar-android .brand-btn,
+html.tv-mode.is-android .sidebar.sidebar-android .sections-menu-btn,
+html.tv-mode.is-android .sidebar.sidebar-android .side-library {
+  min-height: 2.6rem;
+}
+
+/* Density-scaled TV viewports: 960×540 (1080p @ 2x), 1280×720 (720p or
+   1080p @ 1.5x), up through ~1600 (tvdpi). 1920 CSS px (density 1, and
+   Tizen) keeps the existing card minimums. */
+@media (orientation: landscape) and (max-width: 1600px) {
+  html.tv-mode.is-android {
+    --tv-safe-x: 1.4vw;
+    --tv-safe-y: 1.1vh;
+  }
+
+  html.tv-mode.is-android .main-stage {
+    padding-left: max(var(--tv-safe-x), 0.4rem);
+    padding-right: max(var(--tv-safe-x), 0.4rem);
+    padding-bottom: var(--tv-safe-y);
+    scroll-padding-top: 12vh;
+    scroll-padding-bottom: 16vh;
+  }
+
+  html.tv-mode.is-android .page {
+    padding: 0.65rem 0.5rem 1.05rem;
+  }
+
+  html.tv-mode.is-android .page-header {
+    margin-bottom: 0.45rem;
+    padding-bottom: 0.35rem;
+  }
+
+  html.tv-mode.is-android .page-header h1 {
+    font-size: 1.35rem;
+  }
+
+  html.tv-mode.is-android .lede {
+    margin-top: 0.3rem;
+    font-size: 0.85rem;
+  }
+
+  html.tv-mode.is-android .section-block {
+    margin-top: 0.85rem;
+  }
+
+  html.tv-mode.is-android .section-head {
+    margin-bottom: 0.4rem;
+  }
+
+  html.tv-mode.is-android .section-head h2,
+  html.tv-mode.is-android .panel h2 {
+    font-size: 1.12rem;
+    line-height: 1.3;
+    padding: 0.05rem 0;
+  }
+
+  html.tv-mode.is-android .catalog-grid {
+    grid-template-columns: repeat(auto-fill, minmax(124px, 1fr));
+    gap: 0.5rem;
+    padding: 0.28rem 0.2rem 0.4rem;
+  }
+
+  html.tv-mode.is-android .catalog-grid:has(.media-card.is-sports) {
+    grid-template-columns: repeat(auto-fill, minmax(156px, 1fr));
+    gap: 0.55rem;
+  }
+
+  html.tv-mode.is-android .media-card-body {
+    padding: 0.4rem 0.5rem 0.45rem;
+    gap: 0.2rem;
+  }
+
+  html.tv-mode.is-android .media-card-body h3 {
+    font-size: 0.88rem;
+    line-height: 1.25;
+    min-height: calc(1.25em * 2);
+  }
+
+  html.tv-mode.is-android .media-card-actions .card-check-btn,
+  html.tv-mode.is-android .media-card-actions .card-heart-btn {
+    min-height: 2.15rem;
+  }
+
+  html.tv-mode.is-android .continue-row {
+    grid-auto-columns: minmax(8.6rem, 10.4rem);
+    gap: 0.55rem;
+  }
+
+  html.tv-mode.is-android .recommended-row {
+    grid-auto-columns: minmax(8.4rem, 10rem);
+  }
+
+  /* Short TV (960×540): hero + one Continue card otherwise fills the screen
+     and the Sections row never appears. Keep Continue, drop the blurbs,
+     and shorten the artwork so the first tile row fits. */
+  @media (max-height: 620px) {
+    html.tv-mode.is-android .hero {
+      margin-bottom: 0.35rem;
+    }
+
+    html.tv-mode.is-android .hero h1 {
+      font-size: 1.2rem;
+    }
+
+    html.tv-mode.is-android .home-search-wrap {
+      margin-top: 0.3rem;
+    }
+
+    html.tv-mode.is-android .section-block {
+      margin-top: 0.4rem;
+    }
+
+    html.tv-mode.is-android .section-head p,
+    html.tv-mode.is-android .continue-watching .section-head p {
+      display: none;
+    }
+
+    html.tv-mode.is-android .continue-card {
+      gap: 0.25rem;
+    }
+
+    html.tv-mode.is-android .continue-card-art {
+      aspect-ratio: auto;
+      height: 4.4rem;
+    }
+
+    html.tv-mode.is-android .continue-card-body h3 {
+      font-size: 0.82rem;
+      line-height: 1.25;
+      -webkit-line-clamp: 1;
+    }
+  }
+
+  /* After the sports :has() rule so Your teams stays a scrolling row. */
+  html.tv-mode.is-android .favorite-matches .catalog-grid {
+    grid-template-columns: none;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(11.5rem, 14rem);
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+}
+
+/* Android TV: sections stay listed on the left. Phones keep the icon rail
+   and open sections from the menu button. Fullscreen playback stays edge to edge. */
+html.tv-mode.is-android {
+  --tv-rail: 12.25rem;
+}
+
+html.tv-mode.is-android .app-shell {
+  grid-template-columns: var(--tv-rail) 1fr;
+  grid-template-rows: 1fr;
+}
+
+html.tv-mode.is-android .sidebar.sidebar-android {
+  width: var(--tv-rail);
+  max-width: var(--tv-rail);
+  flex-direction: column;
+  align-items: stretch;
+  height: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+html.tv-mode.is-android .sidebar-android .brand-row,
+html.tv-mode.is-android .sidebar-android .brand-btn {
+  flex-direction: row;
+  justify-content: flex-start;
+  align-items: center;
+}
+
+html.tv-mode.is-android .sidebar-android .brand-name {
+  display: block;
+  font-size: 1rem;
+}
+
+html.tv-mode.is-android .sidebar-android .sections-menu-wrap {
+  display: none;
+}
+
+html.tv-mode.is-android .sidebar-android .sidebar-chrome {
+  order: 1;
+}
+
+html.tv-mode.is-android .sidebar-android .side-nav,
+html.tv-mode.is-android .sidebar-android .side-nav[hidden] {
+  order: 2;
+  display: flex !important;
+  position: static !important;
+  inset: auto !important;
+  width: auto !important;
+  max-width: none !important;
+  max-height: none !important;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  margin: 0;
+  padding: 0.15rem 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+html.tv-mode.is-android .sidebar-android .side-nav-group,
+html.tv-mode.is-android .sidebar-android .nav-link {
+  width: 100%;
+}
+
+html.tv-mode.is-android .sidebar-android .nav-link {
+  min-height: 2.15rem;
+  padding: 0.32rem 0.45rem;
+  font-size: 0.84rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+html.tv-mode.is-android .sidebar-android .side-footer {
+  order: 3;
+  margin-top: auto;
+}
+
+html.tv-mode.is-android .player-dock,
+html.tv-mode.is-android .global-player-layer,
+html.tv-mode.is-android .catalog-sync-bar.is-android-float {
+  left: calc(var(--tv-rail) + max(0.5rem, env(safe-area-inset-left, 0px))) !important;
+}
+
+html.tv-mode.is-android body:has(.player-shell:not(.player-shell-pip):not(.player-shell-tile)) .player-dock,
+html.tv-mode.is-android body:has(.player-shell:not(.player-shell-pip):not(.player-shell-tile)) .global-player-layer,
+html.tv-mode.is-android body:has(.web-browser-page.is-embed-player.is-watching) .player-dock,
+html.tv-mode.is-android body:has(.web-browser-page.is-embed-player.is-watching) .global-player-layer {
+  left: 0 !important;
 }

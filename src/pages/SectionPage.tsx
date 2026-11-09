@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { useParams } from 'react-router-dom'
 import { CATEGORIES } from '../data/catalog'
 import { useCatalog } from '../context/CatalogContext'
@@ -72,6 +72,10 @@ import {
   writeSelectedSportsFilter,
 } from '../lib/favoriteTeams'
 import { FavoriteTeamsEditor } from '../components/FavoriteTeamsEditor'
+import {
+  getTorrentSyncMessage,
+  subscribeTorrentSyncMessage,
+} from '../lib/torrentSyncStatus'
 import type { CategoryId, StreamItem } from '../types'
 
 const PAGE = 120
@@ -359,6 +363,11 @@ export function SectionPage() {
     reloadTorrentCatalog,
   } = useCatalog()
   const meta = CATEGORIES.find((c) => c.id === id)
+  const syncMessage = useSyncExternalStore(
+    subscribeTorrentSyncMessage,
+    getTorrentSyncMessage,
+    getTorrentSyncMessage,
+  )
   const saved = id ? getSectionView(id) : undefined
   const sentinelRef = useRef<HTMLDivElement>(null)
   const topSentinelRef = useRef<HTMLDivElement>(null)
@@ -1565,7 +1574,9 @@ export function SectionPage() {
               showHealthFilters={categoryId === 'kids' && shelfTab === 'live'}
               autoHideUnresponsive={false}
               emptyHint={
-                categoryId === 'anime' && query.trim() && animeCatalogSearchEmpty
+                shown.length === 0 && syncMessage
+                  ? syncMessage
+                  : categoryId === 'anime' && query.trim() && animeCatalogSearchEmpty
                   ? nyaaSearchStatus === 'loading'
                     ? `Searching for “${query.trim()}”…`
                     : nyaaSearchStatus === 'error'
@@ -1608,9 +1619,13 @@ export function SectionPage() {
             showHealthFilters={!showSourceTools && categoryId !== 'sports'}
             autoHideUnresponsive={!showSourceTools && categoryId !== 'sports'}
             emptyHint={
-              categoryId === 'series'
-                ? 'No shows yet. Import a playlist in Library to fill this shelf.'
-                : `No ${meta.label.toLowerCase()} titles yet. Import a playlist in Library to fill this shelf.`
+              syncMessage
+                ? syncMessage
+                : categoryId === 'series'
+                  ? 'No shows yet. TV Series fills from TMDB — leave Jiyu open while it syncs, or sync in Library.'
+                  : categoryId === 'kids'
+                    ? 'No kids titles yet. Kids Shows fill from TMDB — leave Jiyu open while it syncs, or sync in Library.'
+                    : `No ${meta.label.toLowerCase()} titles yet. Import a playlist in Library to fill this shelf.`
             }
           />
         </>

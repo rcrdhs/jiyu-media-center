@@ -1,7 +1,7 @@
 {
   "name": "jiyu-media-center",
   "private": true,
-  "version": "0.3.97",
+  "version": "0.3.98",
   "description": "Jiyu — freedom-focused media center for sports, movies, anime, series, and news streams",
   "author": "Jiyu",
   "repository": {
@@ -27,7 +27,8 @@
     "release:linux": "npm run build && electron-builder --linux AppImage deb --publish always",
     "test:progress-sync": "node scripts/progress-sync-sandbox.cjs",
     "test:progress-sync:serve": "node scripts/progress-sync-sandbox.cjs --serve",
-    "test:recommendations": "tsx scripts/eval-recommendations.mts"
+    "test:recommendations": "tsx scripts/eval-recommendations.mts",
+    "test:tv-density": "node scripts/tv-density-check.mjs"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.2",

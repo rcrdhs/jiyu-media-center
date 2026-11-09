@@ -9,7 +9,7 @@ import {
   hideSectionForTmdbTvKind,
   tmdbWithoutKeywordsParam,
 } from './hideKeywords'
-import type { TmdbTvFeedKind } from './tmdbTv'
+import { TMDB_PUBLIC_API_KEY, type TmdbTvFeedKind } from './tmdbTv'
 import { getTorrentSyncControlState, TorrentSyncCancelledError } from './torrentSyncControl'
 
 export type ClientTmdbShow = {
@@ -45,7 +45,10 @@ function throwIfCatalogSyncCancelled(): void {
 
 export function tmdbApiKey(): string {
   const env = import.meta.env as Record<string, string | undefined>
-  return String(env.TMDB_API_KEY || env.TMDB_KEY || env.VITE_TMDB_API_KEY || '').trim()
+  const fromEnv = String(env.TMDB_API_KEY || env.TMDB_KEY || env.VITE_TMDB_API_KEY || '').trim()
+  // Android builds often have no .env. Playback already ships this public key;
+  // catalog sync has to use it too or TV Series and Kids Shows stay empty.
+  return fromEnv || TMDB_PUBLIC_API_KEY
 }
 
 export function canFetchTmdbClientSide(): boolean {
@@ -128,6 +131,8 @@ export async function fetchTmdbTvCatalogClient(
   options?: {
     withExternalIds?: boolean
     onProgress?: (done: number, total: number) => void
+    /** Fired per TMDB page so a TV shelf can fill before the full crawl ends. */
+    onBatch?: (shows: ClientTmdbShow[]) => void
   },
 ): Promise<{ ok: boolean; shows: ClientTmdbShow[]; error?: string | null; cancelled?: boolean }> {
   const apiKey = tmdbApiKey()
@@ -150,6 +155,16 @@ export async function fetchTmdbTvCatalogClient(
   const pageSize = 20
   const shows: TmdbRow[] = []
   const onProgress = options?.onProgress
+  const emitBatch = (rows: TmdbRow[]) => {
+    if (!options?.onBatch || rows.length === 0) return
+    const batch = rows.map((row) => mapShow(row)).filter((show) => show.tmdbId && show.name)
+    if (batch.length === 0) return
+    try {
+      options.onBatch(batch)
+    } catch {
+      /* shelf paint must not abort the crawl */
+    }
+  }
 
   try {
     if (kind === 'by_year') {
@@ -168,9 +183,11 @@ export async function fetchTmdbTvCatalogClient(
           buildDiscoverUrl(kind, 1, year),
         )
         if (!ok || !data) {
+          if (shows.length > 0) break
           return { ok: false, shows: [], error: error || `TMDB by_year ${year} failed` }
         }
         const results = Array.isArray(data.results) ? data.results : []
+        const accepted: TmdbRow[] = []
         let taken = 0
         for (const row of results) {
           if (taken >= byYearPerYear || shows.length >= yearTarget) break
@@ -178,8 +195,10 @@ export async function fetchTmdbTvCatalogClient(
           if (!id || seen.has(id)) continue
           seen.add(id)
           shows.push(row)
+          accepted.push(row)
           taken += 1
         }
+        emitBatch(accepted)
         onProgress?.(Math.min(shows.length, yearTarget), yearTarget)
       }
     } else {
@@ -200,8 +219,8 @@ export async function fetchTmdbTvCatalogClient(
           }>(buildDiscoverUrl(kind, page)))
         }
         if (!ok || !data) {
-          // Keep partial catalog so Android doesn't lag desktop by thousands of titles.
-          if (shows.length >= 100) break
+          // Keep whatever already arrived so a later timeout does not leave the shelf empty.
+          if (shows.length > 0) break
           return { ok: false, shows: [], error: error || `TMDB ${kind} failed` }
         }
         const results = Array.isArray(data.results) ? data.results : []
@@ -211,6 +230,7 @@ export async function fetchTmdbTvCatalogClient(
             ? results.filter((row) => !row.media_type || row.media_type === 'tv')
             : results
         shows.push(...tvRows)
+        emitBatch(tvRows)
         onProgress?.(Math.min(shows.length, target), target)
         const totalPages = Number(data.total_pages) || pagesNeeded
         if (page >= totalPages) break
@@ -221,12 +241,12 @@ export async function fetchTmdbTvCatalogClient(
   } catch (err) {
     if (err instanceof TorrentSyncCancelledError) {
       // Prefer partial results over wiping a long Animation sync mid-way.
-      if (shows.length >= 100) {
+      if (shows.length > 0) {
         /* fall through to map partial */
       } else {
         return { ok: false, shows: [], error: 'Catalog sync cancelled', cancelled: true }
       }
-    } else if (shows.length < 100) {
+    } else if (shows.length === 0) {
       return {
         ok: false,
         shows: [],

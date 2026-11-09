@@ -7,6 +7,31 @@
  */
 
 export const ATLANTIC_PLAY_REFERER = 'https://atlantic.st/'
+
+/** Playlist body was Atlantic's error page, not an m3u8. Shared with the Android HLS loader. */
+export const ATLANTIC_WARP_PLAYLIST_ERROR = 'Atlantic Warp interstitial (not HLS)'
+
+export function isAtlanticWarpPlaylistError(message: string | undefined | null): boolean {
+  return String(message || '').includes('Atlantic Warp interstitial')
+}
+
+/**
+ * atlantic.st and movy.sx are Referer origins for HLS CDNs. Opening them as a
+ * document shows the blue error page instead of video.
+ */
+export function isStreamRefererDocumentUrl(url: string | undefined | null): boolean {
+  try {
+    const host = new URL(String(url || '')).hostname.replace(/^www\./i, '').toLowerCase()
+    return (
+      host === 'atlantic.st' ||
+      host.endsWith('.atlantic.st') ||
+      host === 'movy.sx' ||
+      host.endsWith('.movy.sx')
+    )
+  } catch {
+    return false
+  }
+}
 export const ATLANTIC_CDN_ORIGIN = 'https://cdn.hls.lol'
 export const ATLANTIC_HELIOS_ORIGIN = 'https://stream.hls.lol'
 

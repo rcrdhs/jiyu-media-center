@@ -20,7 +20,7 @@ export const TMDB_KIDS_SHOWS_FEED_PREFIX = 'jiyu://tmdb-kids-shows'
 export const TMDB_TV_DETAIL_PREFIX = 'jiyu://tmdb-tv'
 
 /** Same public TMDB key used by RiveStream's client (metadata / episode lists / networks). */
-const TMDB_PUBLIC_API_KEY = 'd64117f26031a428449f102ced3aba73'
+export const TMDB_PUBLIC_API_KEY = 'd64117f26031a428449f102ced3aba73'
 
 /**
  * Series discover pages (20/page, TMDB max ~500 pages).
@@ -172,6 +172,7 @@ function feedLimit(kind: TmdbTvFeedKind): number {
 export async function fetchTmdbTvCatalogLinks(
   kind: TmdbTvFeedKind,
   onProgress?: (done: number, total: number) => void,
+  onLinks?: (links: TorrentPageLink[]) => void,
 ): Promise<{ links: TorrentPageLink[]; error: string | null }> {
   const limit = feedLimit(kind)
   const isAnime = kind === 'anime'
@@ -196,7 +197,82 @@ export async function fetchTmdbTvCatalogLinks(
     cancelled?: boolean
   }
 
+  const links: TorrentPageLink[] = []
+  const seen = new Set<string>()
+  let rankIndex = 0
+  let lastByYear = -1
+  let withinYearRank = 0
+  const seriesOnly = !isAnime && !isKids && kind === 'popular'
+  const take = (shows: NonNullable<CatalogResult['shows']>): void => {
+    const added: TorrentPageLink[] = []
+    for (const show of shows) {
+      const id = String(show.tmdbId || '').trim()
+      const title = String(show.name || '').trim()
+      if (!id || !title || seen.has(id)) continue
+      // Belt-and-suspenders: Series shelf must not ingest Animation/anime rows.
+      if (seriesOnly) {
+        const genres = Array.isArray(show.genreIds) ? show.genreIds : []
+        if (genres.includes(16)) continue
+      }
+      seen.add(id)
+      const year = String(show.firstAirDate || '').slice(0, 4)
+      const yearNum = Number(year) || 0
+      const airMs = show.firstAirDate
+        ? Date.parse(`${show.firstAirDate}T00:00:00Z`)
+        : undefined
+      const popularity =
+        typeof show.popularity === 'number' && Number.isFinite(show.popularity)
+          ? show.popularity
+          : 0
+      let rankReleasedAt: number | undefined
+      if (kind === 'on_the_air') {
+        rankReleasedAt = Number.isFinite(airMs) ? airMs : undefined
+      } else if (isByYear && yearNum >= TMDB_TV_BY_YEAR_START) {
+        if (yearNum !== lastByYear) {
+          lastByYear = yearNum
+          withinYearRank = 0
+        }
+        rankReleasedAt =
+          yearNum * 1_000_000 + (TMDB_TV_BY_YEAR_PER_YEAR - withinYearRank) * 1_000
+        withinYearRank += 1
+      } else if (popularity > 0) {
+        rankReleasedAt =
+          Math.round(popularity * 1_000_000) + (10_000 - Math.min(rankIndex, 9_999))
+        rankIndex += 1
+      } else {
+        rankReleasedAt = Date.now() - rankIndex * 10
+        rankIndex += 1
+      }
+      const originalLanguage = String(show.originalLanguage || '')
+        .trim()
+        .toLowerCase()
+      const genres = genresFromTmdbIds(show.genreIds)
+      added.push({
+        title,
+        url: tmdbTvDetailUrl(id),
+        summary: [
+          isKids ? 'Kids' : isAnime ? 'Anime' : isByYear ? `Top ${year}` : 'TV Series',
+          year,
+          'TMDB',
+          'Rive',
+        ]
+          .filter(Boolean)
+          .join(' · '),
+        poster: show.poster || undefined,
+        category: isKids ? 'kids' : isAnime ? 'anime' : 'series',
+        releasedAt: Number.isFinite(rankReleasedAt) ? rankReleasedAt : undefined,
+        rivestreamTmdbId: id,
+        ...(originalLanguage ? { originalLanguage } : {}),
+        ...(genres.length ? { genres } : {}),
+      })
+    }
+    if (added.length === 0) return
+    links.push(...added)
+    onLinks?.(added)
+  }
+
   let result: CatalogResult
+  let streamed = false
   const desktopCatalog = window.signalDesktop?.tmdbTvCatalog
   const { hideSectionForTmdbTvKind, tmdbWithoutKeywordsParam } = await import(
     './hideKeywords'
@@ -220,86 +296,19 @@ export async function fetchTmdbTvCatalogLinks(
     result = await fetchTmdbTvCatalogClient(kind, limit, {
       withExternalIds: false,
       onProgress,
+      onBatch: (shows) => {
+        streamed = true
+        take(shows)
+      },
     })
   }
 
-  if (result.cancelled || /catalog sync cancelled/i.test(String(result.error || ''))) {
-    return { links: [], error: result.error || 'Catalog sync cancelled' }
+  const cancelled =
+    result.cancelled || /catalog sync cancelled/i.test(String(result.error || ''))
+  if ((cancelled || !result.ok) && links.length === 0) {
+    return { links: [], error: result.error || (cancelled ? 'Catalog sync cancelled' : 'TMDB catalog failed') }
   }
-  if (!result.ok) {
-    return { links: [], error: result.error || 'TMDB catalog failed' }
-  }
-
-  const links: TorrentPageLink[] = []
-  const seen = new Set<string>()
-  let rankIndex = 0
-  let lastByYear = -1
-  let withinYearRank = 0
-  const seriesOnly = !isAnime && !isKids && kind === 'popular'
-  for (const show of result.shows || []) {
-    const id = String(show.tmdbId || '').trim()
-    const title = String(show.name || '').trim()
-    if (!id || !title || seen.has(id)) continue
-    // Belt-and-suspenders: Series shelf must not ingest Animation/anime rows.
-    if (seriesOnly) {
-      const genres = Array.isArray(show.genreIds) ? show.genreIds : []
-      if (genres.includes(16)) continue
-    }
-    seen.add(id)
-    const year = String(show.firstAirDate || '').slice(0, 4)
-    const yearNum = Number(year) || 0
-    const airMs = show.firstAirDate
-      ? Date.parse(`${show.firstAirDate}T00:00:00Z`)
-      : undefined
-    // Popular / trending / anime lists are popularity.desc — keep that order
-    // via releasedAt (same trick as YTS Popular), so shelves can sort by rank.
-    // By-year: newest year first, then top-20 rank within that year.
-    const popularity =
-      typeof show.popularity === 'number' && Number.isFinite(show.popularity)
-        ? show.popularity
-        : 0
-    let rankReleasedAt: number | undefined
-    if (kind === 'on_the_air') {
-      rankReleasedAt = Number.isFinite(airMs) ? airMs : undefined
-    } else if (isByYear && yearNum >= TMDB_TV_BY_YEAR_START) {
-      if (yearNum !== lastByYear) {
-        lastByYear = yearNum
-        withinYearRank = 0
-      }
-      rankReleasedAt =
-        yearNum * 1_000_000 + (TMDB_TV_BY_YEAR_PER_YEAR - withinYearRank) * 1_000
-      withinYearRank += 1
-    } else if (popularity > 0) {
-      rankReleasedAt =
-        Math.round(popularity * 1_000_000) + (10_000 - Math.min(rankIndex, 9_999))
-      rankIndex += 1
-    } else {
-      rankReleasedAt = Date.now() - rankIndex * 10
-      rankIndex += 1
-    }
-    const originalLanguage = String(show.originalLanguage || '')
-      .trim()
-      .toLowerCase()
-    const genres = genresFromTmdbIds(show.genreIds)
-    links.push({
-      title,
-      url: tmdbTvDetailUrl(id),
-      summary: [
-        isKids ? 'Kids' : isAnime ? 'Anime' : isByYear ? `Top ${year}` : 'TV Series',
-        year,
-        'TMDB',
-        'Rive',
-      ]
-        .filter(Boolean)
-        .join(' · '),
-      poster: show.poster || undefined,
-      category: isKids ? 'kids' : isAnime ? 'anime' : 'series',
-      releasedAt: Number.isFinite(rankReleasedAt) ? rankReleasedAt : undefined,
-      rivestreamTmdbId: id,
-      ...(originalLanguage ? { originalLanguage } : {}),
-      ...(genres.length ? { genres } : {}),
-    })
-  }
+  if (!streamed) take(result.shows || [])
 
   onProgress?.(links.length, links.length)
   return {
