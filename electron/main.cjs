@@ -7,6 +7,7 @@ const zlib = require('zlib')
 const http = require('http')
 const { spawn: spawnChildProcess } = require('child_process')
 const { promisify } = require('util')
+const { requestDevAppRestart } = require('./devRestart.cjs')
 
 /** electron-updater — only active in packaged builds (see setupAutoUpdater). */
 let autoUpdaterRef = null
@@ -7640,6 +7641,28 @@ ipcMain.handle('desktop:isDesktop', async () => true)
 ipcMain.handle('app:quit', () => {
   app.quit()
 })
+
+// Development Electron only. Packaged Jiyu is refused inside requestDevAppRestart
+// before app.relaunch / app.quit. No renderer arguments are read. relaunch() is
+// called with no execPath or args so Electron repeats this process's original
+// argv (dev binary, app path, launcher flags) and then app.quit() runs the
+// normal Exit cleanup. See electron/devRestart.cjs for launcher limits.
+ipcMain.handle('app:restartDevApp', () =>
+  requestDevAppRestart({
+    isPackaged: app.isPackaged,
+    execPath: process.execPath,
+    argv: process.argv,
+    relaunch: () => app.relaunch(),
+    quit: () => app.quit(),
+    log: (line) => {
+      try {
+        console.log(line)
+      } catch {
+        /* ignore */
+      }
+    },
+  }),
+)
 
 ipcMain.handle('app:exitFullScreen', async () => {
   exitAppFullscreenSurfaces()

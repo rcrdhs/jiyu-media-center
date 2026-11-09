@@ -56,6 +56,8 @@ contextBridge.exposeInMainWorld('signalDesktop', {
   browserMultiPromote: (payload) => ipcRenderer.invoke('browser:multiPromote', payload),
   browserMultiHideAll: (options) => ipcRenderer.invoke('browser:multiHideAll', options || {}),
   quit: () => ipcRenderer.invoke('app:quit'),
+  // Full dev Electron restart (main refuses packaged builds). Not a page reload.
+  restartDevApp: () => ipcRenderer.invoke('app:restartDevApp'),
   exitFullScreen: () => ipcRenderer.invoke('app:exitFullScreen'),
   setFullScreen: (enabled) => ipcRenderer.invoke('app:setFullScreen', Boolean(enabled)),
   isFullScreen: () => ipcRenderer.invoke('app:isFullScreen'),

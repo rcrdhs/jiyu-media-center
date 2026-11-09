@@ -348,6 +348,17 @@ declare global {
       onSaveContinue?: (callback: () => void) => () => void
       continueSaved?: () => void
       quit?: () => Promise<void>
+      /**
+       * Development Electron only: quit and start this same dev process again.
+       * Packaged builds return ok: false and do not relaunch. Not a renderer reload.
+       */
+      restartDevApp?: () => Promise<{
+        ok: boolean
+        reason?: string
+        error?: string
+        scheduled?: boolean
+        kind?: 'process-relaunch'
+      }>
       exitFullScreen?: () => Promise<boolean>
       setFullScreen?: (enabled: boolean) => Promise<boolean>
       isFullScreen?: () => Promise<boolean>
