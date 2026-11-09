@@ -12,6 +12,11 @@ export const APP_VERSION_LABEL = `v${APP_VERSION}`
 /** Short milestone log — newest first — so progress is visible in-app. */
 export const APP_RELEASES: ReadonlyArray<{ version: string; summary: string }> = [
   {
+    version: '0.3.98',
+    summary:
+      'Android TV and Fire TV use a TV-sized layout, keep section names on the left, and still show Sections on a short Home screen. Press OK on the Library passphrase to open the keyboard. A movie that lands on Atlantic\'s error page leaves it and tries another source. Stream Corner\'s legal block tells you to go back. TV Series and Kids Shows sync before the Cloudflare backups, and the first titles appear while the rest is still loading. When a subtitle is moving but the picture is blank, playback stays on H.264 when that quality exists. On Android, StreamCorner\'s sports list waits until the match cards are on the page before saving the catalog.',
+  },
+  {
     version: '0.3.97',
     summary:
       'Closing system PiP stops playback and closes the task; expanding or stashing keeps playback going. Catalog updates continue in the app and PiP, cancel on true exit, and remove their notification on exit or completion. Catalog shelves save safely and playback progress flushes before closing. Android section changes keep the floating Gecko player visible.',
