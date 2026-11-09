@@ -28,7 +28,8 @@
     "test:progress-sync": "node scripts/progress-sync-sandbox.cjs",
     "test:progress-sync:serve": "node scripts/progress-sync-sandbox.cjs --serve",
     "test:recommendations": "tsx scripts/eval-recommendations.mts",
-    "test:tv-density": "node scripts/tv-density-check.mjs"
+    "test:tv-density": "node scripts/tv-density-check.mjs",
+    "test:dev-restart": "node --experimental-strip-types --test scripts/dev-restart.test.ts"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.2",

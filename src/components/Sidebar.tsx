@@ -7,6 +7,7 @@ import { usePlayback } from '../context/PlaybackContext'
 import { getPipLayout, useWebBrowser } from '../context/WebBrowserContext'
 import { FORCE_SAVE_CONTINUE_EVENT } from '../lib/continueWatching'
 import { APP_RELEASES, APP_VERSION_LABEL } from '../lib/appVersion'
+import { devRestartFailureNote, shouldOfferDevAppRestart } from '../lib/devRestartMenu'
 import { isKidsModeEnabled, subscribeKidsMode } from '../lib/kidsMode'
 import {
   isMinimizeToPipEnabled,
@@ -41,6 +42,7 @@ export function Sidebar() {
   const { mode: webMode, minimizeActiveEmbedToPip, syncBrowserView } = useWebBrowser()
   const pipOpen = mode === 'pip'
   const [brandMenuOpen, setBrandMenuOpen] = useState(false)
+  const [devRestartNote, setDevRestartNote] = useState<string | null>(null)
   const [sectionsMenuOpen, setSectionsMenuOpen] = useState(false)
   const [androidMenuStyle, setAndroidMenuStyle] = useState<CSSProperties | undefined>()
   const [kidsMode, setKidsMode] = useState(isKidsModeEnabled)
@@ -284,6 +286,31 @@ export function Sidebar() {
   function exitApp() {
     setBrandMenuOpen(false)
     void window.signalDesktop?.quit?.()
+  }
+
+  const offerDevRestart = shouldOfferDevAppRestart({
+    devBuild: import.meta.env.DEV,
+    androidShell: isAndroidShell,
+    desktopBridge: typeof window.signalDesktop?.restartDevApp === 'function',
+  })
+
+  async function restartDevAppFromMenu() {
+    setDevRestartNote(null)
+    const restart = window.signalDesktop?.restartDevApp
+    if (!restart) {
+      setDevRestartNote('Restart is only available in the desktop dev app.')
+      return
+    }
+    try {
+      const result = await restart()
+      if (result?.ok) {
+        setBrandMenuOpen(false)
+        return
+      }
+      setDevRestartNote(devRestartFailureNote(result?.reason))
+    } catch (err) {
+      setDevRestartNote(err instanceof Error ? err.message : 'Could not restart the dev app.')
+    }
   }
 
   function minimizeToTaskbar() {
@@ -667,6 +694,22 @@ export function Sidebar() {
               <button type="button" className="brand-menu-item" role="menuitem" onClick={minimizeToTaskbar}>
                 Minimize to taskbar
               </button>
+              {offerDevRestart ? (
+                <button
+                  type="button"
+                  className="brand-menu-item"
+                  role="menuitem"
+                  title="Quit this development Electron process and start it again with the same arguments. This is not a page reload."
+                  onClick={() => void restartDevAppFromMenu()}
+                >
+                  Restart dev app
+                </button>
+              ) : null}
+              {offerDevRestart && devRestartNote ? (
+                <p className="brand-menu-updater" role="status">
+                  {devRestartNote}
+                </p>
+              ) : null}
               <button type="button" className="brand-menu-item" role="menuitem" onClick={exitApp}>
                 Exit
               </button>
