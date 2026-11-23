@@ -7,6 +7,7 @@ import { usePlayback } from '../context/PlaybackContext'
 import { getPipLayout, useWebBrowser } from '../context/WebBrowserContext'
 import { FORCE_SAVE_CONTINUE_EVENT } from '../lib/continueWatching'
 import { APP_RELEASES, APP_VERSION_LABEL } from '../lib/appVersion'
+import { isChristmasLogoSeason, jiyuBrandLogoSrc } from '../lib/brandLogo'
 import { isKidsModeEnabled, subscribeKidsMode } from '../lib/kidsMode'
 import {
   isMinimizeToPipEnabled,
@@ -539,7 +540,9 @@ export function Sidebar() {
     <aside
       className={`sidebar ${pipOpen ? 'sidebar-pip-open' : ''} ${
         isAndroidShell ? 'sidebar-android' : ''
-      } ${sectionsMenuOpen ? 'sections-menu-open' : ''}`}
+      } ${sectionsMenuOpen ? 'sections-menu-open' : ''}${
+        isChristmasLogoSeason() ? ' is-christmas' : ''
+      }`}
     >
       <div className="sidebar-glow" aria-hidden />
 
@@ -548,7 +551,7 @@ export function Sidebar() {
           <div className="brand-wrap" ref={brandRef}>
           <button
             type="button"
-            className="brand brand-btn"
+            className={`brand brand-btn${isChristmasLogoSeason() ? ' is-christmas' : ''}`}
             aria-haspopup={isAndroidShell ? undefined : 'menu'}
             aria-expanded={isAndroidShell ? undefined : brandMenuOpen}
             aria-label={isAndroidShell ? 'Home' : 'Jiyu menu'}
@@ -562,10 +565,118 @@ export function Sidebar() {
             }}
           >
             <span className="brand-logo-wrap">
-              <img className="brand-logo" src="./jiyu-logo.png" alt="" width={40} height={40} />
+              <img
+                className="brand-logo"
+                src={jiyuBrandLogoSrc()}
+                alt=""
+                width={40}
+                height={40}
+              />
             </span>
             <div className="brand-copy">
-              <p className="brand-name">Jiyu</p>
+              <p
+                className={`brand-name${isChristmasLogoSeason() ? ' is-christmas' : ''}`}
+              >
+                {isChristmasLogoSeason() ? (
+                  <span className="brand-xmas-word">
+                    {/* Back loop: string around the word. */}
+                    <span className="brand-xmas-lights is-back" aria-hidden>
+                      <svg
+                        viewBox="0 0 200 72"
+                        width="100%"
+                        height="100%"
+                        preserveAspectRatio="none"
+                        focusable="false"
+                      >
+                        <path
+                          d="M16 30 C42 10 70 22 100 12 C132 4 168 14 186 28
+                             C196 38 192 50 180 56
+                             C148 68 120 52 100 60
+                             C72 68 36 62 16 50
+                             C6 42 8 34 16 30"
+                          fill="none"
+                          stroke="#4e342e"
+                          strokeWidth="1.7"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                        <ellipse cx="28" cy="18" rx="3" ry="3.8" fill="#ff5252"><animate attributeName="opacity" values="1;0.4;1" dur="1.35s" begin="0s" repeatCount="indefinite"/></ellipse>
+                        <circle cx="28" cy="14.4" r="1.1" fill="#ffc107" />
+                        <path d="M58 16 C55 20 55 25 58 28 C61 25 61 20 58 16Z" fill="#e53935"><animate attributeName="opacity" values="1;0.4;1" dur="1.35s" begin="0.25s" repeatCount="indefinite"/></path>
+                        <ellipse cx="58" cy="16.8" rx="1.4" ry="1" fill="#81c784" />
+                        <ellipse cx="90" cy="11" rx="3" ry="3.8" fill="#69f0ae"><animate attributeName="opacity" values="1;0.4;1" dur="1.35s" begin="0.5s" repeatCount="indefinite"/></ellipse>
+                        <circle cx="90" cy="7.4" r="1.1" fill="#ffc107" />
+                        <ellipse cx="128" cy="10" rx="3" ry="3.8" fill="#ffd54f"><animate attributeName="opacity" values="1;0.4;1" dur="1.35s" begin="0.75s" repeatCount="indefinite"/></ellipse>
+                        <circle cx="128" cy="6.4" r="1.1" fill="#ffc107" />
+                        <path d="M162 18 C159 22 159 27 162 30 C165 27 165 22 162 18Z" fill="#c62828"><animate attributeName="opacity" values="1;0.4;1" dur="1.35s" begin="1s" repeatCount="indefinite"/></path>
+                        <ellipse cx="162" cy="18.8" rx="1.4" ry="1" fill="#a5d6a7" />
+                        <ellipse cx="188" cy="30" rx="3" ry="3.8" fill="#40c4ff"><animate attributeName="opacity" values="1;0.4;1" dur="1.35s" begin="0.15s" repeatCount="indefinite"/></ellipse>
+                        <circle cx="188" cy="26.4" r="1.1" fill="#ffc107" />
+                        <ellipse cx="178" cy="56" rx="3" ry="3.8" fill="#ff8a80"><animate attributeName="opacity" values="1;0.4;1" dur="1.35s" begin="0.4s" repeatCount="indefinite"/></ellipse>
+                        <circle cx="178" cy="52.4" r="1.1" fill="#ffc107" />
+                        <ellipse cx="132" cy="62" rx="3" ry="3.8" fill="#ffd54f"><animate attributeName="opacity" values="1;0.4;1" dur="1.35s" begin="0.65s" repeatCount="indefinite"/></ellipse>
+                        <circle cx="132" cy="58.4" r="1.1" fill="#ffc107" />
+                        <path d="M96 58 C93 62 93 67 96 70 C99 67 99 62 96 58Z" fill="#e53935"><animate attributeName="opacity" values="1;0.4;1" dur="1.35s" begin="0.9s" repeatCount="indefinite"/></path>
+                        <ellipse cx="96" cy="58.8" rx="1.4" ry="1" fill="#81c784" />
+                        <ellipse cx="52" cy="62" rx="3" ry="3.8" fill="#69f0ae"><animate attributeName="opacity" values="1;0.4;1" dur="1.35s" begin="0.2s" repeatCount="indefinite"/></ellipse>
+                        <circle cx="52" cy="58.4" r="1.1" fill="#ffc107" />
+                        <ellipse cx="18" cy="46" rx="3" ry="3.8" fill="#ff5252"><animate attributeName="opacity" values="1;0.4;1" dur="1.35s" begin="0.85s" repeatCount="indefinite"/></ellipse>
+                        <circle cx="18" cy="42.4" r="1.1" fill="#ffc107" />
+                      </svg>
+                    </span>
+                    {/* Front strand: drapes across the letters. */}
+                    <span className="brand-xmas-lights is-front" aria-hidden>
+                      <svg
+                        viewBox="0 0 200 40"
+                        width="100%"
+                        height="100%"
+                        preserveAspectRatio="none"
+                        focusable="false"
+                      >
+                        <path
+                          d="M4 28 C40 18 72 34 104 24 C136 14 164 32 196 26"
+                          fill="none"
+                          stroke="#4e342e"
+                          strokeWidth="1.5"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                        <ellipse cx="36" cy="22" rx="2.6" ry="3.3" fill="#40c4ff"><animate attributeName="opacity" values="1;0.4;1" dur="1.35s" begin="0.1s" repeatCount="indefinite"/></ellipse>
+                        <circle cx="36" cy="18.8" r="1" fill="#ffc107" />
+                        <ellipse cx="82" cy="28" rx="2.6" ry="3.3" fill="#ff5252"><animate attributeName="opacity" values="1;0.4;1" dur="1.35s" begin="0.45s" repeatCount="indefinite"/></ellipse>
+                        <circle cx="82" cy="24.8" r="1" fill="#ffc107" />
+                        <path d="M128 20 C125.5 23.5 125.5 27.5 128 30 C130.5 27.5 130.5 23.5 128 20Z" fill="#c62828"><animate attributeName="opacity" values="1;0.4;1" dur="1.35s" begin="0.7s" repeatCount="indefinite"/></path>
+                        <ellipse cx="128" cy="20.7" rx="1.2" ry="0.85" fill="#a5d6a7" />
+                        <ellipse cx="168" cy="28" rx="2.6" ry="3.3" fill="#ffd54f"><animate attributeName="opacity" values="1;0.4;1" dur="1.35s" begin="0.3s" repeatCount="indefinite"/></ellipse>
+                        <circle cx="168" cy="24.8" r="1" fill="#ffc107" />
+                        <ellipse cx="192" cy="26" rx="2.6" ry="3.3" fill="#69f0ae"><animate attributeName="opacity" values="1;0.4;1" dur="1.35s" begin="0.95s" repeatCount="indefinite"/></ellipse>
+                        <circle cx="192" cy="22.8" r="1" fill="#ffc107" />
+                      </svg>
+                    </span>
+                    <span className="brand-xmas-letters">
+                      <span className="brand-name-j">
+                        <span className="brand-santa-hat" aria-hidden>
+                          <svg viewBox="0 0 28 26" width="100%" height="100%" focusable="false">
+                            {/* Narrow brim perched on the J crown — keep the stem readable. */}
+                            <ellipse cx="14" cy="21.5" rx="8.2" ry="3.1" fill="#f5f5f5" />
+                            <path
+                              d="M8.5 20.5 C10 10 14.5 3.2 20 4.5 C21.2 9 18.8 17 17.2 20.5 Z"
+                              fill="#c62828"
+                            />
+                            <path d="M15.5 5 C18 3 22 4.8 22.8 7.2 C19.5 7.2 17.2 9.5 14.8 10 Z" fill="#e53935" />
+                            <circle cx="22.6" cy="7.4" r="2.5" fill="#fff" />
+                            <ellipse cx="14" cy="21.8" rx="8.2" ry="1.8" fill="#fff" />
+                          </svg>
+                        </span>
+                        <span className="brand-name-letter">J</span>
+                      </span>
+                      <span className="brand-name-letter">iyu</span>
+                    </span>
+                  </span>
+                ) : (
+                  'Jiyu'
+                )}
+              </p>
               <p className="brand-tag">
                 <span className="brand-tag-kanji">自由</span>
                 <span className="brand-tag-dot" aria-hidden />

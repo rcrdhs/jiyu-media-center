@@ -57,6 +57,8 @@ import {
   resolveFutbolXBackupPlay,
   resolveFutbolXPlay,
 } from '../lib/futbolX'
+import { isStreamCornerHost, normalizeStreamCornerWatchUrl } from '../lib/streamCorner'
+import { isTimStreamsCatalogItem, TIM_STREAMS_MEDIA_REFERER } from '../lib/timStreams'
 import {
   isLivextvReplayCatalogItem,
   resolveLivextvReplayPlay,
@@ -66,6 +68,11 @@ import {
   resolveFullmatchShowsPlayForDevice,
   tizenNativeReplayRows,
 } from '../lib/fullmatchShows'
+import { isHoofootCatalogItem, resolveHoofootPlay } from '../lib/hoofoot'
+import {
+  isFootballOrginCatalogItem,
+  resolveFootballOrginPlay,
+} from '../lib/footballOrgin'
 import { isTizenFrameBlockedEmbed, tizenExtractEmbed } from '../lib/tizenRelay'
 import {
   isNativeMedia3PlaybackItem,
@@ -76,6 +83,24 @@ import {
   toAutoplayUrl,
 } from '../lib/webBrowser'
 import { prefetchYouTubeLive, resolveYouTubeLivePlay } from '../lib/youtubeLive'
+import {
+  isNationwideChannelId,
+  isNationwideHlsUrl,
+  NATIONWIDE_HLS_URL,
+  nationwideYoutubeFallbackUrl,
+  probeNationwideHls,
+} from '../lib/nationwideLive'
+import {
+  cvmYoutubeFallbackUrl,
+  isCvmChannelId,
+  isCvmVimeoUrl,
+} from '../lib/cvmLive'
+import {
+  isTvjChannelId,
+  isTvjHlsUrl,
+  TVJ_HLS_URL,
+  tvjYoutubeFallbackUrl,
+} from '../lib/tvjLive'
 import { isVimeoLiveEventUrl, resolveVimeoLiveHls } from '../lib/vimeoLive'
 import {
   isTorrentPlaybackAvailable,
@@ -98,6 +123,19 @@ import type { StreamItem, StreamPlaylistItem, TorrentStreamResult } from '../typ
 
 /** Live channels / sports embeds: show "Unwrapping stream…" from tap to first frame. */
 function isLiveUnwrapItem(item: StreamItem): boolean {
+  // Nationwide / CVM use a quiet status line (HLS or YouTube fallback) — never unwrap cover.
+  if (isNationwideChannelId(item.id) || isNationwideHlsUrl(item.url)) return false
+  if (isTvjChannelId(item.id) || isTvjHlsUrl(item.url)) return false
+  if (isCvmChannelId(item.id) || isCvmVimeoUrl(item.url) || isVimeoLiveEventUrl(item.url || '')) {
+    return false
+  }
+  if (
+    /youtube\.com\/@(?:nnn-RADIOLIVE|nationwidenewsnetwork|cvm_television|cvmtvnews|TelevisionJamaica)/i.test(
+      item.url || '',
+    )
+  ) {
+    return false
+  }
   if (isStreamedCatalogItem(item)) return true
   if (isYouTubeUrl(item.url) && (item.tags?.includes('local') || item.id?.startsWith('local-'))) {
     return true
@@ -313,8 +351,22 @@ export function WatchPage() {
 
       // Live: warm everything in parallel with the resolve below — Gecko cold
       // start (Android) and the YouTube live id (deduped with the branch await).
-      if (isLiveUnwrapItem(item!)) {
-        setLoadStatus(UNWRAP_STATUS)
+      // Nationwide / CVM use a quiet status line (no YouTube unwrap cover).
+      if (isNationwideChannelId(item!.id) || isNationwideHlsUrl(item!.url)) {
+        setLoadStatus('Checking Nationwide…')
+      } else if (isTvjChannelId(item!.id) || isTvjHlsUrl(item!.url)) {
+        setLoadStatus('Checking TVJ…')
+        prefetchYouTubeLive(tvjYoutubeFallbackUrl(item!.detailUrl))
+      } else if (isCvmChannelId(item!.id) || isCvmVimeoUrl(item!.url) || isVimeoLiveEventUrl(item!.url)) {
+        setLoadStatus('Checking CVM…')
+        prefetchYouTubeLive(cvmYoutubeFallbackUrl(item!.detailUrl))
+      } else if (isLiveUnwrapItem(item!)) {
+        setLoadStatus(
+          isYouTubeUrl(item!.url) &&
+            (item!.tags?.includes('local') || item!.id?.startsWith('local-'))
+            ? 'Checking live…'
+            : UNWRAP_STATUS,
+        )
         void androidBrowserPrewarm()
         if (isYouTubeUrl(item!.url)) prefetchYouTubeLive(item!.url)
       }
@@ -377,6 +429,8 @@ export function WatchPage() {
         if (
           isLivextvReplayCatalogItem(item!) ||
           isFullmatchShowsCatalogItem(item!) ||
+          isHoofootCatalogItem(item!) ||
+          isFootballOrginCatalogItem(item!) ||
           isStreamedCatalogItem(item!) ||
           (isYouTubeUrl(item!.url) &&
             (item!.tags?.includes('local') || item!.id?.startsWith('local-')))
@@ -611,10 +665,11 @@ export function WatchPage() {
         const keepOthers =
           guard.awaitingAdd || guard.slotsLen > 1 || guard.mode === 'multi'
         if (!keepOthers) clearWebSurfacesForWatch()
+        const referrer = item!.httpReferrer || 'https://www.futbol-x.xyz/'
         const hlsItem = {
           ...item!,
           url: signed.url,
-          httpReferrer: item!.httpReferrer || 'https://www.futbol-x.xyz/',
+          httpReferrer: referrer,
           tags: [
             ...new Set(
               [...(item!.tags ?? []), 'live', 'hls', 'futbolx'].filter((t) => t !== 'web-embed'),
@@ -628,9 +683,126 @@ export function WatchPage() {
         })
         if (keepOthers) {
           navigate('/multiview', { replace: true })
+        } else if (isAndroidMedia3Host()) {
+          // Home + GlobalPlayer HLS often fails on phone; Media3 keeps Futbol-x alive.
+          navigate('/native-stream', {
+            replace: true,
+            state: {
+              from: returnTo || '/section/sports',
+              title: item!.title,
+              mediaUrl: signed.url,
+              referrer,
+              poster: item!.poster,
+              category: item!.category,
+              continueId: item!.id,
+            },
+          })
         } else {
           navigate('/', { replace: true })
         }
+        return
+      }
+
+      // Tim Streams: shoewiki.click embeds resolve to short-lived clear HLS.
+      // Android sniffs Media3 first; otherwise open the chrome-less player in /web.
+      if (isTimStreamsCatalogItem(item!)) {
+        const playUrl = String(item!.url || '').trim()
+        if (!playUrl) {
+          setError('Could not load Tim Streams event')
+          return
+        }
+        const guard = multiviewGuardRef.current
+        const keepOthers =
+          guard.awaitingAdd || guard.slotsLen > 1 || guard.mode === 'multi'
+        if (!keepOthers) clearWebSurfacesForWatch()
+        let media3Tried = false
+        if (!keepOthers && isAndroidMedia3Host() && canAndroidResolveEmbedMedia()) {
+          media3Tried = true
+          setLoadStatus(UNWRAP_STATUS)
+          const unwrapped = await androidResolveEmbedMedia(
+            playUrl,
+            ANDROID_UNWRAP_TIMEOUT_MS,
+          )
+          if (cancelled) return
+          if (unwrapped.ok && unwrapped.mediaUrl) {
+            setError(null)
+            const referrer =
+              unwrapped.referrer || item!.httpReferrer || TIM_STREAMS_MEDIA_REFERER
+            const hlsItem = {
+              ...item!,
+              url: unwrapped.mediaUrl,
+              httpReferrer: referrer,
+              tags: [
+                ...new Set(
+                  [...(item!.tags ?? []), 'live', 'media3'].filter(
+                    (t) => t !== 'web-embed',
+                  ),
+                ),
+              ],
+            }
+            play(hlsItem, {
+              forceFull: true,
+              replace: true,
+              returnTo: returnTo || '/section/sports',
+            })
+            navigate('/native-stream', {
+              replace: true,
+              state: {
+                from: returnTo || '/section/sports',
+                title: item!.title,
+                mediaUrl: unwrapped.mediaUrl,
+                referrer,
+                poster: item!.poster,
+                category: item!.category,
+                continueId: item!.id,
+              },
+            })
+            return
+          }
+          void media3Hide({ stop: true })
+        }
+        const webItem = {
+          ...item!,
+          url: playUrl,
+          tags: [...new Set([...(item!.tags ?? []), 'web-embed', 'live'])],
+        }
+        if (keepOthers) {
+          play(webItem, {
+            forceFull: true,
+            replace: false,
+            returnTo: returnTo || '/section/sports',
+          })
+          navigate('/multiview', { replace: true })
+          return
+        }
+        navigate(`/web?url=${encodeURIComponent(playUrl)}`, {
+          replace: true,
+          state: {
+            from: returnTo || '/section/sports',
+            playerMode: 'embed',
+            pipOnBack: true,
+            skipUnwrapCover: media3Tried,
+            continueWatch: {
+              id: item!.id,
+              title: item!.title,
+              poster: item!.poster,
+              category: item!.category,
+              playlistIndex: 0,
+              detailUrl: item!.detailUrl || item!.url,
+              playUrl,
+              transport: item!.transport,
+              sourceKind: item!.sourceKind,
+              source: item!.source,
+              sportsAltSources: item!.sportsAltSources,
+              sportsSourceIndex: 0,
+            },
+          },
+        })
+        play(webItem, {
+          forceFull: true,
+          replace: true,
+          returnTo: returnTo || '/section/sports',
+        })
         return
       }
 
@@ -644,7 +816,7 @@ export function WatchPage() {
           Boolean(item!.id?.startsWith('streamcorner-')) ||
           Boolean(item!.tags?.includes('streamcorner'))
         const resolved = isCorner
-          ? { ok: true as const, url: item!.url }
+          ? { ok: true as const, url: normalizeStreamCornerWatchUrl(item!.url) }
           : await resolveStreamedPlay(item!)
         if (cancelled) return
         if (!resolved.ok) {
@@ -652,10 +824,11 @@ export function WatchPage() {
           const fx = await resolveFutbolXBackupPlay(item!)
           if (cancelled) return
           if (fx.ok) {
+            const referrer = item!.httpReferrer || 'https://www.futbol-x.xyz/'
             const hlsItem = {
               ...item!,
               url: fx.url,
-              httpReferrer: item!.httpReferrer || 'https://www.futbol-x.xyz/',
+              httpReferrer: referrer,
               tags: [
                 ...new Set(
                   [...(item!.tags ?? []), 'live', 'hls', 'futbolx'].filter(
@@ -669,7 +842,22 @@ export function WatchPage() {
               replace: true,
               returnTo: returnTo || '/section/sports',
             })
-            navigate('/', { replace: true })
+            if (isAndroidMedia3Host()) {
+              navigate('/native-stream', {
+                replace: true,
+                state: {
+                  from: returnTo || '/section/sports',
+                  title: item!.title,
+                  mediaUrl: fx.url,
+                  referrer,
+                  poster: item!.poster,
+                  category: item!.category,
+                  continueId: item!.id,
+                },
+              })
+            } else {
+              navigate('/', { replace: true })
+            }
             return
           }
           setError(resolved.error || 'Could not load StreamCorner match')
@@ -680,14 +868,29 @@ export function WatchPage() {
           guard.awaitingAdd || guard.slotsLen > 1 || guard.mode === 'multi'
         if (!keepOthers) clearWebSurfacesForWatch()
 
+        // StreamCorner: skip early Media3 unwrap. Off-screen probe leaves the SPA
+        // idle on SELECT A SOURCE; open full-size /web so native source+PLAY taps
+        // can start Bitmovin. WebBrowser still late-promotes when m3u8 appears.
+        let media3Tried = false
+        let cornerHost = isCorner
+        try {
+          cornerHost =
+            isCorner || isStreamCornerHost(new URL(resolved.url).hostname)
+        } catch {
+          /* keep isCorner */
+        }
         if (
           !keepOthers &&
+          !cornerHost &&
           isAndroidMedia3Host() &&
           canAndroidResolveEmbedMedia()
         ) {
+          media3Tried = true
           setLoadStatus(UNWRAP_STATUS)
-          // Gecko sniffs the media URL while we stay on the loading screen.
-          const unwrapped = await androidResolveEmbedMedia(resolved.url, ANDROID_UNWRAP_TIMEOUT_MS)
+          const unwrapped = await androidResolveEmbedMedia(
+            resolved.url,
+            ANDROID_UNWRAP_TIMEOUT_MS,
+          )
           if (cancelled) return
           if (unwrapped.ok && unwrapped.mediaUrl) {
             setError(null)
@@ -748,12 +951,71 @@ export function WatchPage() {
             from: returnTo || '/section/sports',
             playerMode: 'embed',
             pipOnBack: true,
+            // Media3 already spent the one unwrap for this tap.
+            skipUnwrapCover: media3Tried,
             continueWatch: {
               id: item!.id,
               title: item!.title,
               poster: item!.poster,
               category: item!.category,
               playlistIndex: 0,
+              detailUrl: item!.detailUrl || item!.url,
+              playUrl: resolved.url,
+              transport: item!.transport,
+              sourceKind: item!.sourceKind,
+              source: item!.source,
+              sportsAltSources: item!.sportsAltSources,
+              sportsSourceIndex: 0,
+            },
+          },
+        })
+        play(webItem, {
+          forceFull: true,
+          replace: true,
+          returnTo: returnTo || '/section/sports',
+        })
+        return
+      }
+
+      // FootballOrgin EPL / Bundesliga / Serie A highlights → YouTube / ok.ru embed.
+      if (isFootballOrginCatalogItem(item!)) {
+        const resolved = await resolveFootballOrginPlay(item!)
+        if (cancelled) return
+        if (!resolved.ok) {
+          setError(resolved.error || 'Could not load highlights')
+          return
+        }
+        const guard = multiviewGuardRef.current
+        const keepOthers =
+          guard.awaitingAdd || guard.slotsLen > 1 || guard.mode === 'multi'
+        if (!keepOthers) clearWebSurfacesForWatch()
+        const webItem = {
+          ...item!,
+          url: resolved.url,
+          tags: [
+            ...new Set([...(item!.tags ?? []), 'web-embed', 'replay', 'footballorgin']),
+          ],
+        }
+        if (keepOthers) {
+          play(webItem, {
+            forceFull: true,
+            replace: false,
+            returnTo: returnTo || '/section/sports',
+          })
+          navigate('/multiview', { replace: true })
+          return
+        }
+        navigate(`/web?url=${encodeURIComponent(resolved.url)}`, {
+          replace: true,
+          state: {
+            from: returnTo || '/section/sports',
+            playerMode: 'embed',
+            pipOnBack: true,
+            continueWatch: {
+              id: item!.id,
+              title: item!.title,
+              poster: item!.poster,
+              category: item!.category,
               detailUrl: item!.detailUrl || item!.url,
               playUrl: resolved.url,
               transport: item!.transport,
@@ -767,6 +1029,43 @@ export function WatchPage() {
           replace: true,
           returnTo: returnTo || '/section/sports',
         })
+        return
+      }
+
+      // Hoofoot front-page football highlights → dailyvid HLS.
+      if (isHoofootCatalogItem(item!)) {
+        const resolved = await resolveHoofootPlay(item!)
+        if (cancelled) return
+        if (!resolved.ok) {
+          setError(resolved.error || 'Could not load highlights')
+          return
+        }
+        const guard = multiviewGuardRef.current
+        const keepOthers =
+          guard.awaitingAdd || guard.slotsLen > 1 || guard.mode === 'multi'
+        if (!keepOthers) clearWebSurfacesForWatch()
+        if (window.signalDesktop?.setPlaybackHeaders) {
+          void window.signalDesktop.setPlaybackHeaders({
+            url: resolved.url,
+            referrer: resolved.referer,
+          })
+        }
+        play(
+          {
+            ...item!,
+            url: resolved.url,
+            httpReferrer: resolved.referer,
+            tags: [
+              ...new Set([...(item!.tags ?? []), 'hls', 'replay', 'hoofoot']),
+            ].filter((t) => t !== 'web-embed'),
+            transport: 'direct',
+          },
+          {
+            forceFull: true,
+            replace: !keepOthers,
+            returnTo: returnTo || '/section/sports',
+          },
+        )
         return
       }
 
@@ -784,17 +1083,31 @@ export function WatchPage() {
           guard.awaitingAdd || guard.slotsLen > 1 || guard.mode === 'multi'
         if (!keepOthers) clearWebSurfacesForWatch()
         if (resolved.mode === 'hls') {
+          if (window.signalDesktop?.setPlaybackHeaders) {
+            void window.signalDesktop.setPlaybackHeaders({
+              url: resolved.url,
+              referrer: resolved.referer,
+            })
+          }
+          const nativeParts = tizenNativeReplayRows(item!.id, resolved.replayParts, {
+            url: resolved.url,
+          })
           play(
             {
               ...item!,
               url: resolved.url,
               httpReferrer: resolved.referer,
-              // Part picker: each row is extracted (relay /x) when picked; the row
-              // playing now holds this stream. Full match is the default part.
-              playlist: tizenNativeReplayRows(item!.id, resolved.replayParts, { url: resolved.url }),
-              tags: [...new Set([...(item!.tags ?? []), 'hls', 'replay', 'relay-hls'])].filter(
-                (t) => t !== 'web-embed',
-              ),
+              // Part picker: Playmate HLS (or Samsung relay /x) for the active row;
+              // other parts re-resolve when picked.
+              ...(nativeParts ? { playlist: nativeParts } : {}),
+              tags: [
+                ...new Set([
+                  ...(item!.tags ?? []),
+                  'hls',
+                  'replay',
+                  ...(isTizenTv() ? ['relay-hls'] : ['fms-hls']),
+                ]),
+              ].filter((t) => t !== 'web-embed'),
               transport: 'direct',
             },
             {
@@ -942,7 +1255,183 @@ export function WatchPage() {
         return
       }
 
-      // Local YouTube channels (Nationwide / CVM / TVJ): resolve @handle/live →
+      // TVJ: univtec HLS → native player; YouTube /live if the public m3u8 is down.
+      if (isTvjChannelId(item!.id) || isTvjHlsUrl(item!.url)) {
+        const hlsUrl = isTvjHlsUrl(item!.url) ? item!.url : TVJ_HLS_URL
+        setLoadStatus('Checking TVJ…')
+        const live = await probeNationwideHls(hlsUrl)
+        if (cancelled) return
+        if (live) {
+          setLoadStatus(null)
+          play(
+            {
+              ...item!,
+              url: hlsUrl,
+              tags: [...new Set([...(item!.tags ?? []), 'hls', 'live'])],
+            },
+            { forceFull: true, returnTo: returnTo || '/' },
+          )
+          return
+        }
+        setLoadStatus('Checking TVJ on YouTube…')
+        void androidBrowserPrewarm()
+        const ytLive = tvjYoutubeFallbackUrl(item!.detailUrl)
+        prefetchYouTubeLive(ytLive)
+        const resolved = await withTimeout(
+          resolveYouTubeLivePlay(ytLive),
+          12_000,
+          'TVJ live check timed out',
+        ).catch((err) => ({
+          ok: false as const,
+          error: err instanceof Error ? err.message : 'TVJ live check failed',
+        }))
+        if (cancelled) return
+        if (!resolved.ok) {
+          setLoadStatus(null)
+          setError(resolved.error || 'TVJ is not live right now')
+          return
+        }
+        setLoadStatus('Starting TVJ…')
+        const playUrl = isAndroidInAppBrowser() || isTizenTv()
+          ? resolved.embedUrl || resolved.watchUrl || toAutoplayUrl(ytLive)
+          : resolved.watchUrl || toAutoplayUrl(ytLive)
+        const webItem = {
+          ...item!,
+          url: playUrl,
+          detailUrl: item!.detailUrl || ytLive,
+          tags: [...new Set([...(item!.tags ?? []), 'web-embed', 'live', 'youtube'])],
+        }
+        const guard = multiviewGuardRef.current
+        const keepOthers =
+          guard.awaitingAdd || guard.slotsLen > 1 || guard.mode === 'multi'
+        if (!keepOthers) clearWebSurfacesForWatch()
+        if (keepOthers) {
+          play(webItem, {
+            forceFull: true,
+            replace: false,
+            returnTo: returnTo || '/',
+          })
+          navigate('/multiview', { replace: true })
+          return
+        }
+        navigate(`/web?url=${encodeURIComponent(playUrl)}`, {
+          replace: true,
+          state: {
+            from: returnTo || '/',
+            playerMode: 'embed',
+            pipOnBack: true,
+            continueWatch: {
+              id: item!.id,
+              title: item!.title,
+              poster: item!.poster,
+              category: item!.category,
+              playlistIndex: 0,
+              detailUrl: item!.detailUrl || ytLive,
+              playUrl,
+              transport: item!.transport,
+              sourceKind: item!.sourceKind,
+              source: item!.source,
+            },
+          },
+        })
+        play(webItem, {
+          forceFull: true,
+          replace: true,
+          returnTo: returnTo || '/',
+        })
+        return
+      }
+
+      // Nationwide: Worker HLS → native player (no YouTube "Unwrapping stream…" cover).
+      // If the Worker says offline, fall back to the YouTube /live handle.
+      if (isNationwideChannelId(item!.id) || isNationwideHlsUrl(item!.url)) {
+        // Always the .m3u8 master — short /nnn paths break Android HLS detection.
+        const hlsUrl = NATIONWIDE_HLS_URL
+        const live = await probeNationwideHls(hlsUrl)
+        if (cancelled) return
+        if (live) {
+          setLoadStatus(null)
+          play(
+            {
+              ...item!,
+              url: hlsUrl,
+              tags: [...new Set([...(item!.tags ?? []), 'hls', 'live'])],
+            },
+            { forceFull: true, returnTo: returnTo || '/' },
+          )
+          return
+        }
+        // Not on the Worker — try YouTube /live (may still be offline).
+        // Keep "Checking Nationwide…" — never flip to Unwrapping stream….
+        setLoadStatus('Checking Nationwide…')
+        void androidBrowserPrewarm()
+        const ytLive = nationwideYoutubeFallbackUrl(item!.detailUrl)
+        prefetchYouTubeLive(ytLive)
+        const resolved = await withTimeout(
+          resolveYouTubeLivePlay(ytLive),
+          12_000,
+          'Nationwide live check timed out',
+        ).catch((err) => ({
+          ok: false as const,
+          error: err instanceof Error ? err.message : 'Nationwide live check failed',
+        }))
+        if (cancelled) return
+        if (!resolved.ok) {
+          setLoadStatus(null)
+          setError(resolved.error || 'Nationwide is not live right now')
+          return
+        }
+        setLoadStatus('Starting Nationwide…')
+        const playUrl = isAndroidInAppBrowser() || isTizenTv()
+          ? resolved.embedUrl || resolved.watchUrl || toAutoplayUrl(ytLive)
+          : resolved.watchUrl || toAutoplayUrl(ytLive)
+        const webItem = {
+          ...item!,
+          url: playUrl,
+          tags: [...new Set([...(item!.tags ?? []), 'web-embed', 'live', 'youtube'])],
+        }
+        const guard = multiviewGuardRef.current
+        const keepOthers =
+          guard.awaitingAdd || guard.slotsLen > 1 || guard.mode === 'multi'
+        if (!keepOthers) clearWebSurfacesForWatch()
+        if (keepOthers) {
+          play(webItem, {
+            forceFull: true,
+            replace: false,
+            returnTo: returnTo || '/',
+          })
+          navigate('/multiview', { replace: true })
+          return
+        }
+        navigate(`/web?url=${encodeURIComponent(playUrl)}`, {
+          replace: true,
+          state: {
+            from: returnTo || '/',
+            playerMode: 'embed',
+            pipOnBack: true,
+            continueWatch: {
+              id: item!.id,
+              title: item!.title,
+              poster: item!.poster,
+              category: item!.category,
+              playlistIndex: 0,
+              detailUrl: item!.detailUrl || ytLive,
+              playUrl,
+              transport: item!.transport,
+              sourceKind: item!.sourceKind,
+              source: item!.source,
+            },
+          },
+        })
+        play(webItem, {
+          forceFull: true,
+          replace: true,
+          returnTo: returnTo || '/',
+        })
+        return
+      }
+
+      // Local YouTube channels (CVM / TVJ): resolve @handle/live →
       // a concrete video URL so the browser skips YouTube's heavy channel SPA.
       // Desktop: prefer watch URL (embeds blanked the WebContentsView shell).
       // Android Gecko: prefer /embed/ with site Referer — watch SPA often paints black.
@@ -951,9 +1440,17 @@ export function WatchPage() {
         isYouTubeUrl(item!.url) &&
         (item!.tags?.includes('local') || item!.id?.startsWith('local-'))
       ) {
-        const resolved = await resolveYouTubeLivePlay(item!.url)
+        const resolved = await withTimeout(
+          resolveYouTubeLivePlay(item!.url),
+          12_000,
+          'Live check timed out',
+        ).catch((err) => ({
+          ok: false as const,
+          error: err instanceof Error ? err.message : 'Live check failed',
+        }))
         if (cancelled) return
         if (!resolved.ok) {
+          setLoadStatus(null)
           setError(resolved.error || 'This channel is not live right now')
           return
         }
@@ -1013,6 +1510,16 @@ export function WatchPage() {
           guard.awaitingAdd || guard.slotsLen > 1 || guard.mode === 'multi'
         if (!keepOthers) clearWebSurfacesForWatch()
 
+        // Cached StreamCorner cards may still point at streamcorner.foo (301).
+        let playUrl = item!.url
+        try {
+          if (isStreamCornerHost(new URL(playUrl).hostname) || item!.tags?.includes('streamcorner')) {
+            playUrl = normalizeStreamCornerWatchUrl(playUrl)
+          }
+        } catch {
+          /* keep playUrl */
+        }
+
         const sportsLike =
           item!.category === 'sports' ||
           item!.tags?.includes('247-series') ||
@@ -1027,16 +1534,30 @@ export function WatchPage() {
 
         // StreamFree's JW player stays idle until the web player presses play, so the hidden
         // Gecko sniff never sees a media URL: it only cost 8s and a second "Unwrapping" screen.
+        // StreamCorner skips early unwrap — full /web + native source/PLAY taps start Bitmovin;
+        // WebBrowser late-promotes to Media3 when HLS is sniffed.
+        let media3Tried = false
+        let cornerHost = false
+        try {
+          cornerHost = isStreamCornerHost(new URL(playUrl).hostname)
+        } catch {
+          cornerHost = Boolean(item!.tags?.includes('streamcorner'))
+        }
         if (
           sportsLike &&
           !isReplay &&
+          !cornerHost &&
           !keepOthers &&
-          !isStreamFreeEmbedUrl(item!.url) &&
+          !isStreamFreeEmbedUrl(playUrl) &&
           isAndroidMedia3Host() &&
           canAndroidResolveEmbedMedia()
         ) {
+          media3Tried = true
           setLoadStatus(UNWRAP_STATUS)
-          const unwrapped = await androidResolveEmbedMedia(item!.url, ANDROID_UNWRAP_TIMEOUT_MS)
+          const unwrapped = await androidResolveEmbedMedia(
+            playUrl,
+            ANDROID_UNWRAP_TIMEOUT_MS,
+          )
           if (cancelled) return
           if (unwrapped.ok && unwrapped.mediaUrl) {
             setError(null)
@@ -1066,7 +1587,7 @@ export function WatchPage() {
                       : '/section/sports'),
                 title: item!.title,
                 mediaUrl: unwrapped.mediaUrl,
-                referrer: unwrapped.referrer || item!.url,
+                referrer: unwrapped.referrer || playUrl,
                 poster: item!.poster,
                 category: item!.category,
                 continueId: item!.id,
@@ -1075,37 +1596,13 @@ export function WatchPage() {
             return
           }
           void media3Hide({ stop: true })
-          // Embed unwrap failed — Futbol-x signed HLS backup when attached.
-          if (item!.sportsAltSources?.length) {
-            setLoadStatus('Trying Futbol-x backup…')
-            const fx = await resolveFutbolXBackupPlay(item!)
-            if (cancelled) return
-            if (fx.ok) {
-              const hlsItem = {
-                ...item!,
-                url: fx.url,
-                httpReferrer: item!.httpReferrer || 'https://www.futbol-x.xyz/',
-                tags: [
-                  ...new Set(
-                    [...(item!.tags ?? []), 'live', 'hls', 'futbolx'].filter(
-                      (t) => t !== 'web-embed',
-                    ),
-                  ),
-                ],
-              }
-              play(hlsItem, {
-                forceFull: true,
-                replace: true,
-                returnTo: returnTo || '/section/sports',
-              })
-              navigate('/', { replace: true })
-              return
-            }
-          }
+          // One Media3 try only — do not auto-jump Futbol-x (that sent phones to Home
+          // with a dead GlobalPlayer HLS). Fall through to /web; Retry can hop alts.
         }
 
         const webItem = {
           ...item!,
+          url: playUrl,
           tags: [...new Set([...(item!.tags ?? []), 'web-embed'])],
         }
         const webState =
@@ -1122,17 +1619,20 @@ export function WatchPage() {
                       : '/section/sports'),
                 playerMode: 'embed' as const,
                 pipOnBack: true,
+                skipUnwrapCover: media3Tried,
                 continueWatch: {
                   id: item!.id,
                   title: item!.title,
                   poster: item!.poster,
                   category: item!.category,
                   playlistIndex: 0,
-                  detailUrl: item!.detailUrl || item!.url,
-                  playUrl: item!.url,
+                  detailUrl: item!.detailUrl || playUrl,
+                  playUrl,
                   transport: item!.transport,
                   sourceKind: item!.sourceKind,
                   source: item!.source,
+                  sportsAltSources: item!.sportsAltSources,
+                  sportsSourceIndex: 0,
                 },
               }
             : undefined
@@ -1145,7 +1645,7 @@ export function WatchPage() {
           navigate('/multiview', { replace: true })
           return
         }
-        navigate(`/web?url=${encodeURIComponent(item!.url)}`, {
+        navigate(`/web?url=${encodeURIComponent(playUrl)}`, {
           replace: true,
           state: webState,
         })
@@ -1157,23 +1657,98 @@ export function WatchPage() {
         return
       }
 
-      // CVM (and similar): Vimeo live event → fresh tokenized HLS
-      if (isVimeoLiveEventUrl(item!.url)) {
+      // CVM (and similar): Vimeo live event → fresh tokenized HLS.
+      // When the event has no clip (common), fall back to YouTube /live.
+      if (isVimeoLiveEventUrl(item!.url) || isCvmChannelId(item!.id)) {
+        setLoadStatus('Checking CVM…')
         const resolved = await resolveVimeoLiveHls(item!.url)
         if (cancelled) return
-        if (!resolved.ok) {
+        if (resolved.ok) {
+          setLoadStatus(null)
+          play(
+            {
+              ...item!,
+              url: resolved.url,
+              description: resolved.title || item!.description,
+              tags: [...new Set([...(item!.tags ?? []), 'hls', 'vimeo'])],
+            },
+            { forceFull: true, returnTo },
+          )
+          return
+        }
+        const allowYtFallback =
+          isCvmChannelId(item!.id) || isCvmVimeoUrl(item!.url) || Boolean(item!.detailUrl)
+        if (!allowYtFallback) {
+          setLoadStatus(null)
           setError(resolved.error || 'Could not resolve Vimeo live stream')
           return
         }
-        play(
-          {
-            ...item!,
-            url: resolved.url,
-            description: resolved.title || item!.description,
-            tags: [...new Set([...(item!.tags ?? []), 'hls', 'vimeo'])],
+        setLoadStatus('Checking CVM on YouTube…')
+        void androidBrowserPrewarm()
+        const ytLive = cvmYoutubeFallbackUrl(item!.detailUrl)
+        prefetchYouTubeLive(ytLive)
+        const yt = await withTimeout(
+          resolveYouTubeLivePlay(ytLive),
+          12_000,
+          'CVM live check timed out',
+        ).catch((err) => ({
+          ok: false as const,
+          error: err instanceof Error ? err.message : 'CVM live check failed',
+        }))
+        if (cancelled) return
+        if (!yt.ok) {
+          setLoadStatus(null)
+          setError(yt.error || resolved.error || 'CVM is not live right now')
+          return
+        }
+        setLoadStatus('Starting CVM…')
+        const playUrl = isAndroidInAppBrowser() || isTizenTv()
+          ? yt.embedUrl || yt.watchUrl || toAutoplayUrl(ytLive)
+          : yt.watchUrl || toAutoplayUrl(ytLive)
+        const webItem = {
+          ...item!,
+          url: playUrl,
+          detailUrl: item!.detailUrl || ytLive,
+          tags: [...new Set([...(item!.tags ?? []), 'web-embed', 'live', 'youtube'])],
+        }
+        const guard = multiviewGuardRef.current
+        const keepOthers =
+          guard.awaitingAdd || guard.slotsLen > 1 || guard.mode === 'multi'
+        if (!keepOthers) clearWebSurfacesForWatch()
+        if (keepOthers) {
+          play(webItem, {
+            forceFull: true,
+            replace: false,
+            returnTo: returnTo || '/',
+          })
+          navigate('/multiview', { replace: true })
+          return
+        }
+        navigate(`/web?url=${encodeURIComponent(playUrl)}`, {
+          replace: true,
+          state: {
+            from: returnTo || '/',
+            playerMode: 'embed',
+            pipOnBack: true,
+            continueWatch: {
+              id: item!.id,
+              title: item!.title,
+              poster: item!.poster,
+              category: item!.category,
+              playlistIndex: 0,
+              detailUrl: item!.detailUrl || ytLive,
+              playUrl,
+              transport: item!.transport,
+              sourceKind: item!.sourceKind,
+              source: item!.source,
+            },
           },
-          { forceFull: true, returnTo },
-        )
+        })
+        play(webItem, {
+          forceFull: true,
+          replace: true,
+          returnTo: returnTo || '/',
+        })
         return
       }
 

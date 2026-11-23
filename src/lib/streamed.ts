@@ -11,6 +11,7 @@
 
 import type { StreamItem } from '../types'
 import { isPpvStCatalogItem, isPpvStLiveNow } from './ppvSt'
+import { isTimStreamsCatalogItem } from './timStreams'
 import { rankSourcesWithLearning, recordStreamProbeResult } from './streamLearning'
 
 export const STREAMED_API_ORIGIN = 'https://streamed.pk'
@@ -84,7 +85,9 @@ export function isStreamedCatalogItem(item: {
       if ((host.includes('streamcorner') || host.includes('streamninja')) && !/\/nba\/vod\//i.test(item.url)) {
         return true
       }
-      if (host === 'embed.st' || host.endsWith('.embed.st')) return true
+      // Do NOT treat bare embed.st as Streamed — PPV/StreamFree iframes use that
+      // host and must open in /web. Matching them here hit retired Streamed.pk,
+      // then Futbol-x → Home with a dead HLS play.
     }
   } catch {
     /* ignore */
@@ -353,13 +356,30 @@ export function streamedMatchesToItems(
   return out
 }
 
+/** Always-on 24/7 channels (TS/SC/SF/PPV) belong on Sports → 24/7, not Live or Upcoming. */
+export function isSportsAlwaysLiveItem(item: StreamItem): boolean {
+  if (item.tags?.includes('replay') || item.tags?.includes('vod')) return false
+  return Boolean(item.tags?.includes('always-live') || item.tags?.includes('24/7-streams'))
+}
+
 /** True when a Streamed/PPV sports row belongs on Sports → Live (not Upcoming). */
 export function isSportsLiveNowItem(item: StreamItem, nowMs = Date.now()): boolean {
   if (item.tags?.includes('replay') || item.tags?.includes('vod')) return false
+  // 24/7 channels are not scheduled matches — they have their own Sports tab.
+  if (isSportsAlwaysLiveItem(item)) return false
+  // Future kickoff belongs on Upcoming for every provider. This must win over
+  // live-now tags so a countdown never appears on Live.
+  if (Number(item.eventStartsAt) > nowMs) return false
   if (isPpvStCatalogItem(item)) return isPpvStLiveNow(item, Math.floor(nowMs / 1000))
-  if (isStreamedCatalogItem(item)) {
+  if (isTimStreamsCatalogItem(item)) {
     if (item.tags?.includes('live-now')) return true
     if (item.tags?.includes('upcoming')) return false
+    if (item.eventEndsAt != null && item.eventEndsAt < nowMs) return false
+    return true
+  }
+  if (isStreamedCatalogItem(item)) {
+    if (item.tags?.includes('upcoming')) return false
+    if (item.tags?.includes('live-now')) return true
     // Legacy rows (live feed only): treat as live.
     return true
   }
@@ -368,7 +388,8 @@ export function isSportsLiveNowItem(item: StreamItem, nowMs = Date.now()): boole
 
 export function isSportsUpcomingItem(item: StreamItem, nowMs = Date.now()): boolean {
   if (item.tags?.includes('replay') || item.tags?.includes('vod')) return false
-  if (!isStreamedCatalogItem(item) && !isPpvStCatalogItem(item)) return false
+  if (isSportsAlwaysLiveItem(item)) return false
+  if (!isStreamedCatalogItem(item) && !isPpvStCatalogItem(item) && !isTimStreamsCatalogItem(item)) return false
   return !isSportsLiveNowItem(item, nowMs)
 }
 

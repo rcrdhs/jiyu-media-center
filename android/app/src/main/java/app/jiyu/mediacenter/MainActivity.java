@@ -279,8 +279,9 @@ public class MainActivity extends BridgeActivity {
   }
 
   /**
-   * Device Home: playing → system PiP (not a close). Otherwise the app exits
-   * and an in-progress catalog update is cancelled.
+   * Device Home: when Minimize-to-PiP is on and something is playing, enter
+   * system PiP. Otherwise stay in Recents like a normal app (do not finish).
+   * Swiping the task away still cancels catalog sync via onTaskRemoved.
    */
   @Override
   public void onUserLeaveHint() {
@@ -303,11 +304,8 @@ public class MainActivity extends BridgeActivity {
       } catch (Throwable t) {
         pipTransition = false;
       }
-      return;
     }
-    // Catalog sync needs the page. Home into PiP is not a close, so the sync
-    // keeps running there. Home with nothing playing closes the app.
-    exitAfterLeave = true;
+    // No exitAfterLeave — Home must not kill Jiyu when PiP is off / unused.
   }
 
   @Override

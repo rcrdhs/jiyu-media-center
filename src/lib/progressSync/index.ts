@@ -1,5 +1,5 @@
 /**
- * Cross-device Continue watching sync (jiyu-sync Worker).
+ * Cross-device Continue watching + Saved sync (jiyu-sync Worker).
  * Same module on Android, desktop Electron, and future TV / Apple builds.
  *
  * Efficiency rules
@@ -17,6 +17,11 @@ import {
   listContinueWatching,
   type ContinueWatchingEntry,
 } from '../continueWatching'
+import {
+  applySyncedWatchlistEntries,
+  listWatchlistForSync,
+  type WatchlistEntry,
+} from '../watchlist'
 import { continueEntryToSyncRecord, syncFingerprint, syncRecordToContinueEntry } from './bridge'
 import { isProgressSyncConfigured } from './config'
 import { clearSyncToken, loadSyncToken, saveSyncToken } from './secretStore'
@@ -40,20 +45,24 @@ import {
   syncNewPairCode,
   syncPair,
   syncPull,
+  syncPullSaved,
   syncPush,
+  syncPushSaved,
   syncRegister,
   syncRevokeDevice,
   syncSignOut,
+  type SavedSyncPushRow,
   type SyncAuthResponse,
   type SyncPushRow,
 } from './transport'
-import type { ProgressSyncDevice, ProgressSyncRecord } from './types'
+import type { ProgressSyncDevice, ProgressSyncRecord, SavedSyncRecord } from './types'
 
 export type {
   ProgressSyncStatus,
   ProgressSyncSession,
   ProgressSyncRecord,
   ProgressSyncDevice,
+  SavedSyncRecord,
 } from './types'
 export { PROGRESS_SYNC_EVENT } from './types'
 export {
@@ -137,7 +146,64 @@ function scheduleRetry() {
 }
 
 function hasPending(state: SyncState): boolean {
-  return Object.keys(state.dirty).length > 0 || Object.keys(state.deletes).length > 0
+  return (
+    Object.keys(state.dirty).length > 0 ||
+    Object.keys(state.deletes).length > 0 ||
+    Object.keys(state.savedDirty).length > 0 ||
+    Object.keys(state.savedDeletes).length > 0
+  )
+}
+
+function isVodCategory(
+  category: string | undefined,
+): category is ProgressSyncRecord['category'] {
+  return (
+    category === 'movies' ||
+    category === 'series' ||
+    category === 'anime' ||
+    category === 'kids'
+  )
+}
+
+function watchlistToSavedRecord(entry: WatchlistEntry): SavedSyncRecord | null {
+  if (!entry?.id || !isVodCategory(entry.category)) return null
+  const title = String(entry.title || '').trim()
+  const href = String(entry.href || '').trim()
+  if (!title || !href) return null
+  return {
+    id: entry.id,
+    title,
+    poster: entry.poster,
+    category: entry.category,
+    href,
+    updatedAt: Number(entry.savedAt) || Date.now(),
+  }
+}
+
+function savedFingerprint(record: SavedSyncRecord | null | undefined): string {
+  if (!record?.id) return ''
+  return JSON.stringify([
+    record.title,
+    record.poster ?? null,
+    record.category,
+    record.href,
+    record.deleted ? 1 : 0,
+  ])
+}
+
+function savedRecordToWatchlist(record: SavedSyncRecord): WatchlistEntry | null {
+  if (!record?.id || record.deleted || !isVodCategory(record.category)) return null
+  const title = String(record.title || '').trim()
+  const href = String(record.href || '').trim()
+  if (!title || !href) return null
+  return {
+    id: record.id,
+    title,
+    poster: record.poster,
+    category: record.category,
+    href,
+    savedAt: Number(record.updatedAt) || Date.now(),
+  }
 }
 
 function definedOnly<T extends object>(obj: T): Partial<T> {
@@ -203,6 +269,57 @@ function applyRemoteRows(rows: ProgressSyncRecord[], serverNow: number) {
   if (changed) applySyncedContinueEntries([...local.values()])
 }
 
+function applyRemoteSavedRows(rows: SavedSyncRecord[], serverNow: number) {
+  if (rows.length === 0) return
+  const skew = Date.now() - serverNow
+  const state = readSyncState()
+  const local = new Map(listWatchlistForSync().map((entry) => [entry.id, entry]))
+  let changed = false
+  let stateChanged = false
+  for (const row of rows) {
+    if (!row?.id) continue
+    if (state.savedDeletes[row.id]) continue
+    const localUpdatedAt = Number(row.updatedAt) + skew
+    const mine = local.get(row.id)
+    if (state.savedDirty[row.id] && mine && mine.savedAt >= localUpdatedAt) continue
+    if (state.savedDirty[row.id]) {
+      delete state.savedDirty[row.id]
+      stateChanged = true
+    }
+    if (row.deleted) {
+      if (state.savedPushed[row.id]) {
+        delete state.savedPushed[row.id]
+        stateChanged = true
+      }
+      if (mine) {
+        local.delete(row.id)
+        changed = true
+      }
+      continue
+    }
+    const incoming = savedRecordToWatchlist({ ...row, updatedAt: localUpdatedAt })
+    if (!incoming) continue
+    const fingerprint = savedFingerprint(watchlistToSavedRecord(incoming))
+    if (fingerprint && state.savedPushed[row.id] !== fingerprint) {
+      state.savedPushed[row.id] = fingerprint
+      stateChanged = true
+    }
+    if (
+      mine &&
+      mine.href === incoming.href &&
+      mine.title === incoming.title &&
+      (mine.poster || '') === (incoming.poster || '') &&
+      mine.category === incoming.category
+    ) {
+      continue
+    }
+    local.set(row.id, incoming)
+    changed = true
+  }
+  if (stateChanged) writeSyncState(state)
+  if (changed) applySyncedWatchlistEntries([...local.values()])
+}
+
 function buildPushRows(state: SyncState) {
   const now = Date.now()
   const local = new Map(listContinueWatching().map((entry) => [entry.id, entry]))
@@ -253,22 +370,71 @@ function buildPushRows(state: SyncState) {
   return { rows, snapshot }
 }
 
+function buildSavedPushRows(state: SyncState) {
+  const now = Date.now()
+  const local = new Map(listWatchlistForSync().map((entry) => [entry.id, entry]))
+  const rows: SavedSyncPushRow[] = []
+  const snapshot = new Map<string, { kind: 'up' | 'del'; at: number; fingerprint?: string }>()
+  let pruned = false
+  for (const id of Object.keys(state.savedPushed)) {
+    if (!local.has(id)) {
+      delete state.savedPushed[id]
+      pruned = true
+    }
+  }
+  for (const id of Object.keys(state.savedDirty)) {
+    const entry = local.get(id)
+    const record = entry ? watchlistToSavedRecord(entry) : null
+    if (!entry || !record) {
+      delete state.savedDirty[id]
+      pruned = true
+      continue
+    }
+    const fingerprint = savedFingerprint(record)
+    if (fingerprint && state.savedPushed[id] === fingerprint) {
+      delete state.savedDirty[id]
+      pruned = true
+      continue
+    }
+    const { updatedAt: _u, rev: _r, deleted: _d, ...rest } = record
+    rows.push({ ...rest, ageMs: Math.max(0, now - (entry.savedAt || now)) })
+    snapshot.set(id, { kind: 'up', at: entry.savedAt, fingerprint })
+  }
+  for (const [id, del] of Object.entries(state.savedDeletes)) {
+    rows.push({
+      id,
+      title: id,
+      category: (del.category || 'movies') as SavedSyncRecord['category'],
+      href: `/watch/${id}`,
+      deleted: true,
+      ageMs: Math.max(0, now - (Number(del.at) || now)),
+    })
+    snapshot.set(id, { kind: 'del', at: del.at })
+  }
+  if (pruned) writeSyncState(state)
+  return { rows, snapshot }
+}
+
 async function flushOnce(options?: { keepalive?: boolean }) {
   const token = await requireToken()
   if (!token) return
-  const { rows, snapshot } = buildPushRows(readSyncState())
-  if (rows.length === 0) return
+  const state0 = readSyncState()
+  const progress = buildPushRows(state0)
+  const saved = buildSavedPushRows(readSyncState())
+  if (progress.rows.length === 0 && saved.rows.length === 0) return
   lastPushAttemptAt = Date.now()
   try {
-    for (let i = 0; i < rows.length; i += MAX_ROWS_PER_PUT) {
-      const chunk = rows.slice(i, i + MAX_ROWS_PER_PUT)
-      const res = await syncPush(token, chunk, { keepalive: options?.keepalive && rows.length <= 40 })
+    for (let i = 0; i < progress.rows.length; i += MAX_ROWS_PER_PUT) {
+      const chunk = progress.rows.slice(i, i + MAX_ROWS_PER_PUT)
+      const res = await syncPush(token, chunk, {
+        keepalive: options?.keepalive && progress.rows.length + saved.rows.length <= 40,
+      })
       // Re-read: the player may have marked more rows while we were uploading.
       const state = readSyncState()
       const local = new Map(listContinueWatching().map((entry) => [entry.id, entry]))
       const rejected: ProgressSyncRecord[] = []
       for (const result of res.results) {
-        const snap = snapshot.get(result.id)
+        const snap = progress.snapshot.get(result.id)
         if (!snap) continue
         if (snap.kind === 'del') {
           if (state.deletes[result.id]?.at === snap.at) delete state.deletes[result.id]
@@ -288,6 +454,40 @@ async function flushOnce(options?: { keepalive?: boolean }) {
       writeSyncState(state)
       // Another device edited these more recently — take the server's copy.
       if (rejected.length > 0) applyRemoteRows(rejected, res.now)
+    }
+    try {
+      for (let i = 0; i < saved.rows.length; i += MAX_ROWS_PER_PUT) {
+        const chunk = saved.rows.slice(i, i + MAX_ROWS_PER_PUT)
+        const res = await syncPushSaved(token, chunk, {
+          keepalive: options?.keepalive && progress.rows.length + saved.rows.length <= 40,
+        })
+        const state = readSyncState()
+        const local = new Map(listWatchlistForSync().map((entry) => [entry.id, entry]))
+        const rejected: SavedSyncRecord[] = []
+        for (const result of res.results) {
+          const snap = saved.snapshot.get(result.id)
+          if (!snap) continue
+          if (snap.kind === 'del') {
+            if (state.savedDeletes[result.id]?.at === snap.at) delete state.savedDeletes[result.id]
+            if (result.accepted) delete state.savedPushed[result.id]
+          } else {
+            if (local.get(result.id)?.savedAt === snap.at || !local.has(result.id)) {
+              delete state.savedDirty[result.id]
+            }
+            if (result.accepted && snap.fingerprint) state.savedPushed[result.id] = snap.fingerprint
+          }
+          if (!result.accepted && result.current) {
+            delete state.savedDirty[result.id]
+            delete state.savedDeletes[result.id]
+            rejected.push(result.current)
+          }
+        }
+        writeSyncState(state)
+        if (rejected.length > 0) applyRemoteSavedRows(rejected, res.now)
+      }
+    } catch (savedErr) {
+      // Older jiyu-sync builds have no /v1/saved — keep Continue watching working.
+      if (!(savedErr instanceof SyncHttpError && savedErr.status === 404)) throw savedErr
     }
     retryStep = 0
     patchProgressSyncMeta({ lastPushAt: Date.now(), lastError: null })
@@ -372,6 +572,55 @@ export function queueProgressSyncDelete(id: string, category?: string) {
   queueProgressSyncDeletes([{ id, category }])
 }
 
+/** Mark a local Saved row for upload (no-op when signed out). */
+export function queueSavedSyncPush(entry: WatchlistEntry, options?: { urgent?: boolean }) {
+  if (!signedIn()) return
+  if (!watchlistToSavedRecord(entry)) return
+  const state = readSyncState()
+  if (!state.savedDirty[entry.id] || state.savedDeletes[entry.id]) {
+    state.savedDirty[entry.id] = true
+    delete state.savedDeletes[entry.id]
+    writeSyncState(state)
+  }
+  schedulePush(Boolean(options?.urgent))
+}
+
+/**
+ * Re-queue hearts that never reached the server (e.g. /v1/saved was 404).
+ * Safe to call on every launch — skips rows the server already accepted.
+ */
+function queueUnsyncedLocalSaved(): boolean {
+  if (!signedIn()) return false
+  const state = readSyncState()
+  let changed = false
+  for (const entry of listWatchlistForSync()) {
+    const record = watchlistToSavedRecord(entry)
+    if (!record) continue
+    const fingerprint = savedFingerprint(record)
+    if (fingerprint && state.savedPushed[entry.id] === fingerprint) continue
+    if (!state.savedDirty[entry.id]) {
+      state.savedDirty[entry.id] = true
+      changed = true
+    }
+    if (state.savedDeletes[entry.id]) {
+      delete state.savedDeletes[entry.id]
+      changed = true
+    }
+  }
+  if (changed) writeSyncState(state)
+  return changed
+}
+
+/** Queue a Saved removal tombstone. */
+export function queueSavedSyncDelete(id: string, category?: string) {
+  if (!signedIn() || !id) return
+  const state = readSyncState()
+  delete state.savedDirty[id]
+  state.savedDeletes[id] = { at: Date.now(), category: category || 'movies' }
+  writeSyncState(state)
+  schedulePush(true)
+}
+
 /**
  * Pull rows changed since the last applied server revision.
  * `force` skips the 60 s foreground throttle; `pushLocal` uploads queued changes first.
@@ -397,8 +646,24 @@ export async function pullProgressSync(options?: { pushLocal?: boolean; force?: 
         res = await syncPull(token, 0)
       }
       applyRemoteRows(res.entries, res.now)
+
+      let savedRev = readSyncState().savedLastRev
+      try {
+        let savedSince = savedRev
+        let savedRes = await syncPullSaved(token, savedSince)
+        if (savedRes.rev < savedSince) {
+          savedSince = 0
+          savedRes = await syncPullSaved(token, 0)
+        }
+        applyRemoteSavedRows(savedRes.entries, savedRes.now)
+        savedRev = savedRes.rev
+      } catch (savedErr) {
+        if (!(savedErr instanceof SyncHttpError && savedErr.status === 404)) throw savedErr
+      }
+
       const state = readSyncState()
       state.lastRev = res.rev
+      state.savedLastRev = savedRev
       writeSyncState(state)
       patchProgressSyncMeta({ lastPullAt: Date.now(), lastError: null })
     } catch (err) {
@@ -413,6 +678,7 @@ export async function pullProgressSync(options?: { pushLocal?: boolean; force?: 
 
 /** Manual "Sync now": upload queued changes, then pull. */
 export function syncProgressNow(): Promise<void> {
+  queueUnsyncedLocalSaved()
   return pullProgressSync({ pushLocal: true, force: true })
 }
 
@@ -426,10 +692,21 @@ async function adoptAuth(auth: SyncAuthResponse) {
     pairCode: auth.pairCode,
     pairCodeExpiresAt: auth.pairCodeExpiresAt,
   })
-  // First sign-in on this device: offer every local title once; server-side ages decide conflicts.
+  // First sign-in on this device: offer every local title + Saved once; server ages decide conflicts.
   const dirty: Record<string, true> = {}
   for (const entry of listContinueWatching()) if (continueEntryToSyncRecord(entry)) dirty[entry.id] = true
-  writeSyncState({ lastRev: 0, dirty, deletes: {}, pushed: {} })
+  const savedDirty: Record<string, true> = {}
+  for (const entry of listWatchlistForSync()) if (watchlistToSavedRecord(entry)) savedDirty[entry.id] = true
+  writeSyncState({
+    lastRev: 0,
+    dirty,
+    deletes: {},
+    pushed: {},
+    savedLastRev: 0,
+    savedDirty,
+    savedDeletes: {},
+    savedPushed: {},
+  })
   patchProgressSyncMeta({ lastError: null, lastPullAt: 0, lastPushAt: 0 })
   await syncProgressNow()
 }
@@ -531,6 +808,8 @@ export function startProgressSync(): () => void {
     if (disposed || !signedIn()) return
     await loadSyncToken()
     if (disposed) return
+    // Hearts that never uploaded (Saved API was missing) get another try.
+    queueUnsyncedLocalSaved()
     // Launch: upload only what changed while closed/offline, then an incremental pull.
     await pullProgressSync({ pushLocal: hasPending(readSyncState()), force: true })
   })()

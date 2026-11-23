@@ -114,12 +114,12 @@ export function ProgressSyncSettings() {
   return (
     <>
       <h3 className="field-label" style={{ marginTop: '1.25rem' }}>
-        Continue watching sync{' '}
+        Continue watching &amp; Saved sync{' '}
         <span className="optional-tag">optional · all devices</span>
       </h3>
       <p className="field-hint" style={{ marginTop: '0.25rem', opacity: 0.75 }}>
-        Share movie, series, anime, and kids resume progress across phones, PCs, and future
-        TV / Apple builds. Same account on every device.
+        Share resume progress and your Saved list (movies, series, anime, kids) across phones,
+        PCs, and future TV / Apple builds. Same account on every device.
       </p>
 
       <label className="field-label" htmlFor="progress-sync-url">

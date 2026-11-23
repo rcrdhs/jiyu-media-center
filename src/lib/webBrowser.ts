@@ -16,8 +16,8 @@ export const WEB_PRESETS: WebPreset[] = [
   {
     id: 'cvm-live',
     label: 'CVM Live',
-    detail: 'Play CVM TV News current live stream.',
-    url: 'https://www.youtube.com/@cvmtvnews/live',
+    detail: 'Play CVM Television current live stream.',
+    url: 'https://www.youtube.com/@cvm_television/live',
   },
   {
     id: 'tvj-live',
@@ -28,8 +28,8 @@ export const WEB_PRESETS: WebPreset[] = [
   {
     id: 'nationwide-live',
     label: 'Nationwide Live',
-    detail: 'Nationwide News Network (90FM) live on YouTube.',
-    url: 'https://www.youtube.com/@nnn-RADIOLIVE/live',
+    detail: 'Nationwide News Network (90FM) live HLS.',
+    url: 'https://jiyu-nnn.free-river.workers.dev/live.m3u8',
   },
   {
     id: '1spot-live',
@@ -40,8 +40,8 @@ export const WEB_PRESETS: WebPreset[] = [
   {
     id: 'cvm-channel',
     label: 'CVM channel',
-    detail: 'CVM TV News YouTube home.',
-    url: 'https://www.youtube.com/@cvmtvnews',
+    detail: 'CVM Television YouTube home.',
+    url: 'https://www.youtube.com/@cvm_television',
   },
   {
     id: 'youtube',
@@ -66,10 +66,10 @@ export const WEB_PRESETS: WebPreset[] = [
 /** Map a local channel title to its live play URL */
 export function liveUrlForChannelTitle(title: string): string {
   const name = title.replace(/\s*[\[(].*$/, '').trim().toLowerCase()
-  if (name.startsWith('cvm')) return 'https://www.youtube.com/@cvmtvnews/live'
+  if (name.startsWith('cvm')) return 'https://www.youtube.com/@cvm_television/live'
   if (name.startsWith('tvj')) return 'https://www.youtube.com/@TelevisionJamaica/live'
   if (name.startsWith('nationwide') || name === 'nnn' || name === 'nnn-radiolive') {
-    return 'https://www.youtube.com/@nnn-RADIOLIVE/live'
+    return 'https://jiyu-nnn.free-river.workers.dev/live.m3u8'
   }
   if (/^tnt\s*sports/i.test(name) || name === 'tnt') {
     return 'https://www.youtube.com/@TNTSports/live'
@@ -121,7 +121,12 @@ export function isWebBrowserOnlyUrl(url: string): boolean {
     if (host === 'vidsrc.me' || host.endsWith('.vidsrc.me')) return true
     if (host === 'cinextream.cc' || host.endsWith('.cinextream.cc')) return true
     if (host === 'streamed.pk' || host.endsWith('.streamed.pk')) return true
-    if (host.includes('streamcorner') || host.includes('streamninja')) return true
+    if (host.includes('streamcorner') || host.includes('strmcrnr') || host.includes('streamninja')) return true
+    // StreamCorner Bitmovin player document (no site chrome).
+    if (host.includes('getsugatensho')) return true
+    if (host.endsWith('.sbs') && u.searchParams.has('p')) return true
+    if (host === 'tim-streams.com' || host.endsWith('.tim-streams.com') || host === 'timstreams.co.rw' || host.endsWith('.timstreams.co.rw')) return true
+    if (host === 'shoewiki.click' || host.endsWith('.shoewiki.click')) return true
     if (host === 'ppv.st' || host.endsWith('.ppv.st')) return true
     if (host === 'embedindia.st' || host.endsWith('.embedindia.st')) return true
     if (host === 'embed.st' || host.endsWith('.embed.st')) return true
@@ -136,6 +141,7 @@ export function isWebBrowserOnlyUrl(url: string): boolean {
     if (host.includes('livextv')) return true
     if (host === 'footreplays.com' || host.endsWith('.footreplays.com')) return true
     if (host === 'fullmatchshows.com' || host.endsWith('.fullmatchshows.com')) return true
+    if (host === 'footballorgin.com' || host.endsWith('.footballorgin.com')) return true
     if (host === 'playmate.to' || host.endsWith('.playmate.to')) return true
     if (host === 'playmogo.com' || host.endsWith('.playmogo.com')) return true
     if (host === 'ok.ru' || host.endsWith('.ok.ru')) return true
@@ -162,7 +168,7 @@ export function isRotatingSportsEmbedPath(pathname: string): boolean {
 export function isSportsOrReplayEmbedUrl(url: string): boolean {
   if (!url) return false
   if (
-    /embed(?:india|hd)?\.st|streamed\.pk|streamcorner|streamninja|ppv\.st|ppvservices\.st|embed\.ppv\.st/i.test(
+    /embed(?:india|hd)?\.st|streamed\.pk|streamcorner|strmcrnr|streamninja|ppv\.st|ppvservices\.st|embed\.ppv\.st/i.test(
       url,
     )
   ) {
@@ -176,13 +182,19 @@ export function isSportsOrReplayEmbedUrl(url: string): boolean {
     if (host === 'embedhd.st' || host.endsWith('.embedhd.st')) return true
     if (host === 'embedindia.st' || host.endsWith('.embedindia.st')) return true
     if (host === 'streamed.pk' || host.endsWith('.streamed.pk')) return true
-    if (host.includes('streamcorner') || host.includes('streamninja')) return true
+    if (host.includes('streamcorner') || host.includes('strmcrnr') || host.includes('streamninja')) return true
+    if (host.includes('getsugatensho')) return true
+    if (host.endsWith('.sbs') && parsed.searchParams.has('p')) return true
+    if (host === 'tim-streams.com' || host.endsWith('.tim-streams.com') || host === 'timstreams.co.rw' || host.endsWith('.timstreams.co.rw')) return true
+    if (host === 'shoewiki.click' || host.endsWith('.shoewiki.click')) return true
     if (host === 'ppv.st' || host.endsWith('.ppv.st')) return true
     if (host === 'ppvservices.st' || host.endsWith('.ppvservices.st')) return true
     if (host === 'soccerfull.net' || host.endsWith('.soccerfull.net')) return true
     if (host.includes('livextv')) return true
     if (host === 'footreplays.com' || host.endsWith('.footreplays.com')) return true
     if (host === 'fullmatchshows.com' || host.endsWith('.fullmatchshows.com')) return true
+    if (host === 'footballorgin.com' || host.endsWith('.footballorgin.com')) return true
+    if (host === 'ok.ru' || host.endsWith('.ok.ru')) return true
     if (host === 'playmate.to' || host.endsWith('.playmate.to')) return true
     if (host === 'playmogo.com' || host.endsWith('.playmogo.com')) return true
     if (/^\/[de]\/[a-z0-9]{6,}/i.test(parsed.pathname || '')) return true
@@ -211,9 +223,10 @@ export function isWebEmbedPlaybackItem(item: {
   if (item.tags?.includes('web-embed')) return true
   if (item.tags?.includes('replay') && item.tags?.includes('livextv')) return true
   if (item.tags?.includes('replay') && item.tags?.includes('fullmatchshows')) return true
+  if (item.tags?.includes('replay') && item.tags?.includes('footballorgin')) return true
   if (item.streamedMatchId) return true
   if (
-    /^(streamed|streamcorner|ppv\.st|livextv|fullmatchshows)$/i.test(
+    /^(streamed|streamcorner|ppv\.st|livextv|fullmatchshows|footballorgin|tim\s*streams)$/i.test(
       String(item.source || ''),
     )
   ) {
@@ -236,7 +249,7 @@ export function shouldOpenInWebBrowser(item: {
   if (item.tags?.includes('relay-hls')) return false
   if (isWebBrowserOnlyUrl(item.url)) return true
   if (item.tags?.includes('web-embed')) return true
-  return /^(streamed|streamcorner|ppv\.st|livextv|fullmatchshows)$/i.test(
+  return /^(streamed|streamcorner|ppv\.st|livextv|fullmatchshows|footballorgin|tim\s*streams)$/i.test(
     String(item.source || ''),
   )
 }
@@ -731,6 +744,184 @@ export function isStreamFreeEmbedUrl(url: string): boolean {
 }
 
 /**
+ * YouTube live embeds (CVM / TVJ / TNT / Nationwide fallback) show a QoE survey
+ * after a few rebuffers: "Noticed some buffering" → Not now / Send feedback.
+ * Live Jamaica feeds rebuffer often — auto-dismiss so it stops interrupting.
+ * Results: yt-none / yt-dismiss / yt-wait
+ */
+export const YOUTUBE_BUFFER_FEEDBACK_SCRIPT = `(function(){try{
+var h=String(location.hostname||'').replace(/^www\\./i,'').toLowerCase();
+if(!(h==='youtube.com'||h.indexOf('.youtube.com')>=0||h==='youtu.be'||h.indexOf('youtube-nocookie.com')>=0))return 'yt-none';
+var d=document,hit=0;
+function isBufferDialog(el){
+  try{
+    var t=String(el.innerText||el.textContent||'').replace(/\\s+/g,' ').trim();
+    if(!t||t.length>900)return false;
+    return /Noticed some buffering/i.test(t)||(/paused to load a few times/i.test(t)&&/Send feedback/i.test(t));
+  }catch(e){return false;}
+}
+function clickNotNow(root){
+  try{
+    var btns=root.querySelectorAll?root.querySelectorAll('button,yt-button-shape button,a,[role="button"],tp-yt-paper-button'):[];
+    for(var i=0;i<btns.length;i++){
+      var b=btns[i];
+      var label=String((b.getAttribute&&b.getAttribute('aria-label'))||b.innerText||b.textContent||'').replace(/\\s+/g,' ').trim();
+      if(/^Not now$/i.test(label)||/^Dismiss$/i.test(label)||/^No thanks$/i.test(label)){
+        try{b.click();hit++;return true;}catch(e){}
+      }
+    }
+  }catch(e){}
+  return false;
+}
+function hide(el){
+  try{
+    if(!el||el.getAttribute('data-jiyu-ytfb')==='1')return;
+    el.setAttribute('data-jiyu-ytfb','1');
+    el.style.setProperty('display','none','important');
+    el.style.setProperty('visibility','hidden','important');
+    el.style.setProperty('pointer-events','none','important');
+    el.style.setProperty('opacity','0','important');
+    hit++;
+  }catch(e){}
+}
+try{
+  var nodes=d.querySelectorAll('tp-yt-paper-dialog,ytd-popup-container,yt-dialog-view-model,ytmusic-dialog,div[role="dialog"],dialog,ytd-modal-with-title-and-button-renderer');
+  for(var n=0;n<nodes.length;n++){
+    var el=nodes[n];
+    if(!el||el.getAttribute('data-jiyu-ytfb')==='1')continue;
+    if(!isBufferDialog(el))continue;
+    if(!clickNotNow(el))hide(el);
+  }
+  // Fallback: any large fixed overlay with the survey copy.
+  var all=d.querySelectorAll('div,section,aside');
+  for(var j=0;j<all.length;j++){
+    var box=all[j];
+    if(!box||box.getAttribute('data-jiyu-ytfb')==='1')continue;
+    if(!isBufferDialog(box))continue;
+    var st=window.getComputedStyle(box);
+    var pos=st?String(st.position||''):'';
+    if(pos!=='fixed'&&pos!=='absolute'&&pos!=='sticky')continue;
+    var r=box.getBoundingClientRect();
+    if(r.width<200||r.height<120)continue;
+    if(!clickNotNow(box))hide(box);
+  }
+}catch(e){}
+return hit?'yt-dismiss':'yt-wait';
+}catch(e){return 'yt-wait';}})()`
+
+/** Playmogo / DoodStream-style replay embeds (FullMatchShows fallback host). */
+export function isPlaymogoEmbedUrl(url: string): boolean {
+  try {
+    const host = new URL(String(url || '')).hostname.replace(/^www\./i, '').toLowerCase()
+    if (host === 'playmogo.com' || host.endsWith('.playmogo.com')) return true
+    // Short /e/{id} dood mirrors sometimes rotate off playmogo.com.
+    const path = new URL(String(url || '')).pathname || ''
+    return /^\/e\/[a-z0-9]{6,}/i.test(path) && /playmogo|dood/i.test(host)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Playmogo shows a DoodStream interstitial (anime "Play" sticker) and an in-player
+ * "Network error! Please reload…" banner. Soft ad mode must leave googlesyndication
+ * alone or the player refuses — so strip only those overlays and kick <video>.play().
+ * Results: pm-none / pm-clean / pm-play / pm-wait
+ */
+export const PLAYMOGO_CLEANUP_SCRIPT = `(function(){try{
+var h=String(location.hostname||'').replace(/^www\\./i,'').toLowerCase();
+var path=String(location.pathname||'');
+var onMogo=h==='playmogo.com'||h.indexOf('.playmogo.com')>0||(/^\\/e\\/[a-z0-9]{6,}/i.test(path)&&/(playmogo|dood)/i.test(h));
+if(!onMogo)return 'pm-none';
+var d=document,w=window,cleaned=0,played=0;
+function hide(el){try{if(!el||el.getAttribute('data-jiyu-pm')==='1')return;el.setAttribute('data-jiyu-pm','1');el.style.setProperty('display','none','important');el.style.setProperty('visibility','hidden','important');el.style.setProperty('pointer-events','none','important');el.style.setProperty('opacity','0','important');try{el.remove();}catch(e){}cleaned++;}catch(e){}}
+function looksInterstitial(el){
+  try{
+    var st=window.getComputedStyle(el);if(!st)return false;
+    var pos=String(st.position||'');
+    var r=el.getBoundingClientRect();
+    if(el.querySelector&&el.querySelector('video'))return false;
+    var t=String(el.innerText||el.textContent||'').replace(/\\s+/g,' ').trim();
+    // Viral / Free Download cards + fake E-CAPTCHA — kill even when not fixed.
+    var viral=/going viral|simple trick|thousands of people|why thousands|is going viral/i.test(t)||
+      (/free\\s*download/i.test(t)&&/download\\s*now/i.test(t))||
+      (/(^|[^A-Za-z])Ad([^A-Za-z]|$)/.test(t)&&/download\\s*now(?:\\s*20\\d{2})?/i.test(t));
+    if(viral&&r.width>=90&&r.width<=520&&r.height>=40&&r.height<=280&&t.length<320)return true;
+    if(/E-?CAPTCHA|Click Allow if you are not a robot|OVER\\s*18|Attention!?/i.test(t)&&/ALLOW|Continue|not a robot|OVER\\s*18/i.test(t)&&t.length<420&&r.width>=120&&r.height>=60)return true;
+    var topRight=r.top<window.innerHeight*0.55&&r.left>window.innerWidth*0.42;
+    if(topRight&&r.width>=120&&r.width<=420&&r.height>=48&&r.height<=180&&/(^|[^A-Za-z])Ad([^A-Za-z]|$)/.test(t)&&t.length<220)return true;
+    if(pos!=='fixed'&&pos!=='absolute'&&pos!=='sticky')return false;
+    if(r.width<100||r.height<80)return false;
+    var hasPlay=/^\\s*play\\s*$/i.test(t)||(/\\bplay\\b/i.test(t)&&t.length<48);
+    var hasImg=!!(el.querySelector&&el.querySelector('img,canvas,picture'));
+    if(hasPlay&&hasImg)return true;
+    if(/get\\s*link|continue|click\\s*here|download\\s*now/i.test(t)&&r.width>Math.min(280,window.innerWidth*0.35))return true;
+    if(/#getLink|get-link|getlink|dlbutton|downloadn/i.test(String(el.id||'')+' '+String(el.className||'')))return true;
+    if(hasImg&&r.width>=Math.min(180,window.innerWidth*0.42)&&r.height>=Math.min(160,window.innerHeight*0.28)){
+      var coversCenter=r.left<window.innerWidth*0.75&&r.top<window.innerHeight*0.85;
+      if(coversCenter&&t.length<80)return true;
+    }
+    return false;
+  }catch(e){return false;}
+}
+try{
+  if(!d.getElementById('jiyu-pm-hide')){
+    var css=d.createElement('style');css.id='jiyu-pm-hide';
+    css.textContent='iframe[src*="googlesyndication"],iframe[src*="doubleclick"],iframe[src*="googleadservices"],iframe[id*="google_ads"],ins.adsbygoogle,[id*="google_ads_iframe"],[class*="adsbygoogle"]{display:none!important;visibility:hidden!important;pointer-events:none!important;width:0!important;height:0!important;opacity:0!important;}';
+    (d.head||d.documentElement).appendChild(css);
+  }
+}catch(e){}
+try{
+  var nodes=d.querySelectorAll('div,section,aside,a,button,ins,iframe');
+  for(var i=0;i<nodes.length;i++){
+    var el=nodes[i];
+    if(!el||el.getAttribute('data-jiyu-pm')==='1')continue;
+    var idc=(String(el.id||'')+' '+String(el.className||'')).toLowerCase();
+    if(/getlink|get-link|dlbutton|downloadn|pop-under|popunder|ol-ads|adsbygoogle|google_ads/.test(idc)){hide(el);continue;}
+    try{
+      var src=String(el.getAttribute&&el.getAttribute('src')||el.src||'');
+      if(/googlesyndication|doubleclick|googleadservices|pagead\\/html/i.test(src)){hide(el);continue;}
+    }catch(e){}
+    var txt=String(el.innerText||'').replace(/\\s+/g,' ').trim();
+    if(/Network error!?\\s*Please reload/i.test(txt)&&txt.length<220){hide(el);continue;}
+    if(looksInterstitial(el))hide(el);
+  }
+}catch(e){}
+try{
+  var resumeNodes=d.querySelectorAll('div,section,aside,article');
+  for(var ri=0;ri<resumeNodes.length;ri++){
+    var box=resumeNodes[ri];
+    if(!box||box.getAttribute('data-jiyu-resume')==='1')continue;
+    var rt=String(box.innerText||'').replace(/\\s+/g,' ').trim();
+    if(!/Resume playing/i.test(rt)||!/left off at|Would you like to resume/i.test(rt)||rt.length>500)continue;
+    box.setAttribute('data-jiyu-resume','1');
+    var rbtns=box.querySelectorAll('button,a,[role="button"]');
+    var did=false;
+    for(var rb=0;rb<rbtns.length;rb++){
+      var lab=String(rbtns[rb].innerText||rbtns[rb].textContent||'').replace(/\\s+/g,' ').trim();
+      if(/^Yes/i.test(lab)||/Yes,? please/i.test(lab)){try{rbtns[rb].click();did=true;}catch(e){}break;}
+    }
+    if(!did)hide(box);
+  }
+}catch(e){}
+try{
+  var vids=d.querySelectorAll('video');
+  for(var v=0;v<vids.length;v++){
+    var video=vids[v];
+    if(!video)continue;
+    if(video.error||video.networkState===3){
+      try{video.load();}catch(e){}
+    }
+    if(video.paused){
+      try{var p=video.play();if(p&&typeof p.then==='function')p.catch(function(){});played++;}catch(e){}
+    }
+  }
+}catch(e){}
+if(cleaned||played)return cleaned?'pm-clean':'pm-play';
+return 'pm-wait';
+}catch(e){return 'pm-wait';}})()`
+
+/**
  * StreamFree turns JW autostart on only when the parent page is its own site, so in Jiyu
  * the player mounts idle. When a feed is "starting soon" it builds the player only once
  * it goes live (10s polls), long after the main-process kick window (~27s). The generic
@@ -851,7 +1042,8 @@ export const EMBED_AD_HIDE_SCRIPT = `(() => {
       (document.head || document.documentElement).appendChild(css);
     }
 
-    // Fake notification popups on Rivestream / embeds ("You received a message!", OK).
+    // Fake notification / soft Google display creatives on Rivestream + sports embeds.
+    // Soft-allow still loads ad scripts so the player mounts; we only strip the overlay DOM.
     const looksFake = (text) => {
       if (!text) return false;
       if (/You received a message!?/i.test(text)) return true;
@@ -861,6 +1053,13 @@ export const EMBED_AD_HIDE_SCRIPT = `(() => {
       if (
         /(?:push|browser)\\s+notification/i.test(text) &&
         /\\b(?:OK|Allow|Accept|Open)\\b/i.test(text) &&
+        text.length < 280
+      ) {
+        return true;
+      }
+      // Soft Google "viral trick" notification tiles (uncloseable over the video).
+      if (
+        /going viral|simple trick|thousands of people|why thousands|is going viral/i.test(text) &&
         text.length < 280
       ) {
         return true;
@@ -1114,11 +1313,11 @@ export const GUEST_ACTIVITY_SCRIPT = `(() => {
         try { w.__jiyuFsReq = (w.__jiyuFsReq || 0) + 1; } catch (_) {}
         return Promise.reject(new DOMException('Fullscreen handled by Jiyu', 'NotAllowedError'));
       };
-      // A request that slipped past the patch: undo it and still map it to Full.
+      // Undo slipped HTML fullscreen. Do NOT bump __jiyuFsReq here — resize/play
+      // fights would re-toggle Jiyu Full and remount sports embeds.
       document.addEventListener('fullscreenchange', () => {
         try {
           if (!document.fullscreenElement) return;
-          w.__jiyuFsReq = (w.__jiyuFsReq || 0) + 1;
           const p = document.exitFullscreen();
           if (p && typeof p.catch === 'function') p.catch(() => {});
         } catch (_) {}

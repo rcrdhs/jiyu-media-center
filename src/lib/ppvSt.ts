@@ -8,6 +8,8 @@
  */
 
 import type { StreamItem } from '../types'
+import { preferLowerLiveQuality } from './deviceProfile'
+import { withSportsProviderLabel } from './sportsProviderLabel'
 import {
   fetchStreamFreeLiveCatalog,
   isStreamFreeCatalogItem,
@@ -18,6 +20,16 @@ import {
 export const PPV_ST_ORIGIN = 'https://ppv.st'
 export const PPV_ST_API_ORIGIN = 'https://api.ppv.st'
 export const PPV_ST_ID_PREFIX = 'ppvst-'
+
+export interface PpvStSubstream {
+  id?: number
+  name?: string
+  tag?: string
+  uri_name?: string
+  source_tag?: string
+  locale?: string
+  iframe?: string
+}
 
 export interface PpvStStream {
   id: number
@@ -31,6 +43,8 @@ export interface PpvStStream {
   always_live?: number | boolean
   category_name?: string
   iframe?: string
+  /** SD (and extra HD) embeds for the same event — ignored until quality pick. */
+  substreams?: PpvStSubstream[]
   /** Live viewer count from api.ppv.st (string in API responses). */
   viewers?: string | number
 }
@@ -155,10 +169,65 @@ function watchPageUrl(stream: PpvStStream): string {
   return PPV_ST_ORIGIN
 }
 
-function playUrl(stream: PpvStStream): string {
+function playUrl(stream: PpvStStream | PpvStSubstream): string {
   const iframe = String(stream.iframe || '').trim()
   if (/^https?:\/\//i.test(iframe)) return iframe
-  return watchPageUrl(stream)
+  const uri = String(stream.uri_name || '').replace(/^\/+/, '')
+  if (uri) return `${PPV_ST_ORIGIN}/live/${uri}`
+  return PPV_ST_ORIGIN
+}
+
+type PpvQuality = 'hd' | 'sd' | 'other'
+
+function ppvQualityOf(stream: {
+  source_tag?: string
+  uri_name?: string
+  name?: string
+}): PpvQuality {
+  const blob = `${stream.source_tag || ''} ${stream.uri_name || ''} ${stream.name || ''}`
+  if (/\bSD\b|_540p|_480p|_360p/i.test(blob)) return 'sd'
+  if (/\bF?HD\b|_1080p|_720p/i.test(blob)) return 'hd'
+  // Main PPV rows without a tag are the HD feed; `_540p` URIs are SD.
+  if (/_540p|_480p|_360p/i.test(String(stream.uri_name || ''))) return 'sd'
+  return 'hd'
+}
+
+function ppvQualityLabel(quality: PpvQuality, sourceTag?: string): string {
+  const network = String(sourceTag || '')
+    .replace(/^\s*(HD|SD|FHD)\s*[|·\-:]+\s*/i, '')
+    .trim()
+  const rung = quality === 'sd' ? 'SD' : quality === 'hd' ? 'HD' : 'Stream'
+  return network ? `PPV ${rung} · ${network}` : `PPV ${rung}`
+}
+
+/**
+ * Main iframe + substreams as HD/SD choices. Lite / Data Saver / slow cellular
+ * open SD first; balanced/high keep HD. Others ride in sportsAltSources.
+ */
+export function ppvStSourceUrls(
+  stream: PpvStStream,
+): Array<{ label: string; url: string; quality: PpvQuality }> {
+  const rows: Array<{ label: string; url: string; quality: PpvQuality }> = []
+  const push = (row: PpvStStream | PpvStSubstream) => {
+    const url = playUrl(row)
+    if (!url || !/^https?:\/\//i.test(url) || rows.some((o) => o.url === url)) return
+    const quality = ppvQualityOf(row)
+    rows.push({
+      label: ppvQualityLabel(quality, row.source_tag),
+      url,
+      quality,
+    })
+  }
+  push(stream)
+  for (const sub of stream.substreams || []) push(sub)
+  if (rows.length <= 1) return rows
+
+  const preferLow = preferLowerLiveQuality()
+  const rank = (q: PpvQuality) => {
+    if (preferLow) return q === 'sd' ? 0 : q === 'hd' ? 1 : 2
+    return q === 'hd' ? 0 : q === 'sd' ? 1 : 2
+  }
+  return [...rows].sort((a, b) => rank(a.quality) - rank(b.quality) || a.label.localeCompare(b.label))
 }
 
 function isActiveStream(stream: PpvStStream, nowSec: number): boolean {
@@ -228,16 +297,25 @@ export function ppvStStreamToItem(stream: PpvStStream, nowSec = unixSecondsNow()
           minute: '2-digit',
         })
       : ''
-  const play = playUrl(stream)
+  const sources = ppvStSourceUrls(stream)
+  const play = sources[0]?.url || playUrl(stream)
+  const alts = sources.slice(1).map(({ label, url }) => ({ label, url }))
   const page = watchPageUrl(stream)
   const viewersRaw = Number(stream.viewers)
   const eventViewers = Number.isFinite(viewersRaw) && viewersRaw >= 0 ? viewersRaw : undefined
+  // Show the quality that will actually open (device may have preferred SD).
+  const qualityHint = sources[0]?.quality === 'sd' ? 'SD' : sources[0]?.quality === 'hd' ? 'HD' : ''
+  const sourceTag = [qualityHint, String(stream.source_tag || '').replace(/^\s*(HD|SD|FHD)\s*[|·\-:]+\s*/i, '')]
+    .filter(Boolean)
+    .join(' · ')
+
+  const labeledTitle = withSportsProviderLabel(title, 'PPV')
 
   if (route === 'series') {
     return {
       id: ppvStItemId(id),
-      title,
-      description: ['24/7', stream.source_tag].filter(Boolean).join(' · '),
+      title: labeledTitle,
+      description: ['24/7', 'PPV', sourceTag || stream.source_tag].filter(Boolean).join(' · '),
       category: 'series',
       url: play,
       detailUrl: page,
@@ -249,14 +327,15 @@ export function ppvStStreamToItem(stream: PpvStStream, nowSec = unixSecondsNow()
       releasedAt: Date.now(),
       eventViewers,
       eventSport: '24/7',
+      sportsAltSources: alts.length ? alts : undefined,
     }
   }
 
   if (route === 'kids') {
     return {
       id: ppvStItemId(id),
-      title,
-      description: ['Kids', '24/7', stream.source_tag].filter(Boolean).join(' · '),
+      title: labeledTitle,
+      description: ['Kids', '24/7', 'PPV', sourceTag || stream.source_tag].filter(Boolean).join(' · '),
       category: 'kids',
       url: play,
       detailUrl: page,
@@ -268,13 +347,14 @@ export function ppvStStreamToItem(stream: PpvStStream, nowSec = unixSecondsNow()
       releasedAt: Date.now(),
       eventViewers,
       eventSport: '24/7',
+      sportsAltSources: alts.length ? alts : undefined,
     }
   }
 
   return {
     id: ppvStItemId(id),
-    title,
-    description: [sport, stream.source_tag, when].filter(Boolean).join(' · '),
+    title: labeledTitle,
+    description: [sport, 'PPV', sourceTag || stream.source_tag, when].filter(Boolean).join(' · '),
     category: 'sports',
     url: play,
     detailUrl: page,
@@ -294,6 +374,7 @@ export function ppvStStreamToItem(stream: PpvStStream, nowSec = unixSecondsNow()
     eventEndsAt: Number(stream.ends_at) > 0 ? Number(stream.ends_at) * 1000 : undefined,
     eventViewers,
     eventSport: sport,
+    sportsAltSources: alts.length ? alts : undefined,
   }
 }
 

@@ -103,6 +103,63 @@ final class BrowserAdBlock {
       || isStreamRefererOnlyUrl(url);
   }
 
+  /**
+   * LiveXTV / DoodStream / Playmogo VODs refuse playback when googlesyndication is
+   * blocked (mirrors electron {@code isReplayAdSensitiveUrl} + soft ad shield).
+   */
+  static boolean isReplayAdSensitiveUrl(String url) {
+    String host = hostOf(url);
+    if (host.isEmpty()) return false;
+    if (host.equals("soccerfull.net") || host.endsWith(".soccerfull.net")) return true;
+    if (host.contains("livextv")) return true;
+    if (host.equals("footreplays.com") || host.endsWith(".footreplays.com")) return true;
+    if (host.equals("fullmatchshows.com") || host.endsWith(".fullmatchshows.com")) return true;
+    if (host.equals("playmate.to") || host.endsWith(".playmate.to")) return true;
+    if (host.equals("playmogo.com") || host.endsWith(".playmogo.com")) return true;
+    if (host.matches("(?i)(.*\\.)?(streamcorner|strmcrnr|streamninja)\\.(st|foo|cloud|fun|top)")) return true;
+    try {
+      String path = new java.net.URI(url).getPath();
+      if (path != null && path.matches("(?i)^/[de]/[a-z0-9]{6,}.*")) return true;
+    } catch (Throwable ignored) {}
+    return isPlayerEmbedHost(url);
+  }
+
+  /** Google ad networks that soft-shield replay hosts must still load. */
+  static boolean isGoogleAdsNetworkUrl(String url) {
+    String host = hostOf(url);
+    if (host.isEmpty()) return false;
+    return host.matches(
+      "(?i)(^|\\.)(doubleclick\\.net|googlesyndication\\.com|googleadservices\\.com|"
+        + "adservice\\.google\\.com|googletagservices\\.com|googletagmanager\\.com)$"
+    );
+  }
+
+  /**
+   * PPV.st mirror anti-adblock loaders (wpnxiswpuyrfn.icu /script/…, /d3.php).
+   * Blocking these leaves an empty player shell — same soft-allow as Electron.
+   */
+  static boolean isPpvAntiAdblockLoaderUrl(String url) {
+    String host = hostOf(url);
+    if (host.isEmpty()) return false;
+    if (!host.matches("(?i)(^|\\.)(wpnxiswpuyrfn\\.icu|vbcojhroxkoaf\\.online)$")) return false;
+    String path = url;
+    try {
+      java.net.URI u = new java.net.URI(url);
+      path = String.valueOf(u.getPath()) + "?" + String.valueOf(u.getQuery());
+    } catch (Throwable ignored) {}
+    return path.matches("(?i).*(/script/|/d3\\.php|selAdType|selPath|adbVersion|cdnPath|kl1Mnopq).*");
+  }
+
+  /**
+   * True when {@code url} would normally be blocked as an ad, but the current page
+   * is a soft-shield sports/replay host that needs Google ads or the PPV anti-adblock
+   * loader to start the player.
+   */
+  static boolean softAllowAdOnReplayPage(String pageUrl, String url) {
+    if (!isReplayAdSensitiveUrl(pageUrl)) return false;
+    return isGoogleAdsNetworkUrl(url) || isPpvAntiAdblockLoaderUrl(url);
+  }
+
   static boolean isStreamRefererOnlyUrl(String url) {
     String host = hostOf(url);
     if (host.isEmpty()) return false;
@@ -177,8 +234,7 @@ final class BrowserAdBlock {
     if (host.equals("streamed.pk") || host.endsWith(".streamed.pk")) return true;
     if (host.equals("ppv.st") || host.endsWith(".ppv.st")) return true;
     if (host.equals("ppvservices.st") || host.endsWith(".ppvservices.st")) return true;
-    if (host.matches("(?i)(.*\\.)?streamcorner\\.(st|foo|cloud|fun)")) return true;
-    if (host.matches("(?i)(.*\\.)?streamninja\\.(st|foo|cloud|fun)")) return true;
+    if (host.matches("(?i)(.*\\.)?(streamcorner|strmcrnr|streamninja)\\.(st|foo|cloud|fun|top)")) return true;
     if (host.equals("rivestream.ru") || host.endsWith(".rivestream.ru")) return true;
     if (host.equals("fstream365.com") || host.endsWith(".fstream365.com")) return true;
     if (host.equals("vsembed.ru") || host.endsWith(".vsembed.ru")) return true;

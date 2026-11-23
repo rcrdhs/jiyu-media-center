@@ -66,16 +66,21 @@ const LEAGUES: LeagueDef[] = [
   {
     id: 'seriea',
     label: 'Serie A',
-    patterns: /\b(serie\s*a|italian\s*serie)\b/i,
+    patterns: /\b(serie\s*a)\b/i,
     clubs:
       /\b(inter(?:nazionale)?|milan|ac\s*milan|juventus|napoli|roma|lazio|atalanta|fiorentina|bologna|torino|udinese|sassuolo|empoli|monza|lecce|cagliari|genoa|verona|salernitana|spezia|venezia|parma|como)\b/i,
+  },
+  {
+    id: 'serieb',
+    label: 'Serie B',
+    patterns: /\b(serie\s*b)\b/i,
   },
   {
     id: 'ligue1',
     label: 'Ligue 1',
     patterns: /\b(ligue\s*1|french\s*ligue)\b/i,
     clubs:
-      /\b(psg|paris\s*saint[- ]?germain|marseille|lyon|monaco|lille|nice|rennes|lens|strasbourg|nantes|toulouse|montpellier|reims|brest|angers|auxerre|le\s*havre|metz|clermont)\b/i,
+      /\b(psg|paris\s*saint[- ]?germain|marseille|lyon|monaco|lille|nice|rennes|lens|strasbourg|nantes|toulouse|montpellier|reims|brest|angers|auxerre|le\s*havre|metz|clermont|lorient|le\s*mans)\b/i,
   },
   {
     id: 'eredivisie',
@@ -162,6 +167,7 @@ const LEAGUE_ORDER = [
   'laliga',
   'bundesliga',
   'seriea',
+  'serieb',
   'ligue1',
   'ucl',
   'uel',
@@ -212,7 +218,21 @@ function titleCaseSport(raw: string): string {
 /** Sport shelf label for mixed Live / Upcoming / Replay grids. */
 export function sportsShelfLabel(item: StreamItem): string {
   const event = String(item.eventSport || '').trim()
-  if (event && !/^24\/7$/i.test(event)) return event
+  // Prefer league/event labels (NHL, NFL, NCAA, Premier League…) over bare "Sports".
+  if (event && !/^24\/7$/i.test(event) && !/^sports?$/i.test(event)) return event
+  // StreamCorner / PPV descriptions often lead with the league: "NHL · Ice Hockey · …"
+  const descLeague = String(item.description || '')
+    .split(/\s*·\s*/)[0]
+    ?.trim()
+  if (
+    descLeague &&
+    descLeague.length >= 2 &&
+    descLeague.length < 48 &&
+    !/^(live|upcoming|replay|streamcorner|streamed|ppv|sports?)$/i.test(descLeague)
+  ) {
+    return descLeague
+  }
+  if (event) return event
   const tagSport = (item.tags || []).find(
     (t) =>
       t &&
@@ -243,13 +263,47 @@ function groupByLabel(
 }
 
 /**
- * All-sports view: football → league shelves; everything else → sport shelves.
+ * Preferred order for non-football league/sport shelves on All sports.
+ * Unknown labels sort alphabetically after these.
+ */
+const OTHER_SPORT_ORDER = [
+  'nfl',
+  'ncaaf',
+  'ncaa',
+  'nba',
+  'wnba',
+  'nhl',
+  'mlb',
+  'ufc',
+  'f1',
+  'formula 1',
+]
+
+function sortOtherSportShelves(shelves: FootballLeagueShelf[]): FootballLeagueShelf[] {
+  const rank = (label: string) => {
+    const key = label.toLowerCase()
+    const idx = OTHER_SPORT_ORDER.indexOf(key)
+    return idx >= 0 ? idx : 1000
+  }
+  return [...shelves].sort((a, b) => {
+    const ra = rank(a.label)
+    const rb = rank(b.label)
+    if (ra !== rb) return ra - rb
+    return a.label.localeCompare(b.label)
+  })
+}
+
+/**
+ * All-sports view: football → league shelves; everything else → league/sport shelves.
  * Used on Live / Upcoming / Replay when the sport chip is “All sports”.
  */
 export function groupAllSportsShelves(items: StreamItem[]): FootballLeagueShelf[] {
   const football = items.filter(isFootballSportsItem)
   const other = items.filter((item) => !isFootballSportsItem(item))
-  return [...groupFootballByLeague(football), ...groupByLabel(other, sportsShelfLabel, 'sport')]
+  return [
+    ...groupFootballByLeague(football),
+    ...sortOtherSportShelves(groupByLabel(other, sportsShelfLabel, 'sport')),
+  ]
 }
 
 /**

@@ -1,8 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-
-/** Media3 must report 'playing' within this window, else open the embed. */
-const NATIVE_STREAM_START_TIMEOUT_MS = 20_000
 import { useLocation, useNavigate } from 'react-router-dom'
+import { placeMedia3InPipCorner } from '../components/Media3Pip'
 import { VolumeSlider } from '../components/VolumeSlider'
 import { usePlayback } from '../context/PlaybackContext'
 import {
@@ -10,15 +8,20 @@ import {
   isAndroidInAppBrowser,
 } from '../lib/androidBrowser'
 import {
+  armMedia3PipHandoff,
   isAndroidMedia3Host,
+  media3GetState,
   media3Hide,
   media3OnPlayback,
   media3Play,
   media3SetBounds,
   media3SetVolume,
-  media3Stop,
+  takeMedia3PipHandoff,
 } from '../lib/androidMedia3'
 import type { CategoryId } from '../types'
+
+/** Media3 must report 'playing' within this window, else open the embed. */
+const NATIVE_STREAM_START_TIMEOUT_MS = 20_000
 
 type NativeStreamState = {
   from?: string
@@ -50,15 +53,17 @@ export function NativeStreamPage() {
   const location = useLocation()
   const state = (location.state || {}) as NativeStreamState
   const stageRef = useRef<HTMLDivElement>(null)
-  // Stay on "Unwrapping stream…" until Media3 reports real playback (not just play() ok).
-  const [status, setStatus] = useState('Unwrapping stream\u2026')
+  // Media3 sniff already used the one "Unwrapping" — this is just Exo starting.
+  const [status, setStatus] = useState('Starting stream\u2026')
   const [error, setError] = useState<string | null>(null)
   const [volume, setVolume] = useState(1)
   const mediaUrl = String(state.mediaUrl || '').trim()
-  const { item: playingItem } = usePlayback()
+  const { item: playingItem, minimizeToPip, mode } = usePlayback()
   // Route state can be lost (HMR / process restore): fall back to the playing title.
   const title = state.title?.trim() || playingItem?.title?.trim() || 'Live'
   const from = state.from || '/section/sports'
+  const modeRef = useRef(mode)
+  modeRef.current = mode
 
   useEffect(() => {
     if (!isAndroidMedia3Host() || !mediaUrl) {
@@ -89,7 +94,15 @@ export function NativeStreamPage() {
       void media3Hide({ stop: true })
       navigate(`/web?url=${encodeURIComponent(embed)}`, {
         replace: true,
-        state: { from, playerMode: 'embed', pipOnBack: true },
+        state: {
+          from,
+          playerMode: 'embed',
+          pipOnBack: true,
+          // Sniff already ran once for this play — no second unwrap cover.
+          skipUnwrapCover: true,
+          // Do not late-promote again (Media3 already failed for this URL).
+          skipMedia3Promote: true,
+        },
       })
       return true
     }
@@ -112,7 +125,7 @@ export function NativeStreamPage() {
           window.clearTimeout(startTimer)
           setStatus('Playing')
         } else if (ev.state === 'buffering' || ev.state === 'loading') {
-          setStatus(played ? 'Buffering\u2026' : 'Unwrapping stream\u2026')
+          setStatus(played ? 'Buffering\u2026' : 'Starting stream\u2026')
         }
         else if (ev.state === 'error') {
           // Auto-open the Gecko embed — a failed Media3 surface stays black.
@@ -128,6 +141,19 @@ export function NativeStreamPage() {
         y: 56,
         width: window.innerWidth,
         height: Math.max(200, window.innerHeight - 120),
+      }
+      // Expanding from Media3 PiP: same ExoPlayer is already running — only resize.
+      const existing = await media3GetState()
+      const sameUrl =
+        Boolean(existing.url) &&
+        String(existing.url).split('?')[0] === mediaUrl.split('?')[0]
+      if (existing.ok && existing.playing && sameUrl) {
+        played = true
+        window.clearTimeout(startTimer)
+        setStatus('Playing')
+        void media3SetBounds(b)
+        void media3SetVolume(Math.round(volume * 100))
+        return
       }
       const result = await media3Play({
         url: mediaUrl,
@@ -168,14 +194,18 @@ export function NativeStreamPage() {
       for (const id of orientTimers) window.clearTimeout(id)
       ro?.disconnect()
       void remove?.remove()
+      // Back→PiP handoff: keep the same ExoPlayer; Media3Pip owns bounds.
+      if (takeMedia3PipHandoff() || modeRef.current === 'pip') return
       void media3Hide({ stop: true })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mount once per mediaUrl
   }, [mediaUrl])
 
   const goBack = () => {
-    void media3Stop()
-    void media3Hide({ stop: true })
+    // Shrink the live Media3 surface into the corner — never stop/replay.
+    armMedia3PipHandoff()
+    placeMedia3InPipCorner()
+    minimizeToPip()
     navigate(from, { replace: true })
   }
 

@@ -12,6 +12,8 @@
  */
 
 import type { StreamItem } from '../types'
+import { preferLowerLiveQuality } from './deviceProfile'
+import { stripSportsProviderLabel, withSportsProviderLabel } from './sportsProviderLabel'
 
 export const STREAMFREE_ORIGIN = 'https://streamfree.top'
 export const STREAMFREE_ID_PREFIX = 'streamfree-'
@@ -288,11 +290,11 @@ function pickSource(sources: StreamFreeSource[] | undefined, quality: RegExp): s
   return ''
 }
 
-/** FHD first, then SD, then anything with a URL. */
 /**
- * FHD first, then SD, then anything with a URL. With `apiHost`, StreamFree embeds
- * move onto the host that answered the API and the API's own host stays as an
- * alternate (e.g. "StreamFree FHD · strmfree.st").
+ * Device-aware order: FHD first on balanced/high; SD first on lite / Data Saver /
+ * slow cellular. With `apiHost`, StreamFree embeds move onto the host that
+ * answered the API and the API's own host stays as an alternate
+ * (e.g. "StreamFree FHD · strmfree.st").
  */
 export function streamFreeSourceUrls(
   stream: StreamFreeStream,
@@ -302,8 +304,14 @@ export function streamFreeSourceUrls(
   const base: Array<{ label: string; url: string }> = []
   const fhd = pickSource(pool, /fhd|1080|hd/i)
   const sd = pickSource(pool, /^sd$|540|480/i)
-  if (fhd) base.push({ label: 'StreamFree FHD', url: fhd })
-  if (sd && sd !== fhd) base.push({ label: 'StreamFree SD', url: sd })
+  const preferLow = preferLowerLiveQuality()
+  if (preferLow) {
+    if (sd) base.push({ label: 'StreamFree SD', url: sd })
+    if (fhd && fhd !== sd) base.push({ label: 'StreamFree FHD', url: fhd })
+  } else {
+    if (fhd) base.push({ label: 'StreamFree FHD', url: fhd })
+    if (sd && sd !== fhd) base.push({ label: 'StreamFree SD', url: sd })
+  }
   for (const s of pool || []) {
     const url = String(s?.url || '').trim()
     if (!url || !/^https?:\/\//i.test(url) || base.some((o) => o.url === url)) continue
@@ -377,8 +385,8 @@ export function streamFreeStreamToItem(
 
   return {
     id: streamFreeItemId(key),
-    title,
-    description: [eventSport, 'StreamFree', alwaysLive ? '24/7' : when].filter(Boolean).join(' · '),
+    title: withSportsProviderLabel(title, 'SF'),
+    description: [eventSport, 'SF', alwaysLive ? '24/7' : when].filter(Boolean).join(' · '),
     category: 'sports',
     url: sources[0].url,
     detailUrl: apiHost ? `https://${apiHost}/` : `${STREAMFREE_ORIGIN}/`,
@@ -455,7 +463,7 @@ export function normalizeTeamName(name: string): string {
 
 /** "League: Home vs Away" / "Home @ Away" → [home, away]. */
 export function splitMatchTitle(title: string): [string, string] | null {
-  let t = String(title || '').trim()
+  let t = stripSportsProviderLabel(title)
   const colon = t.lastIndexOf(':')
   if (colon >= 0) t = t.slice(colon + 1)
   t = t.replace(/\s*[([][^)\]]*[)\]]\s*$/, '')

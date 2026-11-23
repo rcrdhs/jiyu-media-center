@@ -1,6 +1,6 @@
 # jiyu-sync
 
-Cloudflare Worker + D1 that syncs the **Continue watching** shelf between Jiyu devices.
+Cloudflare Worker + D1 that syncs **Continue watching** and **Saved** between Jiyu devices.
 Separate from `jiyu-wyzie`; holds no API keys.
 
 ## Endpoints (all JSON, HTTPS only)
@@ -13,9 +13,12 @@ Separate from `jiyu-wyzie`; holds no API keys.
 | POST | `/v1/auth/signout` | Bearer | Revoke this device. |
 | GET | `/v1/devices` | Bearer | List devices on the account. |
 | DELETE | `/v1/devices/:id` | Bearer | Revoke a device (its token stops working at once). |
-| GET | `/v1/progress?since=REV` | Bearer | Rows changed after server revision `REV`, plus current `rev` and server `now`. |
-| PUT | `/v1/progress` `{entries}` | Bearer | Upsert up to 100 rows. Each row carries `ageMs` (how long ago it was edited); the server stamps `updatedAt`/`rev`. Tombstones: `deleted: true`. |
-| DELETE | `/v1/progress/:id` | Bearer | Compatibility alias for a tombstone PUT. |
+| GET | `/v1/progress?since=REV` | Bearer | Continue-watching rows changed after server revision `REV`, plus current `rev` and server `now`. |
+| PUT | `/v1/progress` `{entries}` | Bearer | Upsert up to 100 Continue-watching rows. Each row carries `ageMs` (how long ago it was edited); the server stamps `updatedAt`/`rev`. Tombstones: `deleted: true`. |
+| DELETE | `/v1/progress/:id` | Bearer | Compatibility alias for a Continue-watching tombstone PUT. |
+| GET | `/v1/saved?since=REV` | Bearer | Saved (watchlist) rows changed after `saved_rev`, plus current `rev` and server `now`. |
+| PUT | `/v1/saved` `{entries}` | Bearer | Upsert up to 100 Saved rows (`id`, `title`, `poster`, `category`, `href`, `ageMs`; tombstones: `deleted: true`). |
+| DELETE | `/v1/saved/:id` | Bearer | Compatibility alias for a Saved tombstone PUT. |
 
 Tokens are 32 random bytes; only SHA-256 hashes are stored. When the last device on an
 account is removed the account and its rows are deleted.

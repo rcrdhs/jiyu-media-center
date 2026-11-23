@@ -79,6 +79,34 @@ export function getWatchlist(): WatchlistEntry[] {
   return kidsFilter(readRaw()).sort((a, b) => b.savedAt - a.savedAt)
 }
 
+/** Full Saved list for cross-device sync (ignores Kids mode filter). */
+export function listWatchlistForSync(): WatchlistEntry[] {
+  return readRaw().sort((a, b) => b.savedAt - a.savedAt)
+}
+
+/** Replace local Saved with a merged list from cross-device sync. */
+export function applySyncedWatchlistEntries(entries: WatchlistEntry[]) {
+  const cleaned: WatchlistEntry[] = []
+  const seen = new Set<string>()
+  for (const row of entries) {
+    if (!row?.id || seen.has(row.id) || !canSaveCategory(row.category)) continue
+    const title = String(row.title || '').trim()
+    const href = String(row.href || '').trim()
+    if (!title || !href) continue
+    seen.add(row.id)
+    cleaned.push({
+      id: row.id,
+      title,
+      poster: row.poster || undefined,
+      category: row.category,
+      href,
+      savedAt: Number(row.savedAt) || Date.now(),
+    })
+  }
+  cleaned.sort((a, b) => b.savedAt - a.savedAt)
+  writeRaw(cleaned.slice(0, MAX_SAVED))
+}
+
 export function isOnWatchlist(id: string): boolean {
   return readRaw().some((entry) => entry.id === id)
 }
@@ -95,14 +123,21 @@ export function addToWatchlist(item: StreamItem): boolean {
     savedAt: Date.now(),
   }
   writeRaw([entry, ...prev])
+  void import('./progressSync').then((mod) => {
+    mod.queueSavedSyncPush(entry, { urgent: true })
+  })
   return true
 }
 
 export function removeFromWatchlist(id: string): boolean {
   const prev = readRaw()
+  const hit = prev.find((entry) => entry.id === id)
   const next = prev.filter((entry) => entry.id !== id)
   if (next.length === prev.length) return false
   writeRaw(next)
+  void import('./progressSync').then((mod) => {
+    mod.queueSavedSyncDelete(id, hit?.category)
+  })
   return true
 }
 

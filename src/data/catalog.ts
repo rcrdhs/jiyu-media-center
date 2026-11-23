@@ -8,6 +8,12 @@ export const CATEGORIES: CategoryMeta[] = [
     accent: '#3ecf8e',
   },
   {
+    id: 'series',
+    label: 'TV Series',
+    blurb: 'Episodes and binge-ready shows.',
+    accent: '#d45d7a',
+  },
+  {
     id: 'movies',
     label: 'Movies',
     blurb: 'Features and film house streams.',
@@ -18,12 +24,6 @@ export const CATEGORIES: CategoryMeta[] = [
     label: 'Anime',
     blurb: 'Series and OVAs you queue up next.',
     accent: '#5b8def',
-  },
-  {
-    id: 'series',
-    label: 'TV Series',
-    blurb: 'Episodes and binge-ready shows.',
-    accent: '#d45d7a',
   },
   {
     id: 'news',
@@ -44,10 +44,12 @@ export const LOCAL_CHANNELS: StreamItem[] = [
   {
     id: 'local-tvj',
     title: 'TVJ',
-    description: 'Television Jamaica — local live (not always 24/7).',
+    description: 'Television Jamaica — univtec HLS (YouTube fallback).',
     category: 'news',
     // Streamlock host is dead. Public HLS from iptv-org Jamaica list (univtec).
+    // detailUrl keeps @TelevisionJamaica/live for offline→YouTube fallback.
     url: 'https://vod2live.univtec.com/manifest/a99a1804-dc83-411f-8c1c-b62f08cdfa59.m3u8',
+    detailUrl: 'https://www.youtube.com/@TelevisionJamaica/live',
     poster: 'https://i.imgur.com/R4PoC3L.png',
     // Matches epgshare JM XMLTV (also try IPTV-Org TVJ.jm@SD via matcher aliases).
     tvgId: 'Television.Jamaica.jm',
@@ -58,11 +60,13 @@ export const LOCAL_CHANNELS: StreamItem[] = [
   {
     id: 'local-cvm',
     title: 'CVM',
-    description: 'CVM Television — local live 24×7.',
+    description: 'CVM Television — Vimeo live (YouTube fallback).',
     category: 'news',
     // No stable public m3u8 (iptv-org empty; moveonjoy dead). Official site embeds
-    // Vimeo event 4401057 — desktop resolves a fresh tokenized HLS URL on probe/play.
+    // Vimeo event 4401057 — resolve tokenized HLS on probe/play; when that clip is
+    // down, detailUrl opens @cvm_television/live (same handle as cvmtv.com).
     url: 'https://vimeo.com/event/4401057',
+    detailUrl: 'https://www.youtube.com/@cvm_television/live',
     poster:
       'https://static.wikia.nocookie.net/logopedia/images/c/c5/CVM_Television_logo_2023.webp/revision/latest/scale-to-width-down/640?cb=20231225060123',
     tvgId: 'CVM.Television.Limited.jm',
@@ -73,16 +77,19 @@ export const LOCAL_CHANNELS: StreamItem[] = [
   {
     id: 'local-nationwide',
     title: 'Nationwide',
-    description: 'Nationwide News Network (90FM) — live on YouTube.',
+    description: 'Nationwide News Network (90FM) — live HLS (YouTube fallback).',
     category: 'news',
-    url: 'https://www.youtube.com/@nnn-RADIOLIVE/live',
+    // Native HLS via jiyu-nnn Worker — avoids the YouTube embed "Unwrapping stream…"
+    // cover. detailUrl keeps the /live handle for offline→YouTube fallback.
+    url: 'https://jiyu-nnn.free-river.workers.dev/live.m3u8',
+    detailUrl: 'https://www.youtube.com/@nnn-RADIOLIVE/live',
     poster:
       'data:image/svg+xml;charset=utf-8,' +
       encodeURIComponent(
         `<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360"><rect width="640" height="360" fill="#111827"/><text x="320" y="170" text-anchor="middle" fill="#f8fafc" font-family="Segoe UI,Arial,sans-serif" font-size="42" font-weight="700">Nationwide</text><text x="320" y="220" text-anchor="middle" fill="#94a3b8" font-family="Segoe UI,Arial,sans-serif" font-size="20">90FM · YouTube Live</text></svg>`,
       ),
     tvgId: 'Jamaican.News.Network.jm',
-    tags: ['local', 'jamaica', 'live', 'youtube'],
+    tags: ['local', 'jamaica', 'live', 'hls'],
     source: 'Local channel',
     language: 'en',
   },
@@ -106,9 +113,28 @@ function titleMatchesLocalSeed(title: string, key: string): boolean {
   return new RegExp(`^${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(t)
 }
 
+function isNationwideHlsSeed(url: string): boolean {
+  return /jiyu\.free-river\.workers\.dev\/(?:nnn|nationwide)|jiyu-nnn\.free-river\.workers\.dev/i.test(
+    url,
+  )
+}
+
 export function resolveLocalChannel(seed: StreamItem, catalog: StreamItem[]): StreamItem {
   const key = seed.title.trim().toLowerCase()
   const matches = catalog.filter((item) => titleMatchesLocalSeed(item.title, key))
+
+  // Built-in local-* cards must keep seed title + primary URL. Catalog twins used
+  // to win (YouTube / "TVJ (720p)…") and on Android that swapped TVJ to a /live
+  // handle — when off-air the HLS preview vanished and the card looked empty.
+  if (seed.id.startsWith('local-')) {
+    const posterTwin = matches.find((item) => Boolean(item.poster) && item.poster !== seed.poster)
+    return {
+      ...seed,
+      poster: seed.poster || posterTwin?.poster || seed.poster,
+      detailUrl: seed.detailUrl,
+      tags: [...new Set([...(seed.tags ?? []), 'local'])],
+    }
+  }
 
   if (matches.length === 0) return seed
 
@@ -118,6 +144,10 @@ export function resolveLocalChannel(seed: StreamItem, catalog: StreamItem[]): St
     if (item.url !== seed.url) n += 2
     // Prefer working public HLS / YouTube over dead Streamlock mirrors.
     if (/youtube\.com|youtu\.be/i.test(item.url)) n += 12
+    // Nationwide Worker HLS beats a playlist YouTube mirror (avoids unwrap cover).
+    if (/jiyu\.free-river\.workers\.dev\/(?:nnn|nationwide)|jiyu-nnn\.free-river\.workers\.dev/i.test(item.url)) {
+      n += 20
+    }
     if (/vimeo\.com\/event\//i.test(item.url)) n += 18
     if (/vod2live\.univtec\.com|immergo\.tv|akamaized\.net/i.test(item.url)) n += 18
     if (/streamlock\.net|moveonjoy\.com|vimeocdn\.com\/exp=/i.test(item.url)) n -= 20
@@ -129,11 +159,13 @@ export function resolveLocalChannel(seed: StreamItem, catalog: StreamItem[]): St
   }
 
   const best = [...matches].sort((a, b) => score(b) - score(a))[0] ?? seed
-  // Built-in YouTube / Vimeo seeds win over dead Streamlock / expired CDN mirrors.
+  // Built-in YouTube / Vimeo / Nationwide HLS seeds win over dead Streamlock /
+  // expired CDN mirrors (and playlist YouTube for Nationwide).
   if (
     (/youtube\.com|youtu\.be|vimeo\.com\/event\//i.test(seed.url) &&
       /streamlock\.net|moveonjoy\.com|vimeocdn\.com\/exp=/i.test(best.url)) ||
-    (/vimeo\.com\/event\//i.test(seed.url) && /youtube\.com|youtu\.be/i.test(best.url))
+    (/vimeo\.com\/event\//i.test(seed.url) && /youtube\.com|youtu\.be/i.test(best.url)) ||
+    (isNationwideHlsSeed(seed.url) && /youtube\.com|youtu\.be/i.test(best.url))
   ) {
     return {
       ...seed,
@@ -141,11 +173,15 @@ export function resolveLocalChannel(seed: StreamItem, catalog: StreamItem[]): St
       tags: [...new Set([...(seed.tags ?? []), 'local'])],
     }
   }
-  // Keep stream URL/title from the best catalog match, but hide playlist source chrome
+  // Keep stream URL/title from the best catalog match, but hide playlist source chrome.
+  // Always keep the built-in local-* id so Watch / Live badge / Nationwide HLS
+  // routing still match (playlist mirrors use different IPTV ids).
   return {
     ...best,
+    id: seed.id,
     description: seed.description,
     source: seed.source,
+    detailUrl: seed.detailUrl || best.detailUrl,
     tags: [...new Set([...(seed.tags ?? []), 'local'])],
   }
 }

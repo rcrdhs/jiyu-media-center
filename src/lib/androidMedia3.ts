@@ -75,7 +75,9 @@ export async function media3Show(bounds?: {
 
 export async function media3Hide(options?: { stop?: boolean }) {
   if (!isAndroidMedia3Host()) return { ok: false as const }
-  return NativeMedia3.hide(options)
+  // Explicit stop:false when omitting — native default used to be stop:true and
+  // that killed Media3 PiP when any bare hide() raced the handoff.
+  return NativeMedia3.hide({ stop: Boolean(options?.stop) })
 }
 
 export async function media3SetBounds(bounds: {
@@ -131,4 +133,20 @@ export async function media3GetState() {
 export function media3OnPlayback(listener: (ev: Media3PlaybackEvent) => void) {
   if (!isAndroidMedia3Host()) return Promise.resolve({ remove: async () => undefined })
   return NativeMedia3.addListener('playback', listener)
+}
+
+/**
+ * NativeStreamPage sets this before navigating away so its effect cleanup does
+ * not stop Media3 — GlobalPlayer / Media3Pip keeps the same surface in the corner.
+ */
+let media3PipHandoff = false
+
+export function armMedia3PipHandoff() {
+  media3PipHandoff = true
+}
+
+export function takeMedia3PipHandoff(): boolean {
+  const armed = media3PipHandoff
+  media3PipHandoff = false
+  return armed
 }

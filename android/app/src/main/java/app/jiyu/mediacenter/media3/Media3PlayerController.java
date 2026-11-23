@@ -117,7 +117,18 @@ final class Media3PlayerController {
     }
     MediaSource source;
     String lower = url.toLowerCase();
-    if (lower.contains(".m3u8") || lower.contains("format=m3u8") || lower.contains("/hls")) {
+    // Nationwide short paths (/nnn) have no .m3u8 suffix but are HLS masters.
+    boolean nationwideHls =
+      lower.contains("jiyu-nnn")
+        || lower.contains("/nnn")
+        || lower.contains("/nationwide")
+        || lower.contains("live.m3u8");
+    if (
+      lower.contains(".m3u8")
+        || lower.contains("format=m3u8")
+        || lower.contains("/hls")
+        || nationwideHls
+    ) {
       source = new HlsMediaSource.Factory(http).createMediaSource(item.build());
     } else {
       source =

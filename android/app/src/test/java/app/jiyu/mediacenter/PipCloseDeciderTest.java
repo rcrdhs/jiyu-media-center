@@ -119,7 +119,8 @@ public class PipCloseDeciderTest {
   }
 
   @Test
-  public void leavingAppWithoutPip_cancelsCatalogEvenIfSyncWasRunning() {
+  public void explicitLeaveOrExit_stillCancelsCatalog() {
+    // Used for Back→exit / beginClose("leave"|"exit"), not plain Home.
     assertTrue(AppClosePolicy.cancelsCatalogSync(false, false, true, false));
     assertTrue(AppClosePolicy.finishAndRemoveTask(false, true, false, false));
   }

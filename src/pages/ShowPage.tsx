@@ -74,6 +74,7 @@ import {
   torrentStream,
 } from '../lib/torrentBridge'
 import { maskUserFacingMessage } from '../lib/sourceMask'
+import { formatTmdbAirDateLabel } from '../lib/tmdbTv'
 import { isTizenTv } from '../lib/tvMode'
 import type { StreamItem, StreamPlaylistItem, TorrentStreamResult } from '../types'
 
@@ -276,6 +277,14 @@ export function ShowPage() {
     }
     const chosen = episodes[index]
     if (!chosen) return
+    if (chosen.upcoming) {
+      setPlayError(
+        chosen.airDate
+          ? `This episode hasn’t aired yet — airs ${formatTmdbAirDateLabel(chosen.airDate)}`
+          : 'This episode hasn’t aired yet',
+      )
+      return
+    }
     const playGen = ++playGenRef.current
     setPlayingIndex(index)
     setPlayError(null)
@@ -1392,7 +1401,22 @@ export function ShowPage() {
           <p>
             {loading
               ? 'Loading episode list…'
-              : `${episodes.length.toLocaleString()} episode${episodes.length === 1 ? '' : 's'}`}
+              : (() => {
+                  const upcoming = episodes.filter((ep) => ep.upcoming).length
+                  const aired = episodes.length - upcoming
+                  if (episodes.length === 0) return '0 episodes'
+                  if (aired === 0) {
+                    return `${episodes.length.toLocaleString()} episode${
+                      episodes.length === 1 ? '' : 's'
+                    } · none aired yet`
+                  }
+                  if (upcoming > 0) {
+                    return `${aired.toLocaleString()} aired · ${upcoming.toLocaleString()} upcoming`
+                  }
+                  return `${episodes.length.toLocaleString()} episode${
+                    episodes.length === 1 ? '' : 's'
+                  }`
+                })()}
             {!loading &&
             episodes.length > 0 &&
             isEztvSource(display.detailUrl || display.url || '', display.source) &&
@@ -1419,6 +1443,19 @@ export function ShowPage() {
           </div>
         )}
 
+        {!loading && !error && episodes.length > 0 && episodes.every((ep) => ep.upcoming) && (
+          <div className="empty-state" style={{ marginBottom: '0.75rem' }}>
+            <p>
+              {(() => {
+                const first = episodes.find((ep) => ep.airDate)
+                return first?.airDate
+                  ? `No episodes have aired yet — first episode airs ${formatTmdbAirDateLabel(first.airDate)}`
+                  : 'No episodes have aired yet'
+              })()}
+            </p>
+          </div>
+        )}
+
         {!loading && !error && episodes.length > 0 && (
           <ol className="show-episode-list">
             {episodes.map((ep, index) => {
@@ -1426,16 +1463,22 @@ export function ShowPage() {
               const hasContinue =
                 typeof continueEntry?.playlistIndex === 'number' &&
                 continueEntry.playlistIndex >= 0 &&
-                continueEntry.playlistIndex < episodes.length
-              const tvPrimary = isContinue || (!hasContinue && index === 0)
+                continueEntry.playlistIndex < episodes.length &&
+                !episodes[continueEntry.playlistIndex]?.upcoming
+              const firstPlayable = episodes.findIndex((row) => !row.upcoming)
+              const tvPrimary =
+                !ep.upcoming &&
+                (isContinue || (!hasContinue && index === firstPlayable))
               const busy = playingIndex === index
               return (
                 <li key={ep.key || `${ep.title}-${index}`}>
                   <button
                     type="button"
-                    className={`show-episode-row${isContinue ? ' is-continue' : ''}`}
+                    className={`show-episode-row${isContinue ? ' is-continue' : ''}${
+                      ep.upcoming ? ' is-upcoming' : ''
+                    }`}
                     data-tv-primary={tvPrimary ? '' : undefined}
-                    disabled={playingIndex === index}
+                    disabled={playingIndex === index || Boolean(ep.upcoming)}
                     onClick={() => void playEpisode(index)}
                   >
                     <span className="show-episode-key">{ep.key}</span>
@@ -1446,6 +1489,11 @@ export function ShowPage() {
                     </span>
                     <span className="show-episode-meta">
                       {[
+                        ep.upcoming && ep.airDate
+                          ? `Airs ${formatTmdbAirDateLabel(ep.airDate)}`
+                          : ep.upcoming
+                            ? 'Upcoming'
+                            : '',
                         typeof ep.seeders === 'number' && ep.seeders > 0
                           ? `ready (${ep.seeders})`
                           : '',

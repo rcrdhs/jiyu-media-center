@@ -1,5 +1,5 @@
 /**
- * Cross-device progress sync protocol (jiyu-sync Worker, workers/jiyu-sync).
+ * Cross-device progress + Saved sync protocol (jiyu-sync Worker, workers/jiyu-sync).
  * Same contract for Android, desktop, future TV / Apple builds.
  */
 
@@ -27,6 +27,19 @@ export type ProgressSyncRecord = {
   /** Tombstone — device deleted Continue watching for this title. */
   deleted?: boolean
   /** Server revision (pull responses only). */
+  rev?: number
+}
+
+/** Wire format for Saved (watchlist) rows. */
+export type SavedSyncRecord = {
+  id: string
+  title: string
+  poster?: string
+  category: CategoryId
+  href: string
+  /** Local clock when building a push; server clock on rows returned by the API. */
+  updatedAt: number
+  deleted?: boolean
   rev?: number
 }
 

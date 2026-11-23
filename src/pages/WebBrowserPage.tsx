@@ -29,6 +29,7 @@ import { ANDROID_LEAVE_WEB_EMBED_EVENT, isAndroidShell } from '../lib/androidFul
 import {
   androidBrowserExecute,
   androidBrowserGetVolume,
+  androidBrowserHide,
   androidBrowserSetVolume,
   isAndroidInAppBrowser,
 } from '../lib/androidBrowser'
@@ -38,6 +39,9 @@ import {
   isAndroidCastHost,
   isCastableMediaUrl,
 } from '../lib/androidCast'
+import { isAndroidMedia3Host } from '../lib/androidMedia3'
+import { androidSniffCurrentMedia } from '../lib/androidStreamResolve'
+import { isStreamCornerHost } from '../lib/streamCorner'
 
 const DEFAULT_URL = 'https://www.youtube.com/'
 
@@ -59,6 +63,10 @@ type ContinueWatchState = {
   playlistLength?: number
   /** Football replays: Full match / 1st half / 2nd half / Highlights picker. */
   replayParts?: ReplayPartsInfo
+  /** PPV / StreamFree HD·SD (and other) embeds for the same match. */
+  sportsAltSources?: Array<{ label: string; url: string }>
+  /** Index into [playUrl, ...sportsAltSources] after auto/manual hops. */
+  sportsSourceIndex?: number
 }
 
 type WebLocationState = {
@@ -66,6 +74,13 @@ type WebLocationState = {
   playerMode?: 'embed' | string
   /** Embed Back: drop into PiP and return to Sports / show. */
   pipOnBack?: boolean
+  /**
+   * Media3 (or another path) already showed "Unwrapping stream…" — open the
+   * embed without a second cover for the same play tap.
+   */
+  skipUnwrapCover?: boolean
+  /** Media3 already failed for this play — stay on Gecko (no promote loop). */
+  skipMedia3Promote?: boolean
   continueWatch?: ContinueWatchState
 }
 
@@ -156,10 +171,17 @@ export function WebBrowserPage() {
     visible: false,
     url: '',
   })
+  const adDockTileRef = useRef<HTMLDivElement>(null)
   const [castAvailable, setCastAvailable] = useState(false)
   const [replayPartBusy, setReplayPartBusy] = useState(false)
   const chromeHideTimer = useRef(0)
   const volumeFlashTimer = useRef(0)
+  /** Auto host-hop state for FullMatchShows embeds that keep buffering. */
+  const replayHopRef = useRef<{ id: string; banned: Set<string>; hops: number }>({
+    id: '',
+    banned: new Set(),
+    hops: 0,
+  })
   const paramUrl = searchParams.get('url')
   const watching = Boolean(paramUrl || nav.url)
   const embedPlayer =
@@ -263,30 +285,94 @@ export function WebBrowserPage() {
     return () => stop?.()
   }, [desktop])
 
+  useEffect(() => {
+    if (!desktop || !adDock.visible) return
+    const el = adDockTileRef.current
+    if (!el) return
+    const report = () => {
+      const r = el.getBoundingClientRect()
+      if (r.width < 8 || r.height < 8) return
+      void window.signalDesktop?.browserAdDockSetBounds?.({
+        x: Math.round(r.x),
+        y: Math.round(r.y),
+        width: Math.round(r.width),
+        height: Math.round(r.height),
+      })
+    }
+    report()
+    const ro = new ResizeObserver(report)
+    ro.observe(el)
+    if (document.body) ro.observe(document.body)
+    window.addEventListener('resize', report)
+    return () => {
+      ro.disconnect()
+      window.removeEventListener('resize', report)
+    }
+  }, [desktop, adDock.visible])
+
   const VIDEO_PROGRESS_SCRIPT = `(() => {
     try {
       const v = document.querySelector('video');
       if (!v) return null;
       const t = Number(v.currentTime) || 0;
       const d = Number.isFinite(v.duration) && v.duration !== Infinity ? Number(v.duration) : 0;
-      return { t, d, paused: !!v.paused };
+      const waiting = !!v.seeking || (!v.paused && v.readyState < 3 && (v.networkState === 2 || v.networkState === 1));
+      return { t, d, paused: !!v.paused, waiting, rs: v.readyState };
     } catch (_) { return null; }
   })();`
 
   // Keep Continue watching updated while an embed episode is open.
+  // Football replays: if the host keeps buffering, auto-switch to the next verified host.
   useEffect(() => {
     if (!desktop || !continueWatch?.id || !embedPlayer) return
     let cancelled = false
+    const openedAt = Date.now()
+    const stall = { lastT: -1, since: 0, started: false }
+    const matchId = continueWatch.id
+    if (replayHopRef.current.id !== matchId) {
+      replayHopRef.current = { id: matchId, banned: new Set(), hops: 0 }
+    }
+    const hopAway = (hosts: NonNullable<ReturnType<typeof replayHostChoices>>) => {
+      const hop = replayHopRef.current
+      if (!hosts || hosts.hosts.length < 2 || hop.hops >= 3) return false
+      const cur = hosts.hosts.find((h) => h.index === hosts.current)
+      if (cur) hop.banned.add(cur.host)
+      const next =
+        hosts.hosts.find(
+          (h) => h.index !== hosts.current && !hop.banned.has(h.host) && h.host !== 'playmogo',
+        ) ||
+        hosts.hosts.find((h) => h.index !== hosts.current && !hop.banned.has(h.host))
+      if (!next) return false
+      stall.since = 0
+      hop.hops += 1
+      stall.started = false
+      stall.lastT = -1
+      setVolumeFlash(`Switching to ${next.label}…`)
+      window.clearTimeout(volumeFlashTimer.current)
+      volumeFlashTimer.current = window.setTimeout(() => setVolumeFlash(null), 2200)
+      pickReplayHost(next.index)
+      return true
+    }
     const tick = async () => {
       if (cancelled) return
       const result = isAndroidInAppBrowser()
         ? await androidBrowserExecute(VIDEO_PROGRESS_SCRIPT)
         : await window.signalDesktop?.browserExecute?.(VIDEO_PROGRESS_SCRIPT)
       if (cancelled || !result?.ok || result.result == null) return
-      let data = result.result as { t?: number; d?: number } | string
+      let data = result.result as {
+        t?: number
+        d?: number
+        paused?: boolean
+        waiting?: boolean
+      } | string
       if (typeof data === 'string') {
         try {
-          data = JSON.parse(data) as { t?: number; d?: number }
+          data = JSON.parse(data) as {
+            t?: number
+            d?: number
+            paused?: boolean
+            waiting?: boolean
+          }
         } catch {
           return
         }
@@ -294,7 +380,38 @@ export function WebBrowserPage() {
       if (!data || typeof data !== 'object') return
       const t = Number(data.t) || 0
       const d = Number(data.d) || 0
+      const paused = Boolean(data.paused)
+      const waiting = Boolean(data.waiting)
       noteReplayHostProgress(t)
+      if (t >= 2) stall.started = true
+      // Auto-hop only for FullMatchShows multi-host replays.
+      const hop = replayHopRef.current
+      const hosts = replayHostChoices(
+        continueWatch.replayParts,
+        continueWatch.playUrl || paramUrl || nav.url || '',
+      )
+      if (hosts && hosts.hosts.length > 1 && hop.hops < 3) {
+        // Playmogo ads / "Network error" never advance currentTime — hop before
+        // waiting for a 2s start that never comes.
+        const curHost = hosts.hosts.find((h) => h.index === hosts.current)?.host || ''
+        const neverStartMs = curHost === 'playmogo' ? 10_000 : 16_000
+        if (!stall.started && t < 1 && Date.now() - openedAt >= neverStartMs) {
+          if (hopAway(hosts)) return
+        }
+        const advanced = t > stall.lastT + 0.35
+        if (advanced) {
+          stall.lastT = t
+          stall.since = 0
+        } else if (!paused && stall.started && (waiting || t <= stall.lastT + 0.05)) {
+          if (!stall.since) stall.since = Date.now()
+          // ~14s stuck buffering after play has started → next verified host.
+          if (Date.now() - stall.since >= 14_000) {
+            if (hopAway(hosts)) return
+          }
+        } else if (paused) {
+          stall.since = 0
+        }
+      }
       if (t < 5 && d <= 0) return
       recordWebEmbedContinue({
         ...continueWatch,
@@ -306,14 +423,14 @@ export function WebBrowserPage() {
     void tick()
     const id = window.setInterval(() => {
       void tick()
-    }, 15000)
+    }, continueWatch.replayParts ? 4000 : 15000)
     return () => {
       cancelled = true
       window.clearInterval(id)
       void tick()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [desktop, embedPlayer, continueWatch?.id, continueWatch?.playlistIndex])
+  }, [desktop, embedPlayer, continueWatch?.id, continueWatch?.playlistIndex, continueWatch?.playUrl])
 
   const displayTitle = (() => {
     // What is being watched, never the Jiyu location / browser placeholder.
@@ -365,8 +482,10 @@ export function WebBrowserPage() {
     // and can leave the BrowserView hidden/paused. openInPip exits OS fullscreen.
     exitFullscreen()
     void window.signalDesktop?.browserAdDockClose?.()
-    // Prefer real embed URLs; never PiP/reopen about:blank from a blanked guest.
-    const candidates = [continueWatch?.playUrl, paramUrl, nav.url, address].filter(
+    // Prefer the LIVE guest URL (nav/address) over the original continueWatch /
+    // route URL — sports embeds hop mirrors while playing; PiPing the seed URL
+    // reloads and re-shows "Unwrapping stream…".
+    const candidates = [nav.url, address, paramUrl, continueWatch?.playUrl].filter(
       (u): u is string => Boolean(u) && !isBlankBrowserUrl(u),
     )
     const url =
@@ -484,12 +603,76 @@ export function WebBrowserPage() {
   }
 
   /** Load a replay embed once: the route-param effect must not open it a second time. */
-  function openReplayEmbed(url: string, nextState: WebLocationState) {
+  function openReplayEmbed(
+    url: string,
+    nextState: WebLocationState,
+    options?: { unwrapCover?: boolean },
+  ) {
     openedParamRef.current = url
     blankRecoverRef.current = ''
     navigate(`/web?url=${encodeURIComponent(url)}`, { replace: true, state: nextState })
-    void openUrl(toAutoplayUrl(url))
+    void openUrl(toAutoplayUrl(url), options)
   }
+
+  /** PPV / live sports: [primary, ...sportsAltSources] — HD/SD/StreamFree for the same match. */
+  function sportsSourceList(): Array<{ label: string; url: string }> {
+    if (!continueWatch?.playUrl && !paramUrl) return []
+    const primary = String(continueWatch?.playUrl || paramUrl || '').trim()
+    const rows: Array<{ label: string; url: string }> = []
+    if (primary) rows.push({ label: 'Primary', url: primary })
+    for (const alt of continueWatch?.sportsAltSources || []) {
+      const url = String(alt?.url || '').trim()
+      if (!url || rows.some((r) => r.url === url)) continue
+      rows.push({ label: String(alt.label || 'Backup').trim() || 'Backup', url })
+    }
+    return rows
+  }
+
+  /**
+   * Hop to the next sports alt (Retry, or once when the player first stalls).
+   * Uses skipUnwrapCover so a hop does not paint a second unwrap veil.
+   * Returns true when a hop was started.
+   */
+  function tryNextSportsSource(): boolean {
+    if (!continueWatch || replayPartBusy) return false
+    const list = sportsSourceList()
+    if (list.length < 2) return false
+    const cur = Math.max(0, Number(continueWatch.sportsSourceIndex) || 0)
+    const next = cur + 1
+    if (next >= list.length) return false
+    const choice = list[next]!
+    setVolumeFlash(`Trying ${choice.label}…`)
+    window.clearTimeout(volumeFlashTimer.current)
+    volumeFlashTimer.current = window.setTimeout(() => setVolumeFlash(null), 2200)
+    // Same play session — do not paint a second "Unwrapping stream…" cover.
+    openReplayEmbed(
+      choice.url,
+      {
+        from: returnTo,
+        playerMode: 'embed',
+        pipOnBack: routeState?.pipOnBack ?? true,
+        skipUnwrapCover: true,
+        continueWatch: {
+          ...continueWatch,
+          playUrl: choice.url,
+          sportsSourceIndex: next,
+        },
+      },
+      { unwrapCover: false },
+    )
+    return true
+  }
+
+  const autoHopForStallRef = useRef(false)
+  useEffect(() => {
+    if (!stalled) {
+      autoHopForStallRef.current = false
+      return
+    }
+    if (autoHopForStallRef.current) return
+    autoHopForStallRef.current = true
+    tryNextSportsSource()
+  }, [stalled])
 
   /** Same part on another host (vidaraa / vixeo / Playmogo) - e.g. when one keeps buffering. */
   function pickReplayHost(index: number) {
@@ -584,12 +767,15 @@ export function WebBrowserPage() {
   // changes (nav.url updates recreate callbacks and caused rivestream↔player flash).
   const openedParamRef = useRef('')
   const blankRecoverRef = useRef('')
+  const skipUnwrapCover = Boolean(routeState?.skipUnwrapCover)
   useEffect(() => {
     if (!desktop || !paramUrl) return
     if (openedParamRef.current !== paramUrl) {
       openedParamRef.current = paramUrl
       blankRecoverRef.current = ''
-      void openUrl(toAutoplayUrl(paramUrl))
+      void openUrl(toAutoplayUrl(paramUrl), {
+        unwrapCover: skipUnwrapCover ? false : undefined,
+      })
       return
     }
     // Hide({ blank }) left about:blank while we still have a play URL — reload once.
@@ -600,9 +786,91 @@ export function WebBrowserPage() {
       blankRecoverRef.current !== paramUrl
     ) {
       blankRecoverRef.current = paramUrl
-      void openUrl(toAutoplayUrl(paramUrl))
+      // Recover within the same play — do not re-show unwrap.
+      void openUrl(toAutoplayUrl(paramUrl), { unwrapCover: false })
     }
-  }, [desktop, paramUrl, openUrl, nav.url, address, webMode])
+  }, [desktop, paramUrl, openUrl, nav.url, address, webMode, skipUnwrapCover])
+
+  // StreamCorner: once Bitmovin is fetching HLS in Gecko, promote to Media3.
+  const skipMedia3Promote = Boolean(routeState?.skipMedia3Promote)
+  useEffect(() => {
+    if (!isAndroidMedia3Host() || !isAndroidInAppBrowser()) return
+    if (!paramUrl || skipMedia3Promote || webMode !== 'page') return
+    let corner = false
+    try {
+      corner = isStreamCornerHost(new URL(paramUrl).hostname)
+    } catch {
+      corner = false
+    }
+    if (!corner) return
+
+    let cancelled = false
+    let promoted = false
+    const tryPromote = async () => {
+      if (cancelled || promoted) return
+      const sniffed = await androidSniffCurrentMedia()
+      if (cancelled || promoted || !sniffed.ok || !sniffed.mediaUrl) return
+      const mediaUrl = String(sniffed.mediaUrl).trim()
+      if (!/\.m3u8|format=m3u8|\/hls\//i.test(mediaUrl)) return
+      promoted = true
+      const cw = routeState?.continueWatch
+      const title = cw?.title || contentTitle || 'Live'
+      const from = routeState?.from || '/section/sports'
+      play(
+        {
+          id: cw?.id || `streamcorner-media3-${Date.now()}`,
+          title,
+          description: 'SC · Live',
+          category: cw?.category || 'sports',
+          url: mediaUrl,
+          poster: cw?.poster,
+          tags: ['live', 'media3', 'streamcorner'],
+          source: cw?.source || 'StreamCorner',
+          sourceKind: cw?.sourceKind || 'builtin',
+          transport: 'direct',
+          detailUrl: cw?.detailUrl || paramUrl,
+        },
+        { forceFull: true, replace: true, returnTo: from },
+      )
+      void androidBrowserHide({ blank: false, pause: true })
+      navigate('/native-stream', {
+        replace: true,
+        state: {
+          from,
+          title,
+          mediaUrl,
+          referrer: sniffed.referrer || sniffed.pageUrl || paramUrl,
+          poster: cw?.poster,
+          category: cw?.category || 'sports',
+          continueId: cw?.id,
+        },
+      })
+    }
+
+    const startAt = Date.now()
+    const tick = window.setInterval(() => {
+      if (Date.now() - startAt > 45_000) {
+        window.clearInterval(tick)
+        return
+      }
+      void tryPromote()
+    }, 1500)
+    const first = window.setTimeout(() => void tryPromote(), 2800)
+    return () => {
+      cancelled = true
+      window.clearInterval(tick)
+      window.clearTimeout(first)
+    }
+  }, [
+    paramUrl,
+    skipMedia3Promote,
+    webMode,
+    routeState?.continueWatch,
+    routeState?.from,
+    contentTitle,
+    play,
+    navigate,
+  ])
 
   // Keep the native BrowserView aligned when chrome shows/hides.
   useEffect(() => {
@@ -625,18 +893,15 @@ export function WebBrowserPage() {
     }
     setChromeVisible(true)
     window.clearTimeout(chromeHideTimer.current)
+    if (stalled) return () => window.clearTimeout(chromeHideTimer.current)
     chromeHideTimer.current = window.setTimeout(() => setChromeVisible(false), 2200)
     return () => window.clearTimeout(chromeHideTimer.current)
-  }, [embedPlayer, watching, toolsOpen, nav.url, fullscreen])
+  }, [embedPlayer, watching, toolsOpen, nav.url, fullscreen, stalled])
 
   useEffect(() => {
     if (!embedPlayer) return
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'F11') {
-        e.preventDefault()
-        toggleFullscreen()
-        return
-      }
+      // F11 is handled in WebBrowserContext (single listener — dual handlers double-toggled).
       if (e.key !== 'Escape') return
       // First Escape exits fullscreen; second leaves the embed.
       // Use exit-only — never toggle (Context also listens; toggle would re-enter).
@@ -702,7 +967,7 @@ export function WebBrowserPage() {
     setChromeVisible(true)
     window.clearTimeout(chromeHideTimer.current)
     chromeHideTimer.current = window.setTimeout(() => {
-      if (!toolsOpen) setChromeVisible(false)
+      if (!toolsOpen && !stalled) setChromeVisible(false)
     }, 2200)
   }
 
@@ -711,7 +976,7 @@ export function WebBrowserPage() {
       className={`page web-browser-page${watching && !toolsOpen ? ' is-watching' : ''}${
         fullscreen ? ' is-fullscreen' : ''
       }${embedPlayer ? ' is-embed-player' : ''}${
-        embedPlayer && watching && !chromeVisible && !toolsOpen ? ' chrome-hidden' : ''
+        embedPlayer && watching && !chromeVisible && !toolsOpen && !stalled ? ' chrome-hidden' : ''
       }`}
       onMouseMove={revealChrome}
       onClick={revealChrome}
@@ -1007,7 +1272,14 @@ export function WebBrowserPage() {
         <div className="web-status">
           <span>{status}</span>
           {stalled ? (
-            <button type="button" className="ghost-btn control-btn web-status-retry" onClick={() => retryStalled()}>
+            <button
+              type="button"
+              className="ghost-btn control-btn web-status-retry"
+              onClick={() => {
+                if (tryNextSportsSource()) return
+                retryStalled()
+              }}
+            >
               Retry
             </button>
           ) : null}
@@ -1016,8 +1288,9 @@ export function WebBrowserPage() {
 
       {adDock.visible ? (
         <div className="web-ad-dock-bar" role="status">
-          <span>
-            Muted ad parked
+          <div ref={adDockTileRef} className="web-ad-dock-tile" aria-hidden="true" />
+          <span className="web-ad-dock-copy">
+            Ad in the corner box (muted)
             {adDock.url ? (
               <>
                 {' '}
@@ -1051,6 +1324,21 @@ export function WebBrowserPage() {
           )}
         </div>
         {volumeFlash ? <div className="web-volume-flash">{volumeFlash}</div> : null}
+        {stalled ? (
+          <div className="web-stream-offline" role="status">
+            <p>{status || 'This stream is offline. Tap Retry, or go Back and pick another listing.'}</p>
+            <button
+              type="button"
+              className="primary-btn"
+              onClick={() => {
+                if (tryNextSportsSource()) return
+                retryStalled()
+              }}
+            >
+              Retry
+            </button>
+          </div>
+        ) : null}
       </div>
     </div>
   )

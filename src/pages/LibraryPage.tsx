@@ -49,9 +49,9 @@ import { TorrentsPage } from './TorrentsPage'
 
 const SECTIONS: { id: CategoryId; label: string }[] = [
   { id: 'sports', label: 'Sports' },
+  { id: 'series', label: 'TV Series' },
   { id: 'movies', label: 'Movies' },
   { id: 'anime', label: 'Anime' },
-  { id: 'series', label: 'TV Series' },
   { id: 'news', label: 'News' },
   { id: 'kids', label: 'Kids' },
 ]

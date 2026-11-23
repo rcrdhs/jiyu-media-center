@@ -358,3 +358,23 @@ export function clampQualityToDevice(quality: number): number {
   if (!Number.isFinite(quality) || quality <= 0) return max
   return Math.min(quality, max)
 }
+
+/**
+ * Live sports embeds (PPV HD/SD, StreamFree FHD/SD): prefer the lower rung on
+ * lite profiles, Data Saver, or slow cellular so phones/sticks open SD first.
+ */
+export function preferLowerLiveQuality(): boolean {
+  const knobs = getPerformanceKnobs()
+  if (knobs.deviceClass === 'lite' || knobs.maxQuality <= 720) return true
+  try {
+    const nav = navigator as Navigator & {
+      connection?: { saveData?: boolean; effectiveType?: string }
+    }
+    if (nav.connection?.saveData) return true
+    const type = String(nav.connection?.effectiveType || '').toLowerCase()
+    if (type === 'slow-2g' || type === '2g' || type === '3g') return true
+  } catch {
+    /* ignore */
+  }
+  return false
+}

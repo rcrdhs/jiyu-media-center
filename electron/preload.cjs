@@ -42,6 +42,7 @@ contextBridge.exposeInMainWorld('signalDesktop', {
   browserSetVolume: (percent) => ipcRenderer.invoke('browser:setVolume', percent),
   browserAdDockClose: () => ipcRenderer.invoke('browser:adDockClose'),
   browserAdDockStatus: () => ipcRenderer.invoke('browser:adDockStatus'),
+  browserAdDockSetBounds: (bounds) => ipcRenderer.invoke('browser:adDockSetBounds', bounds),
   browserMultiShow: (payload) => ipcRenderer.invoke('browser:multiShow', payload),
   browserMultiSetBounds: (payload) => ipcRenderer.invoke('browser:multiSetBounds', payload),
   browserMultiSetAudio: (payload) => ipcRenderer.invoke('browser:multiSetAudio', payload),

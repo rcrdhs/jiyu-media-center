@@ -46,7 +46,9 @@ public class Media3PlayerPlugin extends Plugin {
 
   @PluginMethod
   public void hide(PluginCall call) {
-    boolean stop = Boolean.TRUE.equals(call.getBoolean("stop", true));
+    // Default false so a bare hide() never kills PiP — callers that mean stop
+    // must pass stop:true (close / failed unwrap / switch away).
+    boolean stop = Boolean.TRUE.equals(call.getBoolean("stop", false));
     main.post(() -> {
       if (player != null) player.hide(stop);
       call.resolve(ok());

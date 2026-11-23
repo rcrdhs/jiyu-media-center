@@ -309,6 +309,76 @@ export async function resolveYouTubeLivePlay(liveUrl: string): Promise<YouTubeLi
   return run
 }
 
+function youtubeLiveCandidates(liveUrl: string): string[] {
+  const u = String(liveUrl || '')
+  if (/nnn-radiolive|nationwidenewsnetwork|nationwide/i.test(u)) {
+    return [
+      ...new Set(
+        [
+          liveUrl,
+          'https://www.youtube.com/@nnn-RADIOLIVE/live',
+          'https://www.youtube.com/@nationwidenewsnetwork/live',
+        ].filter(Boolean),
+      ),
+    ]
+  }
+  if (/cvm_television|cvmtvnews|\bcvm\b/i.test(u)) {
+    return [
+      ...new Set(
+        [
+          liveUrl,
+          'https://www.youtube.com/@cvm_television/live',
+          'https://www.youtube.com/@cvmtvnews/live',
+        ].filter(Boolean),
+      ),
+    ]
+  }
+  return [liveUrl]
+}
+
+async function resolveOneYouTubeLiveUrl(liveUrl: string): Promise<YouTubeLivePlayResult> {
+  // 1) Innertube resolve_url → videoId → player isLive (most reliable).
+  const innertubeId = await resolveLiveVideoIdViaInnertube(liveUrl)
+  if (innertubeId === 'channel') {
+    return { ok: false, error: 'This channel is not live on YouTube right now' }
+  }
+  if (innertubeId) {
+    const state = await playerSaysLive(innertubeId)
+    if (state === 'live' || state === 'unknown') {
+      // unknown: still open the resolved /live video — better than false offline.
+      return { ok: true, ...playUrlsForVideoId(innertubeId) }
+    }
+    if (state === 'offline') {
+      return { ok: false, error: 'This channel is not live on YouTube right now' }
+    }
+  }
+
+  // 2) HTML fallback when Innertube is unavailable.
+  const html = await fetchPageHtml(liveUrl)
+  if (looksLikeBotWall(html)) {
+    return {
+      ok: false,
+      error: 'YouTube blocked the live check — open Watch once, then try again',
+    }
+  }
+  if (looksOffline(html)) {
+    return { ok: false, error: 'This channel is not live on YouTube right now' }
+  }
+  if (looksLive(html)) {
+    const videoId = extractYouTubeVideoId(html)
+    if (videoId) return { ok: true, ...playUrlsForVideoId(videoId) }
+    return {
+      ok: true,
+      videoId: '',
+      watchUrl: liveUrl,
+      embedUrl: liveUrl,
+      previewUrl: liveUrl,
+    }
+  }
+
+  return { ok: false, error: 'This channel is not live on YouTube right now' }
+}
+
 async function resolveYouTubeLivePlayUncached(
   liveUrl: string,
   key: string,
@@ -319,46 +389,15 @@ async function resolveYouTubeLivePlayUncached(
   }
 
   try {
-    // 1) Innertube resolve_url → videoId → player isLive (most reliable).
-    const innertubeId = await resolveLiveVideoIdViaInnertube(liveUrl)
-    if (innertubeId === 'channel') {
-      return store({ ok: false, error: 'This channel is not live on YouTube right now' })
+    let last: YouTubeLivePlayResult = {
+      ok: false,
+      error: 'This channel is not live on YouTube right now',
     }
-    if (innertubeId) {
-      const state = await playerSaysLive(innertubeId)
-      if (state === 'live' || state === 'unknown') {
-        // unknown: still open the resolved /live video — better than false offline.
-        return store({ ok: true, ...playUrlsForVideoId(innertubeId) })
-      }
-      if (state === 'offline') {
-        return store({ ok: false, error: 'This channel is not live on YouTube right now' })
-      }
+    for (const candidate of youtubeLiveCandidates(liveUrl)) {
+      last = await resolveOneYouTubeLiveUrl(candidate)
+      if (last.ok) return store(last)
     }
-
-    // 2) HTML fallback when Innertube is unavailable.
-    const html = await fetchPageHtml(liveUrl)
-    if (looksLikeBotWall(html)) {
-      return store({
-        ok: false,
-        error: 'YouTube blocked the live check — open Watch once, then try again',
-      })
-    }
-    if (looksOffline(html)) {
-      return store({ ok: false, error: 'This channel is not live on YouTube right now' })
-    }
-    if (looksLive(html)) {
-      const videoId = extractYouTubeVideoId(html)
-      if (videoId) return store({ ok: true, ...playUrlsForVideoId(videoId) })
-      return store({
-        ok: true,
-        videoId: '',
-        watchUrl: liveUrl,
-        embedUrl: liveUrl,
-        previewUrl: liveUrl,
-      })
-    }
-
-    return store({ ok: false, error: 'This channel is not live on YouTube right now' })
+    return store(last)
   } catch (err) {
     return {
       ok: false,

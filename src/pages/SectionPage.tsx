@@ -1,5 +1,14 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from 'react'
 import { useParams } from 'react-router-dom'
+import { useSectionTabSwipe } from '../hooks/useSectionTabSwipe'
 import { CATEGORIES } from '../data/catalog'
 import { useCatalog } from '../context/CatalogContext'
 import { CatalogGrid } from '../components/CatalogGrid'
@@ -55,12 +64,18 @@ import {
   setSectionView,
 } from '../lib/viewState'
 import {
+  isSportsAlwaysLiveItem,
   isSportsLiveNowItem,
   isSportsUpcomingItem,
   isStreamedCatalogItem,
   streamedItemSportId,
 } from '../lib/streamed'
 import { isPpvStCatalogItem, ppvStSportChipsFromItems } from '../lib/ppvSt'
+import {
+  isTimStreamsCatalogItem,
+  timStreamsItemSportId,
+  timStreamsSportChipsFromItems,
+} from '../lib/timStreams'
 import {
   isSportsReplayCatalogItem,
   sportsReplaySportChipsFromItems,
@@ -111,7 +126,7 @@ function pinSportsShortcuts(items: StreamItem[], category: CategoryId): StreamIt
   return [...pinned, ...rest]
 }
 
-type ShelfTabId = 'primary' | 'full-shows' | 'live' | 'replay'
+type ShelfTabId = 'primary' | 'full-shows' | 'live' | 'replay' | '247'
 
 function shelfTabStorageKey(category: CategoryId): string {
   return `jiyu.${category}.shelf-tab`
@@ -127,7 +142,13 @@ function readShelfTab(category: CategoryId, fallback: ShelfTabId): ShelfTabId {
     // Sports: `live` tab is Upcoming (Channels tab was removed earlier).
     // Series 24/7 tab removed — land on Popular.
     if (category === 'series' && raw === 'replay') return 'primary'
-    if (raw === 'primary' || raw === 'full-shows' || raw === 'live' || raw === 'replay') {
+    if (
+      raw === 'primary' ||
+      raw === 'full-shows' ||
+      raw === 'live' ||
+      raw === 'replay' ||
+      raw === '247'
+    ) {
       return raw
     }
     // Migrate older anime key values.
@@ -360,6 +381,7 @@ export function SectionPage() {
     byCategory,
     ready,
     streamedSports,
+    sportsReplaysLoading,
     reloadTorrentCatalog,
   } = useCatalog()
   const meta = CATEGORIES.find((c) => c.id === id)
@@ -662,6 +684,11 @@ export function SectionPage() {
         if (isSportsReplayCatalogItem(item)) {
           return sportsReplaySportId(item) === sportsSportFilter
         }
+        if (isTimStreamsCatalogItem(item)) {
+          const id = timStreamsItemSportId(item)
+          if (id === sportsSportFilter) return true
+          return Boolean(item.tags?.includes(sportsSportFilter))
+        }
         if (isStreamedCatalogItem(item)) {
           return streamedItemSportId(item) === sportsSportFilter
         }
@@ -682,7 +709,7 @@ export function SectionPage() {
       }
       const scheduleItems = items.filter(
         (item) =>
-          (isStreamedCatalogItem(item) || isPpvStCatalogItem(item)) &&
+          (isStreamedCatalogItem(item) || isPpvStCatalogItem(item) || isTimStreamsCatalogItem(item)) &&
           !isSportsReplayCatalogItem(item) &&
           sportOk(item) &&
           match(item),
@@ -701,6 +728,10 @@ export function SectionPage() {
           ),
         { ...shelfOpts, newestFirst: false },
       )
+      const alwaysLive = prepareShelfList(
+        scheduleItems.filter((item) => isSportsAlwaysLiveItem(item)),
+        shelfOpts,
+      )
       const replay = prepareShelfList(
         items.filter(
           (item) =>
@@ -711,23 +742,27 @@ export function SectionPage() {
         { ...shelfOpts, newestFirst: true, collapseEpisodes: false },
       )
       return {
-        // Live (on now) → Upcoming (scheduled) → Replay.
+        // Live (on now) → Upcoming (scheduled) → 24/7 channels → Replay.
         primaryLabel: 'Popular',
         fullLabel: 'Live',
         liveLabel: 'Upcoming',
+        alwaysLiveLabel: '24/7',
         replayLabel: 'Replay',
         primaryBlurb: '',
         fullBlurb: '',
         liveBlurb: '',
+        alwaysLiveBlurb: '',
         replayBlurb: '',
         primaryEmpty: '',
         fullEmpty: 'No live matches right now — check Upcoming or try again shortly.',
         liveEmpty: 'No upcoming matches scheduled — StreamCorner / PPV.st refresh automatically.',
+        alwaysLiveEmpty: 'No 24/7 channels right now — they refresh automatically.',
         replayEmpty:
           'No recent football, basketball, boxing, cricket, or motorsport replays (last 3 days).',
         primary: [] as StreamItem[],
         fullShows: liveNow,
         live: upcoming,
+        alwaysLive,
         replay,
         other: [] as StreamItem[],
       }
@@ -828,13 +863,13 @@ export function SectionPage() {
     if (categoryId === 'sports') {
       return [
         ...prepareShelfList(
-          items.filter((item) => isStreamedCatalogItem(item) || isPpvStCatalogItem(item)),
+          items.filter((item) => isStreamedCatalogItem(item) || isPpvStCatalogItem(item) || isTimStreamsCatalogItem(item)),
           shelfOpts,
         ),
         ...pinSportsShortcuts(
           prepareShelfList(
             items.filter(
-              (item) => !isStreamedCatalogItem(item) && !isPpvStCatalogItem(item),
+              (item) => !isStreamedCatalogItem(item) && !isPpvStCatalogItem(item) && !isTimStreamsCatalogItem(item),
             ),
             shelfOpts,
           ),
@@ -1059,23 +1094,47 @@ export function SectionPage() {
     }
   }, [splitShelves, shelfTab])
 
-  function selectShelfTab(tab: ShelfTabId) {
-    userPickedShelfTabRef.current = true
-    setShelfTab(tab)
-    // Replay sport chips differ from Live — always land on All sports.
-    if (categoryId === 'sports' && tab === 'replay') {
-      setSportsSportFilter('all')
-      writeSelectedSportsFilter('all')
-    }
-    setWindowStart(0)
-    targetVisibleRef.current = PAGE
-    setVisible(PAGE)
-    try {
-      localStorage.setItem(shelfTabStorageKey(categoryId), tab)
-    } catch {
-      /* ignore */
-    }
-  }
+  const selectShelfTab = useCallback(
+    (tab: ShelfTabId) => {
+      userPickedShelfTabRef.current = true
+      setShelfTab(tab)
+      // Replay sport chips differ from Live — always land on All sports.
+      if (categoryId === 'sports' && tab === 'replay') {
+        setSportsSportFilter('all')
+        writeSelectedSportsFilter('all')
+      }
+      setWindowStart(0)
+      targetVisibleRef.current = PAGE
+      setVisible(PAGE)
+      try {
+        localStorage.setItem(shelfTabStorageKey(categoryId), tab)
+      } catch {
+        /* ignore */
+      }
+    },
+    [categoryId],
+  )
+
+  /** Tab order matches the chips at the top of each section. */
+  const shelfTabOrder = useMemo(() => {
+    if (!hasShelfTabs || !splitShelves) return [] as ShelfTabId[]
+    const tabs: ShelfTabId[] = []
+    if (categoryId !== 'sports') tabs.push('primary')
+    tabs.push('full-shows')
+    if (splitShelves.liveLabel) tabs.push('live')
+    if (splitShelves.alwaysLiveLabel) tabs.push('247')
+    if (splitShelves.replayLabel) tabs.push('replay')
+    return tabs
+  }, [hasShelfTabs, splitShelves, categoryId])
+
+  const pageSwipeRef = useRef<HTMLDivElement | null>(null)
+  useSectionTabSwipe({
+    enabled: hasShelfTabs && shelfTabOrder.length > 1,
+    tabs: shelfTabOrder,
+    activeTab: shelfTab,
+    onSelect: selectShelfTab,
+    targetRef: pageSwipeRef,
+  })
 
   const activeShelfList = useMemo(() => {
     if (!splitShelves) return null
@@ -1085,6 +1144,7 @@ export function SectionPage() {
       return splitShelves.primary
     }
     if (shelfTab === 'live') return splitShelves.live ?? []
+    if (shelfTab === '247') return splitShelves.alwaysLive ?? []
     if (shelfTab === 'replay') return splitShelves.replay ?? []
     if (categoryId === 'kids' || categoryId === 'sports' || categoryId === 'anime') {
       return splitShelves.fullShows
@@ -1111,12 +1171,29 @@ export function SectionPage() {
     for (const chip of ppvStSportChipsFromItems(items)) {
       if (!byId.has(chip.id)) byId.set(chip.id, chip.name)
     }
+    for (const chip of timStreamsSportChipsFromItems(items)) {
+      if (!byId.has(chip.id)) byId.set(chip.id, chip.name)
+    }
     return [...byId.entries()]
       .map(([id, name]) => ({ id, name }))
+      .filter((chip) => {
+        // The 24/7 Streams chip is now its own Sports tab.
+        if (chip.id === '24/7-streams') return shelfTab === '247'
+        return true
+      })
       .sort((a, b) => a.name.localeCompare(b.name))
   }, [categoryId, items, streamedSports, shelfTab])
 
   function selectSportsSportFilter(sportId: string) {
+    if (sportId === '24/7-streams') {
+      selectShelfTab('247')
+      setSportsSportFilter('all')
+      writeSelectedSportsFilter('all')
+      setWindowStart(0)
+      targetVisibleRef.current = PAGE
+      setVisible(PAGE)
+      return
+    }
     setSportsSportFilter(sportId)
     writeSelectedSportsFilter(sportId)
     setWindowStart(0)
@@ -1133,7 +1210,12 @@ export function SectionPage() {
   /** Live / Upcoming / Replay → sport + league shelves (All / Football / …). */
   const sportsGroupedShelves = useMemo(() => {
     if (categoryId !== 'sports') return null
-    if (shelfTab !== 'full-shows' && shelfTab !== 'live' && shelfTab !== 'replay') {
+    if (
+      shelfTab !== 'full-shows' &&
+      shelfTab !== 'live' &&
+      shelfTab !== '247' &&
+      shelfTab !== 'replay'
+    ) {
       return null
     }
     return groupSportsSectionShelves(pagedList, sportsSportFilter)
@@ -1295,7 +1377,7 @@ export function SectionPage() {
   }
 
   return (
-    <div className="page">
+    <div className="page" ref={pageSwipeRef}>
       <header className="page-header" style={{ ['--accent' as string]: meta.accent }}>
         <p className="eyebrow">Section</p>
         <h1>{meta.label}</h1>
@@ -1478,6 +1560,17 @@ export function SectionPage() {
                   {splitShelves.liveLabel}
                 </button>
               ) : null}
+              {splitShelves.alwaysLiveLabel ? (
+                <button
+                  type="button"
+                  role="tab"
+                  className={`anime-shelf-tab${shelfTab === '247' ? ' is-active' : ''}`}
+                  aria-selected={shelfTab === '247'}
+                  onClick={() => selectShelfTab('247')}
+                >
+                  {splitShelves.alwaysLiveLabel}
+                </button>
+              ) : null}
               {splitShelves.replayLabel ? (
                 <button
                   type="button"
@@ -1494,6 +1587,7 @@ export function SectionPage() {
             sportsFilterChips.length > 0 &&
             (shelfTab === 'full-shows' ||
               shelfTab === 'live' ||
+              shelfTab === '247' ||
               shelfTab === 'replay') ? (
               <div
                 className="anime-shelf-tabs sports-sport-filters"
@@ -1574,31 +1668,38 @@ export function SectionPage() {
               showHealthFilters={categoryId === 'kids' && shelfTab === 'live'}
               autoHideUnresponsive={false}
               emptyHint={
-                shown.length === 0 && syncMessage
-                  ? syncMessage
-                  : categoryId === 'anime' && query.trim() && animeCatalogSearchEmpty
-                  ? nyaaSearchStatus === 'loading'
-                    ? `Searching for “${query.trim()}”…`
-                    : nyaaSearchStatus === 'error'
-                      ? nyaaSearchError || 'No results for this search.'
-                      : 'No matching titles — try another search.'
-                  : categoryId === 'movies' && query.trim()
-                    ? movieSearchStatus === 'loading'
-                      ? `Searching for “${query.trim()}”…`
-                      : movieSearchStatus === 'error'
-                        ? movieSearchError || 'No movie results for this search.'
-                        : moviesCatalogSearchEmpty
-                          ? 'No movie results for this search.'
-                          : shelfTab === 'primary'
-                            ? splitShelves.primaryEmpty
-                            : splitShelves.fullEmpty
-                    : shelfTab === 'primary'
-                      ? splitShelves.primaryEmpty
-                      : shelfTab === 'live'
-                        ? (splitShelves.liveEmpty ?? splitShelves.fullEmpty)
-                        : shelfTab === 'replay'
-                          ? (splitShelves.replayEmpty ?? splitShelves.fullEmpty)
-                          : splitShelves.fullEmpty
+                categoryId === 'sports' &&
+                shelfTab === 'replay' &&
+                shown.length === 0 &&
+                sportsReplaysLoading
+                  ? 'Loading replays…'
+                  : categoryId !== 'sports' && shown.length === 0 && syncMessage
+                    ? syncMessage
+                    : categoryId === 'anime' && query.trim() && animeCatalogSearchEmpty
+                      ? nyaaSearchStatus === 'loading'
+                        ? `Searching for “${query.trim()}”…`
+                        : nyaaSearchStatus === 'error'
+                          ? nyaaSearchError || 'No results for this search.'
+                          : 'No matching titles — try another search.'
+                      : categoryId === 'movies' && query.trim()
+                        ? movieSearchStatus === 'loading'
+                          ? `Searching for “${query.trim()}”…`
+                          : movieSearchStatus === 'error'
+                            ? movieSearchError || 'No movie results for this search.'
+                            : moviesCatalogSearchEmpty
+                              ? 'No movie results for this search.'
+                              : shelfTab === 'primary'
+                                ? splitShelves.primaryEmpty
+                                : splitShelves.fullEmpty
+                        : shelfTab === 'primary'
+                          ? splitShelves.primaryEmpty
+                          : shelfTab === 'live'
+                            ? (splitShelves.liveEmpty ?? splitShelves.fullEmpty)
+                            : shelfTab === '247'
+                              ? (splitShelves.alwaysLiveEmpty ?? splitShelves.fullEmpty)
+                              : shelfTab === 'replay'
+                                ? (splitShelves.replayEmpty ?? splitShelves.fullEmpty)
+                                : splitShelves.fullEmpty
               }
             />
           )}

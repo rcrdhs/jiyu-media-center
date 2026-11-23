@@ -242,21 +242,7 @@ export function HomePage() {
         />
       ) : null}
 
-      {!homeQuery.trim() ? (
-        <FavoriteMatchesShelf items={items} hidden={kidsMode} />
-      ) : null}
-
-      {!homeQuery.trim() &&
-        homeVodCategories.map((category) => (
-          <ContinueWatching key={category} category={category} />
-        ))}
-
-      {!homeQuery.trim() && <RecommendedShelf />}
-
-      {!homeQuery.trim() && <WatchNextStrip />}
-
-      {!homeQuery.trim() && !kidsMode && <WatchHistory />}
-
+      {/* Search first when typing. */}
       {homeQuery.trim() && (
         <section className="section-block">
           <div className="section-head">
@@ -275,31 +261,48 @@ export function HomePage() {
         </section>
       )}
 
-      <section className="section-block">
-        <div className="section-head">
-          <h2>Sections</h2>
-          <p>Pick a shelf — each one opens streams mapped to that category.</p>
-        </div>
-        <div className="section-tiles">
-          {homeCategories.map((cat) => {
-            const count = byCategory(cat.id).length
-            return (
-              <Link
-                key={cat.id}
-                to={`/section/${cat.id}`}
-                className="section-tile"
-                style={{ ['--accent' as string]: cat.accent }}
-              >
-                <h3>{cat.label}</h3>
-                <p>{cat.blurb}</p>
-                <span>
-                  {count} stream{count === 1 ? '' : 's'}
-                </span>
-              </Link>
-            )
-          })}
-        </div>
-      </section>
+      {!homeQuery.trim() ? (
+        <FavoriteMatchesShelf items={items} hidden={kidsMode} />
+      ) : null}
+
+      {!homeQuery.trim() &&
+        homeVodCategories.map((category) => (
+          <ContinueWatching key={category} category={category} />
+        ))}
+
+      {!homeQuery.trim() && <RecommendedShelf />}
+
+      {!homeQuery.trim() && <WatchNextStrip />}
+
+      {!homeQuery.trim() && !kidsMode && <WatchHistory />}
+
+      {!homeQuery.trim() && (
+        <section className="section-block">
+          <div className="section-head">
+            <h2>Sections</h2>
+            <p>Pick a shelf — each one opens streams mapped to that category.</p>
+          </div>
+          <div className="section-tiles">
+            {homeCategories.map((cat) => {
+              const count = byCategory(cat.id).length
+              return (
+                <Link
+                  key={cat.id}
+                  to={`/section/${cat.id}`}
+                  className="section-tile"
+                  style={{ ['--accent' as string]: cat.accent }}
+                >
+                  <h3>{cat.label}</h3>
+                  <p>{cat.blurb}</p>
+                  <span>
+                    {count} stream{count === 1 ? '' : 's'}
+                  </span>
+                </Link>
+              )
+            })}
+          </div>
+        </section>
+      )}
 
       {!kidsMode && (
         <section className="section-block">

@@ -10,7 +10,11 @@
  *   GET /health
  */
 
-const NNN_LIVE = 'https://www.youtube.com/@nnn-RADIOLIVE/live'
+/** Prefer the on-air handle; Nationwide90FM LIVE is the public brand channel. */
+const NNN_LIVE_CANDIDATES = [
+  'https://www.youtube.com/@nnn-RADIOLIVE/live',
+  'https://www.youtube.com/@nationwidenewsnetwork/live',
+]
 const UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15'
 
@@ -81,59 +85,81 @@ function extractVisitorData(html) {
   return b?.[1] || ''
 }
 
+async function resolveUrlViaInnertube(liveUrl) {
+  const body = {
+    context: {
+      client: {
+        clientName: 'ANDROID',
+        clientVersion: '20.10.38',
+        hl: 'en',
+        gl: 'US',
+      },
+    },
+    url: liveUrl,
+  }
+  const res = await fetch(
+    'https://www.youtube.com/youtubei/v1/navigation/resolve_url?prettyPrint=false',
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': 'com.google.android.youtube/20.10.38 (Linux; U; Android 14)',
+        'X-Youtube-Client-Name': '3',
+        'X-Youtube-Client-Version': '20.10.38',
+      },
+      body: JSON.stringify(body),
+    },
+  )
+  const data = await res.json()
+  return {
+    videoId: data?.endpoint?.watchEndpoint?.videoId || '',
+    browseId: data?.endpoint?.browseEndpoint?.browseId || '',
+  }
+}
+
 async function resolveLiveVideoId() {
-  const page = await fetchText(NNN_LIVE, {
-    Accept: 'text/html,application/xhtml+xml',
-  })
-  if (!page.ok) throw new Error(`NNN live page HTTP ${page.status}`)
-  if (/LIVE_STREAM_OFFLINE/i.test(page.text) && !/"isLiveNow"\s*:\s*true/i.test(page.text)) {
-    throw new Error('Nationwide is not live on YouTube right now')
-  }
-  let videoId = extractVideoId(page.text)
-  let visitorData = extractVisitorData(page.text)
-
-  if (!videoId) {
-    const body = {
-      context: {
-        client: {
-          clientName: 'ANDROID',
-          clientVersion: '20.10.38',
-          hl: 'en',
-          gl: 'US',
-        },
-      },
-      url: NNN_LIVE,
+  let lastError = 'Nationwide is not live on YouTube right now'
+  for (const liveUrl of NNN_LIVE_CANDIDATES) {
+    // Innertube first: /live → browseEndpoint means offline. Do not scrape a
+    // finished broadcast videoId from the HTML and serve it as "live".
+    try {
+      const resolved = await resolveUrlViaInnertube(liveUrl)
+      if (resolved.browseId && !resolved.videoId) {
+        lastError = 'Nationwide is not live on YouTube right now'
+        continue
+      }
+      if (resolved.videoId) {
+        const page = await fetchText(`https://www.youtube.com/watch?v=${resolved.videoId}`, {
+          Accept: 'text/html,application/xhtml+xml',
+        })
+        const visitorData = extractVisitorData(page.text)
+        return { videoId: resolved.videoId, visitorData }
+      }
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err)
     }
-    const res = await fetch(
-      'https://www.youtube.com/youtubei/v1/navigation/resolve_url?prettyPrint=false',
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'User-Agent': 'com.google.android.youtube/20.10.38 (Linux; U; Android 14)',
-          'X-Youtube-Client-Name': '3',
-          'X-Youtube-Client-Version': '20.10.38',
-        },
-        body: JSON.stringify(body),
-      },
-    )
-    const data = await res.json()
-    videoId = data?.endpoint?.watchEndpoint?.videoId || ''
-    if (!videoId && data?.endpoint?.browseEndpoint?.browseId) {
-      throw new Error('Nationwide is not live on YouTube right now')
-    }
-  }
 
-  if (!videoId) throw new Error('Could not resolve Nationwide live video id')
-
-  if (!visitorData) {
-    const watch = await fetchText(`https://www.youtube.com/watch?v=${videoId}`, {
+    const page = await fetchText(liveUrl, {
       Accept: 'text/html,application/xhtml+xml',
     })
-    visitorData = extractVisitorData(watch.text)
+    if (!page.ok) {
+      lastError = `NNN live page HTTP ${page.status}`
+      continue
+    }
+    const liveNow = /"isLiveNow"\s*:\s*true/i.test(page.text)
+    if (!liveNow) {
+      lastError = 'Nationwide is not live on YouTube right now'
+      continue
+    }
+    const videoId = extractVideoId(page.text)
+    const visitorData = extractVisitorData(page.text)
+    if (!videoId) {
+      lastError = 'Could not resolve Nationwide live video id'
+      continue
+    }
+    return { videoId, visitorData }
   }
-
-  return { videoId, visitorData }
+  throw new Error(lastError)
 }
 
 async function fetchHlsManifest(videoId, visitorData) {

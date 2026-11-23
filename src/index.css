@@ -257,6 +257,7 @@ code {
   text-align: left;
   cursor: pointer;
   border-radius: 14px;
+  overflow: visible;
   transition:
     background 180ms ease,
     border-color 180ms ease,
@@ -442,6 +443,7 @@ code {
 
 .brand-copy {
   min-width: 0;
+  overflow: visible;
 }
 
 .brand-name {
@@ -453,6 +455,117 @@ code {
   line-height: 1.05;
 }
 
+.sidebar.is-christmas {
+  /* Keep the hat inside the clipped sidebar instead of chopping the J. */
+  padding-top: 1.55rem;
+}
+
+.brand-btn.is-christmas {
+  padding-top: 0.55rem;
+  overflow: visible;
+}
+
+.brand-name.is-christmas {
+  padding-top: 0.35rem;
+  padding-bottom: 0.55rem;
+  letter-spacing: -0.02em;
+  overflow: visible;
+  line-height: 1.15;
+  /* Narrow phones (e.g. Redmi HD+) were wrapping J / iyu onto two lines. */
+  white-space: nowrap;
+}
+
+.brand-xmas-word {
+  position: relative;
+  display: inline-block;
+  overflow: visible;
+  isolation: isolate;
+  white-space: nowrap;
+  max-width: 100%;
+  vertical-align: baseline;
+}
+
+.brand-xmas-letters {
+  position: relative;
+  /* Letters always win over lights/hat so the word reads "Jiyu". */
+  z-index: 4;
+  display: inline-block;
+  white-space: nowrap;
+}
+
+.brand-name.is-christmas .brand-name-letter {
+  background: none;
+  -webkit-background-clip: border-box;
+  background-clip: border-box;
+  color: #fff;
+  -webkit-text-fill-color: #fff;
+  text-shadow: 0 0 8px rgba(255, 255, 255, 0.35), 0 1px 1px rgba(0, 0, 0, 0.4);
+}
+
+.brand-name-j {
+  position: relative;
+  display: inline-block;
+  vertical-align: baseline;
+  overflow: visible;
+  z-index: 5;
+  /* Room above the glyph for a tiny crown hat. */
+  padding-top: 0.28em;
+}
+
+.brand-name-j .brand-name-letter {
+  position: relative;
+  display: inline-block;
+  /* Letter above the hat so the J stem stays visible. */
+  z-index: 3;
+}
+
+.brand-santa-hat {
+  position: absolute;
+  /* Tiny tilted cap perched on the J crown — not a cover over the letter. */
+  left: 38%;
+  top: -0.08em;
+  width: 0.55em;
+  height: 0.48em;
+  pointer-events: none;
+  z-index: 1;
+  transform: translateX(-52%) rotate(-18deg);
+  transform-origin: 50% 100%;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.55));
+}
+
+.brand-santa-hat svg {
+  display: block;
+  overflow: visible;
+}
+
+.brand-xmas-lights {
+  position: absolute;
+  pointer-events: none;
+  filter: drop-shadow(0 0 2px rgba(255, 213, 79, 0.4));
+}
+
+.brand-xmas-lights.is-back {
+  /* Loop behind and around the word (top, sides, baseline). */
+  inset: -0.38em -0.32em -0.48em -0.3em;
+  z-index: 1;
+}
+
+.brand-xmas-lights.is-front {
+  /* Sit under the baseline — do not drape across the J. */
+  top: 0.72em;
+  right: -0.18em;
+  bottom: -0.22em;
+  left: 0.35em;
+  z-index: 1;
+  opacity: 0.9;
+}
+
+.brand-xmas-lights svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
 .brand-tag {
   margin: 0.2rem 0 0;
   display: flex;
@@ -3554,6 +3667,13 @@ html.is-android .multi-view-full.is-fullscreen {
   min-width: 0;
 }
 
+/* Android phone / narrow TV: stack so TVJ is never clipped beside CVM. */
+html.is-android .local-channel-live-row .local-channel-live {
+  flex: 1 1 100%;
+  width: 100%;
+  max-width: none;
+}
+
 .local-channel-live {
   display: grid;
   grid-template-columns: 1fr;
@@ -4063,20 +4183,41 @@ html.tv-mode .web-replay-part select:focus-visible {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.5rem;
+  gap: 0.65rem;
   margin: 0 0 0.4rem;
-  padding: 0.35rem 0.55rem;
+  padding: 0.3rem 0.5rem 0.3rem 0.3rem;
   border-radius: 8px;
   border: 1px solid var(--line);
   background: rgba(18, 14, 10, 0.92);
   color: var(--muted);
   font-size: 0.78rem;
+  overflow: hidden;
+}
+
+.web-ad-dock-tile {
+  flex: 0 0 auto;
+  width: 152px;
+  height: 86px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #0b0d12;
+  border: 1px solid var(--line);
+  pointer-events: none;
+}
+
+.web-ad-dock-bar .web-ad-dock-copy {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .web-ad-dock-bar .web-ad-dock-host {
   color: var(--text);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.8em;
+}
+
+.web-ad-dock-bar .control-btn {
+  flex: 0 0 auto;
 }
 
 .web-browser-page.is-fullscreen .web-ad-dock-bar,
@@ -6280,6 +6421,15 @@ html.is-android .player-shell:not(.player-shell-pip) .player-episode-strip-scrol
   cursor: wait;
 }
 
+.show-episode-row.is-upcoming:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.show-episode-row.is-upcoming .show-episode-meta {
+  color: var(--muted, #94a3b8);
+}
+
 .show-episode-key {
   font-weight: 700;
   color: #7eb6ff;
@@ -6603,30 +6753,94 @@ html.is-android .sidebar-android .brand-help-btn,
 
 html.is-android .sidebar-android .brand-btn,
 .sidebar-android .brand-btn {
-  padding: 0.35rem 0.45rem;
+  padding: 0.35rem 0.55rem 0.35rem 0.4rem;
   border-radius: 12px;
-  gap: 0.55rem;
+  gap: 0.65rem;
+  width: 100%;
+}
+
+html.is-android .sidebar-android.is-christmas,
+.sidebar-android.is-christmas {
+  padding-top: 1.15rem;
+}
+
+html.is-android .sidebar-android .brand-btn.is-christmas,
+.sidebar-android .brand-btn.is-christmas {
+  padding-top: 0.4rem;
+  overflow: visible;
+}
+
+html.is-android .sidebar-android .brand-copy,
+.sidebar-android .brand-copy {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 html.is-android .sidebar-android .brand-logo-wrap,
 html.is-android .sidebar-android .brand-logo,
 .sidebar-android .brand-logo-wrap,
 .sidebar-android .brand-logo {
-  width: 36px;
-  height: 36px;
+  width: 40px;
+  height: 40px;
   border-radius: 10px;
 }
 
 html.is-android .sidebar-android .brand-name,
 .sidebar-android .brand-name {
-  font-size: 0.98rem;
-  line-height: 1.1;
+  /* Fill the brand strip — 0.98rem left a big empty gap beside the word. */
+  font-size: clamp(1.25rem, 5.2vw, 1.55rem);
+  line-height: 1.12;
+  letter-spacing: -0.03em;
+}
+
+html.is-android .sidebar-android .brand-name.is-christmas,
+.sidebar-android .brand-name.is-christmas {
+  /* Cap size on ~360dp HD+ so hat + "Jiyu" fit beside Sports/Library. */
+  font-size: clamp(1.12rem, 4.4vw, 1.45rem);
+  padding-top: 0.28rem;
+  padding-bottom: 0.42rem;
+  line-height: 1.18;
+  white-space: nowrap;
+}
+
+html.is-android .sidebar-android .brand-btn.is-christmas .brand-copy,
+.sidebar-android .brand-btn.is-christmas .brand-copy {
+  /* Don't let flex shrink force J / iyu onto two lines on HD+. */
+  min-width: min-content;
+  flex: 0 1 auto;
+}
+
+html.is-android .sidebar-android .brand-santa-hat,
+.sidebar-android .brand-santa-hat {
+  top: -0.06em;
+  width: 0.5em;
+  height: 0.44em;
+  left: 36%;
+}
+
+/* Extra-tight brand strip (Redmi-class width + large system font). */
+@media (max-width: 380px) {
+  html.is-android .sidebar-android .brand-name.is-christmas,
+  .sidebar-android .brand-name.is-christmas {
+    font-size: 1.05rem;
+  }
+
+  html.is-android .sidebar-android .brand-xmas-lights.is-back,
+  .sidebar-android .brand-xmas-lights.is-back {
+    inset: -0.28em -0.18em -0.36em -0.16em;
+  }
+
+  html.is-android .sidebar-android .brand-santa-hat,
+  .sidebar-android .brand-santa-hat {
+    width: 0.44em;
+    height: 0.38em;
+  }
 }
 
 html.is-android .sidebar-android .brand-tag,
 .sidebar-android .brand-tag {
   display: block;
-  font-size: 0.58rem;
+  font-size: 0.68rem;
   letter-spacing: 0.04em;
   opacity: 0.85;
 }
@@ -7935,7 +8149,16 @@ html.tv-mode.is-android .sidebar-android .brand-btn {
 
 html.tv-mode.is-android .sidebar-android .brand-name {
   display: block;
-  font-size: 1rem;
+  font-size: clamp(1.2rem, 2.4vw, 1.5rem);
+}
+
+html.tv-mode.is-android .sidebar-android .brand-name.is-christmas {
+  font-size: clamp(1.25rem, 2.6vw, 1.6rem);
+}
+
+html.tv-mode.is-android .sidebar-android .brand-copy {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 html.tv-mode.is-android .sidebar-android .sections-menu-wrap {
@@ -7996,4 +8219,24 @@ html.tv-mode.is-android body:has(.player-shell:not(.player-shell-pip):not(.playe
 html.tv-mode.is-android body:has(.web-browser-page.is-embed-player.is-watching) .player-dock,
 html.tv-mode.is-android body:has(.web-browser-page.is-embed-player.is-watching) .global-player-layer {
   left: 0 !important;
+}
+.web-stream-offline {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.85rem;
+  padding: 1.25rem;
+  background: rgba(0, 0, 0, 0.82);
+  color: #fff;
+  text-align: center;
+  font: 600 1rem/1.4 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  pointer-events: auto;
+}
+.web-stream-offline p {
+  margin: 0;
+  max-width: 28rem;
 }

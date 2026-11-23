@@ -226,6 +226,8 @@ declare global {
           status?: string
           start?: string
         }>
+        /** Mirror that served the catalog (e.g. https://strmcrnr.foo). */
+        origin?: string
         error?: string
       }>
       catalogList?: () => Promise<DesktopPlaylistSource[]>
@@ -254,7 +256,16 @@ declare global {
         error?: string | null
       }>
       tmdbTvCatalog?: (
-        kind: 'popular' | 'on_the_air' | 'trending' | 'by_year' | 'anime' | 'kids' | 'animation',
+        kind:
+          | 'popular'
+          | 'on_the_air'
+          | 'trending'
+          | 'by_year'
+          | 'top_rated'
+          | 'vote_count'
+          | 'anime'
+          | 'kids'
+          | 'animation',
         limit?: number,
         options?: { withExternalIds?: boolean; withoutKeywords?: string },
       ) => Promise<{
@@ -320,6 +331,7 @@ declare global {
       onBrowserVolume?: (callback: (state: { percent: number }) => void) => () => void
       browserAdDockClose?: () => Promise<boolean>
       browserAdDockStatus?: () => Promise<{ visible: boolean; url: string }>
+      browserAdDockSetBounds?: (bounds: BrowserBounds) => Promise<boolean>
       onBrowserAdDock?: (callback: (state: { visible: boolean; url: string }) => void) => () => void
       onForceExitFullscreen?: (callback: () => void) => () => void
       browserMultiShow?: (payload: {

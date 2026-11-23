@@ -4,11 +4,14 @@
  *   TMDB titles (zh + English, year, episode count)
  *   → bilibili.tv native HLS (strict match)
  *   → bilibili.com mainland PGC DASH → in-app HLS   (Chinese shows)
+ *   → iQIYI International play page (embed, iq.com)
  *   → bilibili.com fan upload DASH → in-app HLS      (strict: exact episode, full length)
  *   → bilibili.tv free play page (embed)
- *   → iQIYI International play page (embed, iq.com)
  *   → bilibili.tv Premium play page (embed)
  *   → fail (caller continues to Nyaa)
+ *
+ * Fan uploads are after iQIYI: UGC DASH→blob HLS often stalls on Android (Akamai
+ * Range + soft CDN gates) while iQIYI's play page still opens.
  *
  * Matches are cached on the item as `bilibiliSeasonId = "v2|tv=…;cn=…;iq=…"`. Old
  * unprefixed values are ignored (they could hold a wrong match, e.g. Supreme Commander).
@@ -27,6 +30,7 @@ import { biliLog } from './biliLog'
 import { resolveBiliSubtitle, type BiliSubtitle, type BiliSubtitleRef } from './biliSubs'
 import { fetchDonghuaTitleInfo, hasCjk, isChineseText, toSimplified, type DonghuaTitleInfo } from './donghuaTitles'
 import { fetchIqiyiEpisode, searchIqiyiAlbum } from './iqiyi'
+import { isAndroidShell } from './androidFullscreen'
 
 export type DonghuaProvider = 'bilibili.tv' | 'bilibili.com' | 'bilibili.com fan upload' | 'iQIYI'
 
@@ -283,48 +287,14 @@ export async function resolveDonghuaPlay(opts: DonghuaResolveOptions): Promise<D
     } catch (err) {
       biliLog('cn.error', { error: err instanceof Error ? err.message : String(err) })
     }
-
-    // 3) Fan uploads (season 1 only — "第N集" is ambiguous across seasons).
-    if (season === 1) {
-      status('Looking for a fan upload on Bilibili…')
-      tried.push('bilibili fan upload')
-      try {
-        const fan = await findCnFanUpload(zh, episode, officialDurationSec)
-        if (fan.ok) {
-          const subs = startSubtitleLookup({ kind: 'cn', cid: fan.cid, bvid: fan.bvid }, opts.skipSubtitles)
-          const hls = await buildBiliDashHls(fan.source)
-          if (hls.ok) {
-            const subtitle = await subs
-            return done({
-              ok: true,
-              mode: 'hls',
-              url: hls.masterUrl,
-              referer: BILIBILI_CN_REFERER,
-              provider: 'bilibili.com fan upload',
-              title: fan.title,
-              cache: formatDonghuaCache(ids),
-              subtitle: subtitle || undefined,
-            })
-          }
-          biliLog('fan.hls.fail', { error: hls.error })
-        } else {
-          biliLog('fan.miss', { error: fan.error })
-        }
-      } catch (err) {
-        biliLog('fan.error', { error: err instanceof Error ? err.message : String(err) })
-      }
-    }
   }
 
-  // 4) bilibili.tv free play page.
-  if (tvEmbed && !tvEmbed.premium) return done({ ...tvEmbed, cache: formatDonghuaCache(ids) })
-
-  // 5) iQIYI International play page.
+  // 3) iQIYI International play page — before fan uploads (UGC HLS stalls often on Android).
   if (chinese && zh.length > 0) {
     status('Searching iQIYI…')
     tried.push('iQIYI')
     try {
-      let album = ids.iq ? { aid: ids.iq, name: zh[0], year: year || 0, score: 0 } : null
+      let album = ids.iq ? { aid: ids.iq, name: zh[0] || '', year: year || 0, score: 0 } : null
       if (!album) album = await searchIqiyiAlbum({ ...query, keywords: zhKeywords(zh) })
       if (album) {
         ids.iq = album.aid
@@ -347,6 +317,55 @@ export async function resolveDonghuaPlay(opts: DonghuaResolveOptions): Promise<D
       biliLog('iq.error', { error: err instanceof Error ? err.message : String(err) })
     }
   }
+
+  // 4) Fan uploads (season 1 only — "第N集" is ambiguous across seasons).
+  if (chinese && zh.length > 0 && season === 1) {
+    status('Looking for a fan upload on Bilibili…')
+    tried.push('bilibili fan upload')
+    try {
+      const fan = await findCnFanUpload(zh, episode, officialDurationSec)
+      if (fan.ok) {
+        // Android: blob DASH→HLS with Akamai BYTERANGE often stalls ("HLS load timed
+        // out") even when the index fetch succeeded. Open the watch page in the
+        // in-app browser instead — same path as iQIYI embeds.
+        if (isAndroidShell()) {
+          biliLog('fan.android.embed', { bvid: fan.bvid, title: fan.title })
+          return done({
+            ok: true,
+            mode: 'embed',
+            url: `https://www.bilibili.com/video/${encodeURIComponent(fan.bvid)}/`,
+            referer: BILIBILI_CN_REFERER,
+            provider: 'bilibili.com fan upload',
+            title: fan.title,
+            cache: formatDonghuaCache(ids),
+          })
+        }
+        const subs = startSubtitleLookup({ kind: 'cn', cid: fan.cid, bvid: fan.bvid }, opts.skipSubtitles)
+        const hls = await buildBiliDashHls(fan.source)
+        if (hls.ok) {
+          const subtitle = await subs
+          return done({
+            ok: true,
+            mode: 'hls',
+            url: hls.masterUrl,
+            referer: BILIBILI_CN_REFERER,
+            provider: 'bilibili.com fan upload',
+            title: fan.title,
+            cache: formatDonghuaCache(ids),
+            subtitle: subtitle || undefined,
+          })
+        }
+        biliLog('fan.hls.fail', { error: hls.error })
+      } else {
+        biliLog('fan.miss', { error: fan.error })
+      }
+    } catch (err) {
+      biliLog('fan.error', { error: err instanceof Error ? err.message : String(err) })
+    }
+  }
+
+  // 5) bilibili.tv free play page.
+  if (tvEmbed && !tvEmbed.premium) return done({ ...tvEmbed, cache: formatDonghuaCache(ids) })
 
   // 6) bilibili.tv Premium play page (no bypass — user's own account).
   if (tvEmbed) return done({ ...tvEmbed, cache: formatDonghuaCache(ids) })

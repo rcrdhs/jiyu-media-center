@@ -268,6 +268,11 @@ export interface MovyResolveOptions {
   /** Retry: skip this city so a different source is picked. */
   avoidProvider?: string
   /**
+   * After Atlantic served its Warp interstitial/bumper for this episode, skip
+   * Helios/Aphrodite so rotateSource can reach donghua/Nyaa instead of looping.
+   */
+  skipAtlantic?: boolean
+  /**
    * Only ask these cities (Audio menu re-resolve on the current city). Skips the
    * Atlantic fallback, which have no language choice.
    */
@@ -899,6 +904,7 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
   }
 
   const tryAtlanticFallback = async (): Promise<MovyPlayResult | null> => {
+    if (options.skipAtlantic) return null
     if (tizenFailed?.backends.has('atlantic')) return null
     const started = Date.now()
     try {

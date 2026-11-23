@@ -1,5 +1,5 @@
 import { isAllowedSyncUrl, progressSyncBaseUrl } from './config'
-import type { ProgressSyncDevice, ProgressSyncRecord } from './types'
+import type { ProgressSyncDevice, ProgressSyncRecord, SavedSyncRecord } from './types'
 
 /** HTTP failure with the status so callers can tell "signed out" (401) from "retry later". */
 export class SyncHttpError extends Error {
@@ -87,6 +87,7 @@ export function syncRevokeDevice(token: string, deviceId: string): Promise<{ ok:
 }
 
 export type SyncPullResponse = { entries: ProgressSyncRecord[]; rev: number; now: number }
+export type SavedSyncPullResponse = { entries: SavedSyncRecord[]; rev: number; now: number }
 
 export async function syncPull(token: string, since: number): Promise<SyncPullResponse> {
   const data = await request<SyncPullResponse>('GET', `/v1/progress?since=${Math.max(0, since | 0)}`, {
@@ -120,6 +121,50 @@ export async function syncPush(
   options?: { keepalive?: boolean },
 ): Promise<SyncPushResponse> {
   const data = await request<SyncPushResponse>('PUT', '/v1/progress', {
+    token,
+    body: { entries },
+    keepalive: options?.keepalive,
+  })
+  return {
+    results: Array.isArray(data.results) ? data.results : [],
+    rev: Number(data.rev) || 0,
+    now: Number(data.now) || Date.now(),
+  }
+}
+
+export type SavedSyncPushRow = Omit<SavedSyncRecord, 'updatedAt' | 'rev'> & { ageMs: number }
+
+export type SavedSyncPushResult = {
+  id: string
+  accepted: boolean
+  rev?: number
+  updatedAt?: number
+  deleted?: boolean
+  /** Server's newer Saved row when ours was rejected. */
+  current?: SavedSyncRecord
+}
+
+export type SavedSyncPushResponse = { results: SavedSyncPushResult[]; rev: number; now: number }
+
+export async function syncPullSaved(token: string, since: number): Promise<SavedSyncPullResponse> {
+  const data = await request<SavedSyncPullResponse>(
+    'GET',
+    `/v1/saved?since=${Math.max(0, since | 0)}`,
+    { token },
+  )
+  return {
+    entries: Array.isArray(data.entries) ? data.entries : [],
+    rev: Number(data.rev) || 0,
+    now: Number(data.now) || Date.now(),
+  }
+}
+
+export async function syncPushSaved(
+  token: string,
+  entries: SavedSyncPushRow[],
+  options?: { keepalive?: boolean },
+): Promise<SavedSyncPushResponse> {
+  const data = await request<SavedSyncPushResponse>('PUT', '/v1/saved', {
     token,
     body: { entries },
     keepalive: options?.keepalive,

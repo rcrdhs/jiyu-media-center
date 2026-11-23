@@ -11,16 +11,38 @@
 
 import type { StreamItem } from '../types'
 import { androidBrowserFetchHtml, isAndroidInAppBrowser } from './androidBrowser'
+import { withSportsProviderLabel } from './sportsProviderLabel'
 import { LIVEXTV_REPLAY_MAX_AGE_MS } from './livextvReplays'
 
-export const STREAMCORNER_ORIGIN = 'https://streamcorner.st'
-export const STREAMCORNER_ID_PREFIX = 'streamcorner-'
+/** Prefer live mirrors. streamcorner.foo / .fun now 301 to strmcrnr.foo / .top; streamcorner.st often has no DNS. */
 export const STREAMCORNER_MIRRORS = [
-  'https://streamcorner.st',
-  'https://streamcorner.foo',
+  'https://strmcrnr.foo',
   'https://streamcorner.cloud',
-  'https://streamcorner.fun',
+  'https://strmcrnr.top',
 ] as const
+export const STREAMCORNER_ORIGIN = STREAMCORNER_MIRRORS[0]
+export const STREAMCORNER_ID_PREFIX = 'streamcorner-'
+
+/** Origin that last returned a usable catalog (watch URLs must use this, not .st). */
+let activeStreamCornerOrigin: string = STREAMCORNER_ORIGIN
+
+export function getStreamCornerOrigin(): string {
+  return activeStreamCornerOrigin || STREAMCORNER_ORIGIN
+}
+
+export function setStreamCornerOrigin(origin: string) {
+  const next = String(origin || '')
+    .trim()
+    .replace(/\/$/, '')
+  if (!next) return
+  try {
+    if (isStreamCornerHost(new URL(next).hostname)) {
+      activeStreamCornerOrigin = next
+    }
+  } catch {
+    /* ignore */
+  }
+}
 
 export type StreamCornerEntry = {
   href: string
@@ -45,15 +67,29 @@ export function streamCornerItemId(kind: string, matchId: string): string {
 
 export function isStreamCornerHost(hostname: string): boolean {
   const host = hostname.replace(/^www\./, '').toLowerCase()
-  return (
-    host === 'streamcorner.st' ||
-    host.endsWith('.streamcorner.st') ||
-    host === 'streamcorner.foo' ||
-    host === 'streamcorner.cloud' ||
-    host === 'streamcorner.fun' ||
-    host === 'streamninja.cloud' ||
-    host === 'streamninja.fun'
-  )
+  return /(^|\.)(streamcorner|strmcrnr|streamninja)\.(st|foo|cloud|fun|top)$/i.test(host)
+}
+
+
+export function normalizeStreamCornerWatchUrl(pathOrUrl: string): string {
+  if (/^https?:\/\//i.test(pathOrUrl)) {
+    try {
+      const u = new URL(pathOrUrl)
+      if (isStreamCornerHost(u.hostname)) {
+        const active = new URL(getStreamCornerOrigin())
+        if (u.hostname.replace(/^www\./i, '').toLowerCase() !== active.hostname.toLowerCase()) {
+          u.protocol = 'https:'
+          u.host = active.host
+          return u.toString()
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+    return pathOrUrl
+  }
+  const path = pathOrUrl.startsWith('/') ? pathOrUrl : `/${pathOrUrl}`
+  return `${getStreamCornerOrigin()}${path}`
 }
 
 export function isStreamCornerCatalogItem(item: {
@@ -222,6 +258,7 @@ function parseStreamCornerCards(html: string): StreamCornerEntry[] {
       title = alts.length >= 2 ? `${alts[0]} vs ${alts[1]}` : alts[0] || ''
     }
     const leaves = [...card.matchAll(/>([^<>]{1,80})</g)].map((m) => decodeHtmlText(m[1]))
+    const cardText = decodeHtmlText(card)
     const status = leaves.find((t) => /^(final|ft|full time|ended)\b/i.test(t)) || ''
     const start =
       attr('data-original-time') ||
@@ -229,13 +266,20 @@ function parseStreamCornerCards(html: string): StreamCornerEntry[] {
       field(/^(kick off|tip off|start time|starts?)$/i) ||
       leaves.find((t) => /^\d{1,2}\/\d{1,2}\/\d{2,4}\s+\d{1,2}:\d{2}\s*[AP]M/i.test(t)) ||
       ''
-    const liveBadge = leaves.some((t) => /^live$/i.test(t))
+    // Android WebView HTML often nests the LIVE pill; desktop DOM textContent is flatter.
+    const liveBadge =
+      leaves.some((t) => /^live$/i.test(t)) ||
+      /\blive\b/i.test(cardText) ||
+      /\bclass=["'][^"']*\blive\b/i.test(card)
     for (const link of links) {
       const base = entryFromPath(link.path, title)
       if (!base || seen.has(base.href)) continue
       seen.add(base.href)
-      const watchNow = /watch now/i.test(link.text) || /watch now/i.test(card)
-      base.live = !status && base.kind === 'live' && (liveBadge || watchNow)
+      const watchNow =
+        /watch now/i.test(link.text) ||
+        /watch now/i.test(cardText) ||
+        /watch now/i.test(link.attrs)
+      base.live = !status && base.kind === 'live' && (liveBadge || watchNow || base.live)
       base.league = league || undefined
       base.category = category || undefined
       base.status = status || undefined
@@ -301,9 +345,22 @@ function entryFromPath(path: string, titleRaw: string): StreamCornerEntry | null
 }
 
 function absoluteWatchUrl(pathOrUrl: string): string {
-  if (/^https?:\/\//i.test(pathOrUrl)) return pathOrUrl
+  if (/^https?:\/\//i.test(pathOrUrl)) {
+    // Rewrite dead .st host to the mirror that actually served the catalog.
+    try {
+      const u = new URL(pathOrUrl)
+      if (isStreamCornerHost(u.hostname) && /streamcorner\.st$/i.test(u.hostname)) {
+        u.protocol = 'https:'
+        u.host = new URL(getStreamCornerOrigin()).host
+        return u.toString()
+      }
+    } catch {
+      /* ignore */
+    }
+    return pathOrUrl
+  }
   const path = pathOrUrl.startsWith('/') ? pathOrUrl : `/${pathOrUrl}`
-  return `${STREAMCORNER_ORIGIN}${path}`
+  return `${getStreamCornerOrigin()}${path}`
 }
 
 /**
@@ -373,6 +430,21 @@ function isStreamCornerNonSportsChannel(entry: StreamCornerEntry): boolean {
   const blob = `${entry.title || ''}`
   if (sportFromText(blob)) return false
   return !/\b(sports?|espn|tsn|sky\s*sports|bein|dazn|fox\s*sports|tnt|nfl|nba|nhl|mlb|ufc)\b/i.test(blob)
+}
+
+/** 24/7 sports channels (NFL Network, Sky Sports, …), even if the heading was scraped as a league. */
+function isStreamCornerAlwaysLiveChannel(
+  entry: StreamCornerEntry,
+  startsAt?: number,
+): boolean {
+  const label = `${entry.league || ''} ${entry.category || ''}`
+  if (/24\s*\/\s*7|24-7/i.test(label)) return true
+  const title = String(entry.title || '')
+  if (/\bvs\.?\b/i.test(title)) return false
+  if (startsAt != null) return false
+  return /\b(network|news|redzone|red\s*zone|espn|tsn|sky\s*sports?|bein|dazn|fox\s*sports?|tnt\s*sports?|nba\s*tv|mlb\s*network|nhl\s*network|nfl\s*network|premier\s*sports|supersport|willow)\b/i.test(
+    title,
+  )
 }
 
 /** Parse "11/02/26 06:00PM ET" / "10/31/26 7:00 PM" as US Eastern time. */
@@ -453,7 +525,7 @@ export function streamCornerEntryToItem(
   if (!matchId) return null
   const kind = entry.kind === 'vod' ? 'vod' : 'live'
   const url = absoluteWatchUrl(entry.href)
-  const title = String(entry.title || '').trim() || `StreamCorner ${matchId}`
+  const title = withSportsProviderLabel(String(entry.title || '').trim() || matchId, 'SC')
   // 24/7 TV-show channels (Family Guy, …) are not sports.
   if (isStreamCornerNonSportsChannel(entry)) return null
   const sport = streamCornerSportTag(entry) || 'sports'
@@ -465,22 +537,36 @@ export function streamCornerEntryToItem(
       : ''
   const final = /^(final|ft|full time|ended)\b/i.test(String(entry.status || ''))
   const startsAt = parseStreamCornerStart(entry.start)
-  // Only admin/nfl cards have a real LIVE badge; Alpha/NBA always say "Watch Now".
+  const alwaysLive = isStreamCornerAlwaysLiveChannel(entry, startsAt)
+  // Only admin/nfl cards have a real LIVE badge; Alpha/NBA often say "Watch Now".
   const badgeProvider = /^(admin|nfl)$/i.test(String(entry.provider || ''))
+  const endedAfterMs = (badgeProvider ? 3 : 6) * 60 * 60 * 1000
   if (kind === 'live') {
     // Finished NBA games: the VOD replay row covers them.
     if (final) return null
-    // Games that started long ago and aren't flagged live are over
-    // (admin/nfl show a LIVE badge while on; Alpha has none, so allow longer).
-    const endedAfterMs = (badgeProvider ? 3 : 6) * 60 * 60 * 1000
-    if (startsAt && nowMs - startsAt > endedAfterMs && !(badgeProvider && entry.live)) {
+    // Games that started long ago and aren't flagged live are over.
+    if (startsAt && nowMs - startsAt > endedAfterMs && !entry.live) {
       return null
     }
   }
+  // StreamCorner's live board omits kickoff (start=null) and shows LIVE/Watch Now.
+  // Android HTML scrapes often miss that badge → those rows were tagged Upcoming.
+  // Sandbox (Electron DOM vs outerHTML): live cards are start=null + live=true;
+  // scheduled cards always have a start time. Treat undated non-final as live-now.
+  const startedByClock =
+    startsAt != null &&
+    startsAt <= nowMs &&
+    nowMs - startsAt <= endedAfterMs
+  const boardLive = startsAt == null
+  // A future kickoff is Upcoming even if the site still shows LIVE / Watch Now.
+  const futureStart = startsAt != null && startsAt > nowMs
   const liveNow =
+    !alwaysLive &&
     kind === 'live' &&
-    (badgeProvider || !startsAt ? Boolean(entry.live) : startsAt <= nowMs + 10 * 60 * 1000)
-  const upcoming = kind === 'live' && !liveNow
+    !final &&
+    !futureStart &&
+    (Boolean(entry.live) || startedByClock || boardLive)
+  const upcoming = kind === 'live' && !liveNow && !alwaysLive
 
   if (kind === 'vod') {
     // Real game date from the card; first-seen fallback so undated rows still expire.
@@ -494,7 +580,7 @@ export function streamCornerEntryToItem(
     return {
       id: streamCornerItemId('vod', matchId),
       title,
-      description: ['NBA', 'StreamCorner', 'Replay'].join(' · '),
+      description: ['NBA', 'SC', 'Replay'].join(' · '),
       category: 'sports',
       url,
       detailUrl: url,
@@ -511,7 +597,7 @@ export function streamCornerEntryToItem(
   return {
     id: streamCornerItemId('live', `${entry.provider || 'x'}-${matchId}`),
     title,
-    description: [leagueLabel, sportName, 'StreamCorner', liveNow ? 'Live' : 'Upcoming']
+    description: [leagueLabel, sportName, 'SC', alwaysLive ? '24/7' : liveNow ? 'Live' : 'Upcoming']
       .filter(Boolean)
       .join(' · '),
     category: 'sports',
@@ -522,6 +608,8 @@ export function streamCornerEntryToItem(
       'streamcorner',
       'web-embed',
       sport,
+      alwaysLive ? 'always-live' : '',
+      alwaysLive ? '24/7-streams' : '',
       liveNow ? 'live-now' : '',
       upcoming ? 'upcoming' : '',
     ].filter(Boolean),
@@ -529,12 +617,13 @@ export function streamCornerEntryToItem(
     sourceKind: 'builtin',
     transport: 'direct',
     releasedAt: nowMs,
-    eventStartsAt: startsAt ?? (upcoming ? nowMs + 60 * 60 * 1000 : nowMs),
-    eventSport: sportName,
+    eventStartsAt: alwaysLive ? undefined : startsAt,
+    eventSport: alwaysLive && (!sportName || sportName === 'Sports') ? '24/7 Streams' : sportName,
   }
 }
 
-const EXTRACT_SCRIPT = `(() => {
+/** Shared with Android scrape WebView (desktop uses the same logic in Electron). */
+export const STREAMCORNER_EXTRACT_SCRIPT = `(() => {
   const out = [];
   const seen = new Set();
   const LINK_SEL = 'a[href*="/stream/"], a[href*="/nba/"]';
@@ -643,6 +732,7 @@ async function fetchEntriesDesktop(): Promise<
   try {
     const result = await api()
     if (!result.ok) return { ok: false, error: result.error || 'StreamCorner scrape failed' }
+    if (result.origin) setStreamCornerOrigin(String(result.origin))
     return { ok: true, entries: Array.isArray(result.entries) ? result.entries : [] }
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) }
@@ -657,14 +747,37 @@ async function fetchEntriesAndroid(): Promise<
   }
   let lastError = 'StreamCorner unavailable'
   for (const origin of STREAMCORNER_MIRRORS) {
-    const result = await androidBrowserFetchHtml(`${origin}/`, { untilWatchLinks: true })
-    if (!result.ok || !result.content) {
-      lastError = result.error || `HTTP ${result.status}`
-      continue
+    // Prefer waiting for SPA cards; if that times out, take a plain HTML pass.
+    const attempts = [true, false] as const
+    for (const untilWatchLinks of attempts) {
+      const result = await androidBrowserFetchHtml(`${origin}/`, {
+        untilWatchLinks,
+        // Same DOM extract as desktop — LIVE/Watch Now from textContent, not HTML regex.
+        extractScript: STREAMCORNER_EXTRACT_SCRIPT,
+      })
+      if (!result.ok && !result.entriesJson && !result.content) {
+        lastError = result.error || `HTTP ${result.status}`
+        continue
+      }
+      // Prefer structured extract (matches Electron); fall back to outerHTML parse.
+      let entries: StreamCornerEntry[] = []
+      if (result.entriesJson) {
+        try {
+          const parsed = JSON.parse(result.entriesJson) as StreamCornerEntry[]
+          if (Array.isArray(parsed) && parsed.length) entries = parsed
+        } catch {
+          /* fall through */
+        }
+      }
+      if (!entries.length && result.content) {
+        entries = parseStreamCornerCatalogHtml(result.content)
+      }
+      if (entries.length) {
+        setStreamCornerOrigin(origin)
+        return { ok: true, entries }
+      }
+      lastError = 'No StreamCorner cards in page'
     }
-    const entries = parseStreamCornerCatalogHtml(result.content)
-    if (entries.length) return { ok: true, entries }
-    lastError = 'No StreamCorner cards in page'
   }
   return { ok: false, error: lastError }
 }
@@ -692,21 +805,32 @@ export async function fetchStreamCornerEntries(): Promise<EntriesResult> {
       } else {
         // Dev browser: try a plain fetch (usually gets the shell only).
         try {
-          const res = await fetch(`${STREAMCORNER_ORIGIN}/`, {
-            headers: { Accept: 'text/html' },
-          })
-          if (!res.ok) {
-            result = { ok: false, error: `HTTP ${res.status}` }
-          } else {
-            const html = await res.text()
-            const entries = parseStreamCornerCatalogHtml(html)
-            result = entries.length
-              ? { ok: true, entries }
-              : {
-                  ok: false,
-                  error: 'StreamCorner needs desktop or Android scrape (SPA).',
-                }
+          let lastDevError = 'StreamCorner scrape failed'
+          let found: StreamCornerEntry[] | null = null
+          for (const origin of STREAMCORNER_MIRRORS) {
+            try {
+              const res = await fetch(`${origin}/`, {
+                headers: { Accept: 'text/html' },
+              })
+              if (!res.ok) {
+                lastDevError = `HTTP ${res.status}`
+                continue
+              }
+              const html = await res.text()
+              const entries = parseStreamCornerCatalogHtml(html)
+              if (entries.length) {
+                setStreamCornerOrigin(origin)
+                found = entries
+                break
+              }
+              lastDevError = 'StreamCorner needs desktop or Android scrape (SPA).'
+            } catch (err) {
+              lastDevError = err instanceof Error ? err.message : String(err)
+            }
           }
+          result = found
+            ? { ok: true, entries: found }
+            : { ok: false, error: lastDevError }
         } catch (err) {
           result = {
             ok: false,
@@ -781,6 +905,3 @@ export function streamCornerSportsFromItems(
     .map(([id, name]) => ({ id, name }))
     .sort((a, b) => a.name.localeCompare(b.name))
 }
-
-/** Exported for Electron IPC (same extract script). */
-export const STREAMCORNER_EXTRACT_SCRIPT = EXTRACT_SCRIPT

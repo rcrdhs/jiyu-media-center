@@ -625,6 +625,9 @@ let adDockLastUrl = ''
 let adDockLastShownAt = 0
 /** @type {ReturnType<typeof setInterval> | null} */
 let adDockMuteTimer = null
+/** Renderer-reported slot for the muted ad thumbnail inside the dock bar. */
+/** @type {{ x: number, y: number, width: number, height: number } | null} */
+let adDockSlotBounds = null
 /** Extra WebContentsViews for multi-view web embeds (id → view). */
 const multiWebViews = new Map()
 const multiWebAttached = new Set()
@@ -814,7 +817,7 @@ const BROWSER_SEEK_OVERLAY_SCRIPT = `(() => {
         #\${ROOT_ID} {
           position: fixed;
           inset: 0;
-          z-index: 2147483646;
+          z-index: 2147483647;
           display: flex;
           align-items: center;
           justify-content: space-between;
@@ -898,22 +901,33 @@ const BROWSER_SEEK_OVERLAY_SCRIPT = `(() => {
       } catch (_) {}
     };
 
+    const seekWindow = (v) => {
+      let lo = 0;
+      let hi = 0;
+      try {
+        const s = v.seekable;
+        if (s && s.length) {
+          lo = Math.max(0, s.start(0));
+          hi = s.end(s.length - 1);
+        }
+      } catch (_) {}
+      if (!(hi > lo + 1)) {
+        const d = Number(v.duration);
+        if (Number.isFinite(d) && d > 0 && d !== Infinity) {
+          lo = 0;
+          hi = d;
+        }
+      }
+      return { lo, hi, ok: hi > lo + 1 };
+    };
+    const canSeekVideo = (v) => Boolean(v && seekWindow(v).ok);
     const seekBy = (delta) => {
       const v = pickVideo();
       if (!v) return false;
-      if (!Number.isFinite(v.duration) || v.duration === Infinity) return false;
-      let lo = 0;
-      let hi = v.duration;
-      try {
-        // Live / sliding-window streams: stay inside the seekable window so the
-        // player does not snap back to the edge or reload the stream.
-        const s = v.seekable;
-        if (s && s.length) {
-          lo = Math.max(0, s.start(0) + 0.5);
-          hi = Math.min(v.duration, s.end(s.length - 1));
-        }
-      } catch (_) {}
-      if (!(hi > lo)) { lo = 0; hi = v.duration; }
+      const win = seekWindow(v);
+      if (!win.ok) return false;
+      let lo = win.lo + 0.25;
+      let hi = win.hi;
       let target = (Number(v.currentTime) || 0) + delta;
       if (delta < 0) {
         // Live streams (live-rewind-guard.js): stop at the oldest point the
@@ -982,7 +996,9 @@ const BROWSER_SEEK_OVERLAY_SCRIPT = `(() => {
     let hideTimer = 0;
     const show = () => {
       const v = pickVideo();
-      if (!v || !Number.isFinite(v.duration) || v.duration === Infinity) {
+      // Replays (Playmogo / Dood HLS) often report duration=Infinity but still
+      // expose a seekable range — allow ±10s whenever that window exists.
+      if (!canSeekVideo(v)) {
         root.classList.remove('is-visible');
         return;
       }
@@ -999,6 +1015,24 @@ const BROWSER_SEEK_OVERLAY_SCRIPT = `(() => {
 
     window.addEventListener('mousemove', show, { passive: true });
     window.addEventListener('pointerdown', show, { passive: true });
+    // Arrow keys: left/right = ±10s when the stream has a seekable window (replays).
+    window.addEventListener('keydown', (e) => {
+      try {
+        if (!e || e.defaultPrevented) return;
+        if (e.altKey || e.ctrlKey || e.metaKey) return;
+        const tag = e.target && e.target.tagName ? String(e.target.tagName).toLowerCase() : '';
+        if (tag === 'input' || tag === 'textarea' || tag === 'select' || (e.target && e.target.isContentEditable)) return;
+        if (e.key === 'ArrowLeft') {
+          e.preventDefault();
+          seekBy(-10);
+          show();
+        } else if (e.key === 'ArrowRight') {
+          e.preventDefault();
+          seekBy(10);
+          show();
+        }
+      } catch (_) {}
+    }, true);
     return 'bound';
   } catch (_) {
     return 'error';
@@ -1030,15 +1064,10 @@ const BROWSER_PPV_START_RETRY_SCRIPT = (() => {
 const BROWSER_STREAMCORNER_BOOT_SCRIPT = `(() => {
   try {
     const host = String(location.hostname || '').replace(/^www\\./i, '').toLowerCase();
-    if (
-      !/(^|\\.)streamcorner\\.(st|foo|cloud|fun)$/i.test(host) &&
-      !/(^|\\.)streamninja\\.(st|foo|cloud|fun)$/i.test(host)
-    ) {
+    if (!/(^|\\.)(streamcorner|strmcrnr|streamninja)\\.(st|foo|cloud|fun|top)$/i.test(host)) {
       return 'skip';
     }
     if (window !== window.top) return 'skip-frame';
-    if (window.__jiyuCornerBoot) return 'bound';
-    window.__jiyuCornerBoot = true;
 
     // Anti-adblock full-page shield (#dontfoid) blocks source clicks and gates
     // the player iframe — soft ad-shield leaves it alone, so clear it here.
@@ -1062,12 +1091,16 @@ const BROWSER_STREAMCORNER_BOOT_SCRIPT = `(() => {
       } catch (_) {}
     };
 
+    if (typeof window.__jiyuCornerSrcIdx !== 'number') window.__jiyuCornerSrcIdx = 0;
+
     const hideChat = () => {
       try {
-        const btn = [...document.querySelectorAll('button,a,[role=button]')].find((el) =>
-          /^\\s*Hide Chat\\s*$/i.test(String(el.innerText || el.textContent || '')),
-        );
-        if (btn) btn.click();
+        const btn = [...document.querySelectorAll('button,a,[role=button]')].find((el) => {
+          const label = String(el.getAttribute('aria-label') || el.getAttribute('title') || '');
+          const text = String(el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
+          return /^Hide Chat$/i.test(text) || /^hide chat$/i.test(label);
+        });
+                if (btn) btn.click();
       } catch (_) {}
       try {
         let style = document.getElementById('jiyu-corner-hide-chat');
@@ -1075,7 +1108,7 @@ const BROWSER_STREAMCORNER_BOOT_SCRIPT = `(() => {
           style = document.createElement('style');
           style.id = 'jiyu-corner-hide-chat';
           style.textContent =
-            '#player-chat,#player-chat-content{display:none!important;width:0!important;max-width:0!important;min-width:0!important;height:0!important;max-height:0!important;overflow:hidden!important;opacity:0!important;pointer-events:none!important;}';
+            '#player-chat,#player-chat-content,iframe[src*="streamcorner-chat"],iframe[src*="chatroom="],[id*="chat-room"],[class*="chat-room"],[class*="streamcorner-chat"]{display:none!important;width:0!important;max-width:0!important;min-width:0!important;height:0!important;max-height:0!important;overflow:hidden!important;opacity:0!important;pointer-events:none!important;}';
           ;(document.documentElement || document.head || document.body)?.appendChild(style);
         }
         const chat = document.getElementById('player-chat');
@@ -1083,18 +1116,65 @@ const BROWSER_STREAMCORNER_BOOT_SCRIPT = `(() => {
           chat.style.setProperty('display', 'none', 'important');
           chat.setAttribute('data-jiyu-hide-chat', '1');
         }
+        for (const f of document.querySelectorAll('iframe')) {
+          const src = String(f.src || f.getAttribute('src') || '');
+          if (/streamcorner-chat|chatroom=/i.test(src)) {
+            f.style.setProperty('display', 'none', 'important');
+            f.setAttribute('data-jiyu-hide-chat', '1');
+          }
+        }
       } catch (_) {}
     };
 
+    const isAdFrameSrc = (src) => {
+      try {
+        const host = new URL(src).hostname.replace(/^www\\./i, '').toLowerCase();
+        return /roadster24|doubleclick|googlesyndication|popads|propellerads|exoclick|trafficjunky|juicyads|adaround|taboola|outbrain|adsterra|tsyndicate|adnxs|adserver/i.test(
+          host + ' ' + src,
+        );
+      } catch (_) {
+        return false;
+      }
+    };
+    const isCornerPlayerSrc = (src) => {
+      try {
+        const u = new URL(src);
+        const host = u.hostname.replace(/^www\\./i, '').toLowerCase();
+        if (/getsugatensho/i.test(host)) return true;
+        if (/\\.sbs$/i.test(host) && u.searchParams.has('p')) return true;
+        if (/\\/charlie|lita\\.html|alejandra|bitmovin/i.test(src)) return true;
+        return false;
+      } catch (_) {
+        return false;
+      }
+    };
     const findPlayerFrame = () => {
       try {
-        return [...document.querySelectorAll('iframe')].find((f) => {
+        const ifs = [...document.querySelectorAll('iframe')];
+        const preferred = ifs.find((f) => {
           const src = String(f.src || f.getAttribute('src') || '');
-          if (!src || /^(javascript:|about:)/i.test(src)) return false;
+          if (!String(src).startsWith('http://') && !String(src).startsWith('https://')) return false;
           if (/streamcorner-chat|chatroom=/i.test(src)) return false;
-          const r = f.getBoundingClientRect();
-          return r.width > 120 && r.height > 80;
-        }) || null;
+          if (isAdFrameSrc(src)) return false;
+          return isCornerPlayerSrc(src);
+        });
+        if (preferred) return preferred;
+        
+        const bm = document.querySelector(
+          '[id*="bitmovin"],[class*="bitmovin"],.bmpui-container,[class*="bmpui-"]',
+        );
+        if (bm) {
+          const shell = bm.closest('[id*="player"],[class*="player"]') || bm;
+          const br = shell.getBoundingClientRect();
+          if (br.width > 80 && br.height > 60) return shell;
+        }
+        for (const v of document.querySelectorAll('video')) {
+          const vr = v.getBoundingClientRect();
+          if (vr.width > 80 && vr.height > 60) {
+            return v.closest('[id*="player"],[class*="player"]') || v;
+          }
+        }
+        return null;
       } catch (_) {
         return null;
       }
@@ -1119,8 +1199,9 @@ const BROWSER_STREAMCORNER_BOOT_SCRIPT = `(() => {
             'html.jiyu-corner-only,html.jiyu-corner-only body{margin:0!important;padding:0!important;overflow:hidden!important;background:#000!important;width:100%!important;height:100%!important;}',
             'html.jiyu-corner-only .stream-navbar,html.jiyu-corner-only header,html.jiyu-corner-only nav,html.jiyu-corner-only footer,',
             'html.jiyu-corner-only #player-chat,html.jiyu-corner-only #player-chat-content,html.jiyu-corner-only .night-page-backdrop,',
-            'html.jiyu-corner-only [class*="reminder"],html.jiyu-corner-only aside{display:none!important;}',
-            'html.jiyu-corner-only iframe.jiyu-corner-player{position:fixed!important;inset:0!important;width:100vw!important;height:100vh!important;',
+            'html.jiyu-corner-only [class*="reminder"],html.jiyu-corner-only aside,',
+            'html.jiyu-corner-only iframe[src*="streamcorner-chat"],html.jiyu-corner-only iframe[src*="chatroom="]{display:none!important;}',
+            'html.jiyu-corner-only .jiyu-corner-player{position:fixed!important;inset:0!important;width:100vw!important;height:100vh!important;',
             'max-width:none!important;max-height:none!important;border:0!important;z-index:2147483000!important;background:#000!important;}',
           ].join('');
           ;(document.documentElement || document.head || document.body)?.appendChild(style);
@@ -1162,39 +1243,115 @@ const BROWSER_STREAMCORNER_BOOT_SCRIPT = `(() => {
       }
     };
 
-    let sourceIdx = 0;
-    const pickSource = () => {
+    const listSources = () => {
       try {
-        clearBlockers();
-        if (findPlayerFrame()) {
-          focusPlayerOnly();
-          return 'has-player';
+        const out = [];
+        const seen = new Set();
+        const add = (el) => {
+          if (!el || seen.has(el)) return;
+          seen.add(el);
+          out.push(el);
+        };
+        for (const el of document.querySelectorAll('button.stream-source-btn,[class*="stream-source"]')) {
+          add(el);
         }
-        const sources = [...document.querySelectorAll('button.stream-source-btn')];
-        if (sources.length) {
-          const i = Math.min(sourceIdx, sources.length - 1);
-          sources[i].click();
-          sourceIdx = (i + 1) % sources.length;
-          // Center PLAY may still be required after a source is selected.
-          const play = [...document.querySelectorAll('button,a,[role=button]')].find((el) =>
-            /^\\s*PLAY\\s*$/i.test(String(el.innerText || el.textContent || '')),
-          );
-          if (play) play.click();
-          return 'source';
+        for (const el of document.querySelectorAll('button,a,[role=button],div,label,li')) {
+          const t = String(el.innerText || '').replace(/\\s+/g, ' ').trim();
+          if (t.length > 4 && t.length < 90 && /^(HD|SD|FHD|UHD|4K)\\b/i.test(t)) add(el);
         }
+        return out;
+      } catch (_) {
+        return [];
+      }
+    };
+
+    const clickPlay = () => {
+      try {
         const play = [...document.querySelectorAll('button,a,[role=button]')].find((el) =>
           /^\\s*PLAY\\s*$/i.test(String(el.innerText || el.textContent || '')),
         );
         if (play) {
           play.click();
-          return 'play';
+          return true;
         }
+      } catch (_) {}
+      return false;
+    };
+
+    const recoverHls = () => {
+      try {
+        const body = String((document.body && (document.body.innerText || document.body.textContent)) || '');
+        if (!/manifestLoadError|Could not play video|networkError/i.test(body)) return false;
+        for (const el of document.querySelectorAll('button,a,[role=button]')) {
+          const t = String(el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
+          if (/^Reload Player$/i.test(t)) el.click();
+        }
+        const sources = listSources();
+        if (sources.length > 1) {
+          window.__jiyuCornerSrcIdx = (window.__jiyuCornerSrcIdx + 1) % sources.length;
+          sources[window.__jiyuCornerSrcIdx].click();
+          clickPlay();
+        }
+        return true;
+      } catch (_) {
+        return false;
+      }
+    };
+
+    const clearClickThieves = () => {
+      try {
+        for (const f of document.querySelectorAll('iframe')) {
+          const src = String(f.src || f.getAttribute('src') || '');
+          if (src && isAdFrameSrc(src)) {
+            f.style.setProperty('pointer-events', 'none', 'important');
+            f.style.setProperty('display', 'none', 'important');
+          }
+        }
+        for (const el of document.querySelectorAll('div,a,section')) {
+          if (el.classList && el.classList.contains('jiyu-corner-player')) continue;
+          if (el.id && /^jiyu-corner-/i.test(el.id)) continue;
+          const st = window.getComputedStyle(el);
+          if (st.position !== 'fixed' && st.position !== 'sticky') continue;
+          const r = el.getBoundingClientRect();
+          const z = Number(st.zIndex) || 0;
+          if (z < 5 || r.width < window.innerWidth * 0.6 || r.height < window.innerHeight * 0.4) continue;
+          if (el.querySelector('video,button.stream-source-btn,.jiyu-corner-player')) continue;
+          el.style.setProperty('pointer-events', 'none', 'important');
+        }
+      } catch (_) {}
+    };
+
+    const pickSource = () => {
+      try {
+        clearBlockers();
+        hideChat();
+        clearClickThieves();
+        if (findPlayerFrame()) {
+          recoverHls();
+          focusPlayerOnly();
+          return 'has-player';
+        }
+        const sources = listSources();
+        if (sources.length) {
+          const i = Math.min(window.__jiyuCornerSrcIdx, sources.length - 1);
+          sources[i].click();
+          clickPlay();
+          return 'source';
+        }
+        if (clickPlay()) return 'play';
         return 'wait';
       } catch (_) {
         return 'error';
       }
     };
 
+    if (window.__jiyuCornerBoot) {
+      clearBlockers();
+      hideChat();
+      pickSource();
+      return 'bound';
+    }
+    window.__jiyuCornerBoot = true;
     clearBlockers();
     hideChat();
     pickSource();
@@ -1547,7 +1704,8 @@ function isAllowedSportsPlayerHost(host) {
     .toLowerCase()
   if (!h) return false
   if (h.includes('strmd')) return true
-  return /(^|\.)(embed\.st|embedhd\.st|embedindia\.st|streamed\.pk|ppv\.st|ppvservices\.st|b-cdn\.net|jsdelivr\.net|unpkg\.com|clappr\.io|jwpcdn\.com|jwplatform\.com|jwplayer\.com|cloudfront\.net|akamaized\.net|akamaihd\.net|fastly\.net|videodelivery\.net|mux\.com|googleapis\.com|gstatic\.com|swarmcloud|hlsjs|cloudflare\.com)$/i.test(
+  if (h.includes('getsugatensho')) return true
+  return /(^|\.)(embed\.st|embedhd\.st|embedindia\.st|streamed\.pk|ppv\.st|ppvservices\.st|shoewiki\.click|servehttp\.com|tim-streams\.com|timstreams\.co\.rw|tiktokcdn\.com|tiktokcdn-us\.com|b-cdn\.net|jsdelivr\.net|unpkg\.com|clappr\.io|jwpcdn\.com|jwplatform\.com|jwplayer\.com|cloudfront\.net|akamaized\.net|akamaihd\.net|fastly\.net|videodelivery\.net|mux\.com|googleapis\.com|gstatic\.com|swarmcloud|hlsjs|cloudflare\.com)$/i.test(
     h,
   )
 }
@@ -1568,7 +1726,7 @@ function isSportsEmbedPageUrl(url) {
 }
 
 function isSportsMediaUrl(url) {
-  return /\.(m3u8|mp4|m4s|ts|aac|m4a|vtt|srt|jpg|jpeg|png|gif|webp|svg|woff2?)(\?|$)/i.test(
+  return /\.(m3u8|mp4|m4s|ts|aac|m4a|vtt|srt|jpg|jpeg|png|gif|webp|svg|woff2?|image)(\?|$)/i.test(
     String(url || ''),
   )
 }
@@ -1588,6 +1746,7 @@ function shouldBlockSportsThirdParty(details) {
   }
   if (!pageUrl) pageUrl = String(details.referrer || '')
   if (!isSportsEmbedPageUrl(pageUrl)) return false
+  if (isStreamCornerPlayerUrl(url)) return false
   // Same-origin /ad.html on embed.st is an adware frame, not the player.
   try {
     if (/\/ad\.html(\?|#|$)/i.test(new URL(url).pathname || '')) return true
@@ -1602,6 +1761,10 @@ function shouldBlockSportsThirdParty(details) {
     return false
   }
   const type = String(details.resourceType || '')
+  // PPV anti-adblock loader must run or JW never mounts (see isPpvAntiAdblockLoaderUrl).
+  if ((type === 'script' || type === 'xhr' || type === 'other') && isPpvAntiAdblockLoaderUrl(url)) {
+    return false
+  }
   // Scripts / iframes / workers from unknown hosts are how Suschil bait arrives.
   if (
     type === 'script' ||
@@ -1641,6 +1804,24 @@ function isPushAdwareHost(host, url) {
     return true
   }
   return false
+}
+
+/**
+ * PPV.st mirrors (taifood-blog.asia/embed/…) ship an anti-adblock shell that loads
+ * only via their bait CDN (wpnxiswpuyrfn.icu /script/…, /d3.php). Blocking those
+ * scripts leaves an empty player and "No video yet". Soft-allow the loader only —
+ * top-level hijacks / popups to the same host stay blocked.
+ */
+function isPpvAntiAdblockLoaderUrl(url) {
+  try {
+    const parsed = new URL(String(url || ''))
+    const host = parsed.hostname.replace(/^www\./i, '').toLowerCase()
+    if (!/(^|\.)(wpnxiswpuyrfn\.icu|vbcojhroxkoaf\.online)$/i.test(host)) return false
+    const path = `${parsed.pathname || ''}${parsed.search || ''}`
+    return /\/script\/|\/d3\.php|selAdType|selPath|adbVersion|cdnPath|kl1Mnopq/i.test(path)
+  } catch {
+    return false
+  }
 }
 
 function isBlockedBrowserDownloadUrl(url) {
@@ -1798,6 +1979,8 @@ function isPlayerEmbedHost(url) {
       host === 'playmogo.com' ||
       host.endsWith('.playmogo.com') ||
       isStreamCornerSiteHost(host) ||
+      isStreamCornerPlayerUrl(url) ||
+      host.includes('getsugatensho') ||
       // DoodStream-style VOD mirrors used by LiveXTV replays.
       /^\/[de]\/[a-z0-9]{6,}/i.test(path) ||
       host.includes('netmirror') ||
@@ -1833,6 +2016,7 @@ function isAllowedPlayerNav(fromUrl, toUrl) {
   if (!raw || /^(about:blank|about:srcdoc|chrome:|chrome-error:|data:)/i.test(raw)) return true
   if (shouldBlockBrowserNavigation(raw)) return false
   if (isPlayerEmbedHost(raw)) return true
+  if (isStreamCornerPlayerUrl(raw)) return true
   if (fromUrl && sameBrowserSite(fromUrl, raw)) return true
   try {
     const u = new URL(raw)
@@ -2002,15 +2186,30 @@ function isStreamCornerSiteHost(host) {
     .replace(/^www\./i, '')
     .toLowerCase()
   if (!h) return false
-  return (
-    /(^|\.)streamcorner\.(st|foo|cloud|fun)$/i.test(h) ||
-    /(^|\.)streamninja\.(st|foo|cloud|fun)$/i.test(h)
-  )
+  return /(^|\.)(streamcorner|strmcrnr|streamninja)\.(st|foo|cloud|fun|top)$/i.test(h)
 }
 
 function isStreamCornerSiteUrl(url) {
   try {
     return isStreamCornerSiteHost(new URL(String(url || '')).hostname)
+  } catch {
+    return false
+  }
+}
+
+/** StreamCorner Bitmovin player documents (rotating getsugatensho / .sbs CDNs). */
+function isStreamCornerPlayerUrl(url) {
+  try {
+    const raw = String(url || '')
+    if (!raw) return false
+    const parsed = new URL(raw)
+    const host = parsed.hostname.replace(/^www\./i, '').toLowerCase()
+    if (host.includes('getsugatensho')) return true
+    if (/\.sbs$/i.test(host) && parsed.searchParams.has('p')) return true
+    if (/\/charlie|lita\.html|alejandra/i.test(`${parsed.pathname || ''}${parsed.search || ''}`)) {
+      return true
+    }
+    return false
   } catch {
     return false
   }
@@ -2036,7 +2235,13 @@ function isSportsEmbedHost(url) {
       host === 'ppv.st' ||
       host.endsWith('.ppv.st') ||
       host === 'ppvservices.st' ||
-      host.endsWith('.ppvservices.st')
+      host.endsWith('.ppvservices.st') ||
+      host === 'tim-streams.com' ||
+      host.endsWith('.tim-streams.com') ||
+      host === 'timstreams.co.rw' ||
+      host.endsWith('.timstreams.co.rw') ||
+      host === 'shoewiki.click' ||
+      host.endsWith('.shoewiki.click')
     )
   } catch {
     return false
@@ -2072,6 +2277,8 @@ function isReplayAdSensitiveUrl(url) {
     if (host === 'fullmatchshows.com' || host.endsWith('.fullmatchshows.com')) return true
     if (host === 'playmate.to' || host.endsWith('.playmate.to')) return true
     if (host === 'playmogo.com' || host.endsWith('.playmogo.com')) return true
+    if (host === 'vidaraa.cc' || host.endsWith('.vidaraa.cc') || host === 'vidara.to') return true
+    if (host === 'vixeo.io' || host.endsWith('.vixeo.io')) return true
     // DoodStream mirrors: /d/{id} or /e/{id} short paths on rotating hosts.
     if (/^\/[de]\/[a-z0-9]{6,}/i.test(parsed.pathname || '')) return true
     return false
@@ -2090,6 +2297,11 @@ function browserSessionAllowsReplayAds() {
     /* ignore */
   }
   try {
+    if (lastEmbedUrl) urls.push(lastEmbedUrl)
+  } catch {
+    /* ignore */
+  }
+  try {
     for (const view of multiWebViews.values()) {
       if (view && !view.webContents.isDestroyed()) {
         urls.push(view.webContents.getURL() || '')
@@ -2100,6 +2312,18 @@ function browserSessionAllowsReplayAds() {
   }
   // Live sports (embed.st) and replay VODs both refuse when googlesyndication is blocked.
   return urls.some((u) => isReplayAdSensitiveUrl(u) || isSportsEmbedHost(u))
+}
+
+/** Isolated session so replay popup creatives never touch the main jiyu-web cache. */
+function adDockSession() {
+  const ses = session.fromPartition('jiyu-ad-dock')
+  if (!ses.__jiyuAdDockGuarded) {
+    ses.__jiyuAdDockGuarded = true
+    ses.on('will-download', (event) => {
+      event.preventDefault()
+    })
+  }
+  return ses
 }
 
 function isGoogleAdsNetworkHost(host) {
@@ -2146,10 +2370,11 @@ function raceFrameExec(promise, ms = 1200) {
 /**
  * Collect BrowserView frames, sports/player first, skip obvious ad iframes.
  * @param {Electron.WebContents} contents
- * @param {{ maxFrames?: number }} [options]
+ * @param {{ maxFrames?: number, includeAdFrames?: boolean }} [options]
  */
 function collectContentFrames(contents, options = {}) {
   const maxFrames = Math.max(1, Number(options.maxFrames) || 8)
+  const includeAdFrames = Boolean(options.includeAdFrames)
   const frames = []
   try {
     const root = contents.mainFrame
@@ -2175,7 +2400,7 @@ function collectContentFrames(contents, options = {}) {
     else if (isSportsEmbedHost(url) || isReplayAdSensitiveUrl(url)) score = 20
     else if (/player|embed|hls|video|\/nba\b|\/live\b|bitmovin|jwplayer/i.test(url)) score = 12
     else if (/stream/i.test(url) && !/streamcorner-chat/i.test(url)) score = 8
-    else if (isLikelyAdFrameUrl(url)) score = -50
+    else if (isLikelyAdFrameUrl(url)) score = includeAdFrames ? 6 : -50
     return { frame, score }
   })
   scored.sort((a, b) => b.score - a.score)
@@ -2218,13 +2443,11 @@ const BROWSER_AD_SHIELD_SCRIPT = `(() => {
       }
     } catch (_) {}
     const streamCornerTop =
-      /(^|\\.)streamcorner\\.(st|foo|cloud|fun)$/i.test(topHost) ||
-      /(^|\\.)streamninja\\.(st|foo|cloud|fun)$/i.test(topHost);
+      /(^|\\.)(streamcorner|strmcrnr|streamninja)\\.(st|foo|cloud|fun|top)$/i.test(topHost);
     const replayAds =
       forceSoft ||
       streamCornerTop ||
-      /(^|\\.)streamcorner\\.(st|foo|cloud|fun)$/i.test(host) ||
-      /(^|\\.)streamninja\\.(st|foo|cloud|fun)$/i.test(host) ||
+      /(^|\\.)(streamcorner|strmcrnr|streamninja)\\.(st|foo|cloud|fun|top)$/i.test(host) ||
       /(^|\\.)embed(?:hd)?\\.st$/i.test(host) ||
       /(^|\\.)embedindia\\.st$/i.test(host) ||
       /(^|\\.)streamed\\.pk$/i.test(host) ||
@@ -2236,6 +2459,9 @@ const BROWSER_AD_SHIELD_SCRIPT = `(() => {
       /(^|\\.)fullmatchshows\\.com$/i.test(host) ||
       /(^|\\.)playmate\\.to$/i.test(host) ||
       /(^|\\.)playmogo\\.com$/i.test(host) ||
+      /(^|\\.)vidaraa\\.cc$/i.test(host) ||
+      /(^|\\.)vidara\\.to$/i.test(host) ||
+      /(^|\\.)vixeo\\.io$/i.test(host) ||
       /^\\/[de]\\/[a-z0-9]{6,}/i.test(path) ||
       /^\\/embed\\/[a-z0-9](?:[\\w.-]{2,}|[\\w.-]*\\/[\\w.-]+)/i.test(path);
     // Always re-assert — early-return must not skip FS block on later injects.
@@ -2292,65 +2518,315 @@ const BROWSER_AD_SHIELD_SCRIPT = `(() => {
           ) {
             return true;
           }
+          // Soft Google "viral trick" / "Free Download" tiles (X close is fake).
+          if (
+            /going viral|simple trick|thousands of people|why thousands|is going viral/i.test(text) &&
+            text.length < 280
+          ) {
+            return true;
+          }
+          if (/free\\s*download/i.test(text) && /download\\s*now/i.test(text) && text.length < 280) {
+            return true;
+          }
+          if (/(^|[^A-Za-z])Ad([^A-Za-z]|$)/.test(text) && /download\\s*now(?:\\s*20\\d{2})?/i.test(text) && text.length < 280) {
+            return true;
+          }
+          // Fake "E-CAPTCHA" / age-gate / allow-notification gates over replays.
+          if (/E-?CAPTCHA/i.test(text) && text.length < 400) return true;
+          if (
+            /Click Allow if you are not a robot|if you are not a robot/i.test(text) &&
+            /Continue|Allow/i.test(text) &&
+            text.length < 400
+          ) {
+            return true;
+          }
+          // "Attention! Confirm that you're OVER 18 … click ALLOW"
+          if (
+            /OVER\\s*18/i.test(text) &&
+            /ALLOW/i.test(text) &&
+            text.length < 420
+          ) {
+            return true;
+          }
+          if (
+            /Attention!?/i.test(text) &&
+            /OVER\\s*18|click\\s*['\"]?ALLOW/i.test(text) &&
+            text.length < 420
+          ) {
+            return true;
+          }
           return false;
         };
-        const nodes = document.querySelectorAll('div,section,aside,article');
+        const isViralDownload = (text) =>
+          /going viral|simple trick|thousands of people|why thousands|is going viral|free\\s*download|download\\s*now(?:\\s*20\\d{2})?/i.test(
+            text || '',
+          );
+        const isFakeCaptcha = (text) =>
+          /E-?CAPTCHA|Click Allow if you are not a robot|if you are not a robot|OVER\\s*18|Attention!?/i.test(
+            text || '',
+          );
+        const nukeAd = (target) => {
+          try {
+            if (!target) return;
+            // Re-assert hide even if the page un-hides a previously marked node.
+            target.setAttribute('data-jiyu-ad-hide', '1');
+            target.style.setProperty('display', 'none', 'important');
+            target.style.setProperty('visibility', 'hidden', 'important');
+            target.style.setProperty('pointer-events', 'none', 'important');
+            target.style.setProperty('opacity', '0', 'important');
+            target.style.setProperty('max-width', '0', 'important');
+            target.style.setProperty('max-height', '0', 'important');
+            target.style.setProperty('z-index', '-1', 'important');
+            try { target.remove(); } catch (_) {}
+          } catch (_) {}
+        };
+        const nodes = document.querySelectorAll('div,section,aside,article,a,ins');
         for (const el of nodes) {
           if (!el || el.getAttribute('data-jiyu-ad-hide') === '1') continue;
+          try {
+            const idc = (String(el.id || '') + ' ' + String(el.className || '')).toLowerCase();
+            if (/\\badsbox\\b/.test(idc)) continue;
+          } catch (_) {}
           let text = '';
           try { text = String(el.innerText || el.textContent || ''); } catch (_) { continue; }
           text = text.replace(/\\s+/g, ' ').trim();
-          if (!text || text.length > 360) continue;
-          if (!looksFake(text)) continue;
+          if (!text || text.length > 480) continue;
+          // Corner "Ad" notification cards (text sometimes image-backed; match label + size).
+          let cornerAd = false;
+          try {
+            const r0 = el.getBoundingClientRect();
+            const topRight =
+              r0.top < window.innerHeight * 0.55 && r0.left > window.innerWidth * 0.42;
+            const compact =
+              r0.width >= 120 && r0.width <= 420 && r0.height >= 48 && r0.height <= 180;
+            if (
+              topRight &&
+              compact &&
+              /(^|[^A-Za-z])Ad([^A-Za-z]|$)/.test(text) &&
+              text.length < 220 &&
+              !(el.querySelector && el.querySelector('video'))
+            ) {
+              cornerAd = true;
+            }
+          } catch (_) {}
+          if (!looksFake(text) && !cornerAd) continue;
+          if (isViralDownload(text) || cornerAd) {
+            try {
+              const r = el.getBoundingClientRect();
+              if (r.width > 560 || r.height > 320 || r.width < 80 || r.height < 40) continue;
+              if (el.querySelector && el.querySelector('video')) continue;
+            } catch (_) {}
+          }
           let target = el;
           try {
-            for (let i = 0; i < 6 && target.parentElement; i += 1) {
+            for (let i = 0; i < 8 && target.parentElement; i += 1) {
               const parent = target.parentElement;
               if (!parent || parent === document.body || parent === document.documentElement) break;
               const st = window.getComputedStyle(parent);
               const pos = st ? String(st.position || '') : '';
               if (pos === 'fixed' || pos === 'absolute' || pos === 'sticky') {
+                // Fake captcha / resume shells are the fixed parent — take it.
+                if (isFakeCaptcha(text) || /Resume playing/i.test(text)) {
+                  target = parent;
+                  break;
+                }
+                try {
+                  const pr = parent.getBoundingClientRect();
+                  // Don't climb into a full-viewport shell for a corner ad card.
+                  if ((isViralDownload(text) || cornerAd) && (pr.width > 560 || pr.height > 320)) break;
+                } catch (_) {}
                 target = parent;
                 break;
               }
               let parentText = '';
               try { parentText = String(parent.innerText || '').replace(/\\s+/g, ' ').trim(); } catch (_) {}
-              if (parentText && parentText.length <= text.length + 64 && looksFake(parentText)) {
+              if (parentText && parentText.length <= text.length + 80 && looksFake(parentText)) {
+                try {
+                  const pr = parent.getBoundingClientRect();
+                  if (isViralDownload(parentText) && (pr.width > 560 || pr.height > 320)) break;
+                } catch (_) {}
                 target = parent;
                 continue;
               }
               break;
             }
           } catch (_) {}
-          try {
-            target.setAttribute('data-jiyu-ad-hide', '1');
-            target.style.setProperty('display', 'none', 'important');
-            target.style.setProperty('visibility', 'hidden', 'important');
-            target.style.setProperty('pointer-events', 'none', 'important');
-            target.style.setProperty('opacity', '0', 'important');
-            try { target.remove(); } catch (_) {}
-          } catch (_) {}
+          nukeAd(target);
         }
+        // Auto-resume the in-player "Welcome back" dialog so seek/play aren't blocked.
+        try {
+          const resumeNodes = document.querySelectorAll('div,section,aside,article');
+          for (const el of resumeNodes) {
+            if (!el || el.getAttribute('data-jiyu-resume') === '1') continue;
+            let text = '';
+            try { text = String(el.innerText || '').replace(/\\s+/g, ' ').trim(); } catch (_) { continue; }
+            if (!/Resume playing/i.test(text) || !/left off at|Would you like to resume/i.test(text)) continue;
+            if (text.length > 500) continue;
+            el.setAttribute('data-jiyu-resume', '1');
+            const buttons = el.querySelectorAll('button, a, [role="button"]');
+            let clicked = false;
+            for (const btn of buttons) {
+              const label = String(btn.innerText || btn.textContent || '').replace(/\\s+/g, ' ').trim();
+              if (/^Yes/i.test(label) || /Yes,? please/i.test(label)) {
+                try { btn.click(); clicked = true; } catch (_) {}
+                break;
+              }
+            }
+            if (!clicked) {
+              // Fall back to hiding the dialog so the player is usable.
+              nukeAd(el);
+            }
+          }
+        } catch (_) {}
+        // Compact overlay iframes (viral / Free Download cards), including top-right slots.
+        try {
+          const iframes = document.querySelectorAll('iframe');
+          for (const iframe of iframes) {
+            if (!iframe) continue;
+            let src = '';
+            try { src = String(iframe.src || iframe.getAttribute('src') || ''); } catch (_) {}
+            const r = iframe.getBoundingClientRect();
+            const compact = r.width >= 80 && r.width <= 440 && r.height >= 40 && r.height <= 300;
+            if (!compact) continue;
+            const adSrc = /googlesyndication|doubleclick|googleadservices|pagead\\/html|google_ads|adservice|adnxs|popads|propeller/i.test(src);
+            const topRight =
+              r.top < window.innerHeight * 0.55 && r.left > window.innerWidth * 0.42;
+            if (adSrc || (topRight && (!src || /about:blank/i.test(src)))) {
+              nukeAd(iframe);
+            }
+          }
+        } catch (_) {}
+        // Broken-image leftovers + empty fixed clickbait chips over the player.
+        try {
+          const imgs = document.querySelectorAll('img');
+          for (const img of imgs) {
+            if (!img) continue;
+            const r = img.getBoundingClientRect();
+            if (r.width < 8 || r.width > 140 || r.height < 8 || r.height > 140) continue;
+            if (!(img.complete && img.naturalWidth === 0)) continue;
+            let p = img;
+            for (let i = 0; i < 5 && p; i += 1) {
+              try {
+                const st = window.getComputedStyle(p);
+                const pos = st ? String(st.position || '') : '';
+                if (pos === 'fixed' || pos === 'absolute' || pos === 'sticky') {
+                  nukeAd(p);
+                  break;
+                }
+              } catch (_) {}
+              p = p.parentElement;
+            }
+            nukeAd(img);
+          }
+        } catch (_) {}
       } catch (_) {}
     };
     const armFakePushWatch = () => {
       try {
         hideFakePushAds();
+        // Deny the notification permission these gates are fishing for.
+        try {
+          if (window.Notification) {
+            try {
+              window.Notification.requestPermission = function () {
+                return Promise.resolve('denied');
+              };
+            } catch (_) {}
+          }
+          try {
+            if (navigator.permissions && navigator.permissions.query) {
+              const nativeQuery = navigator.permissions.query.bind(navigator.permissions);
+              navigator.permissions.query = (desc) => {
+                try {
+                  if (desc && String(desc.name || '').toLowerCase() === 'notifications') {
+                    return Promise.resolve({ state: 'denied', onchange: null });
+                  }
+                } catch (_) {}
+                return nativeQuery(desc);
+              };
+            }
+          } catch (_) {}
+        } catch (_) {}
         if (window.__jiyuSurpriseObs || !document.documentElement) return;
-        let scheduled = 0;
-        const kick = () => {
-          if (scheduled) return;
-          scheduled = window.setTimeout(() => {
-            scheduled = 0;
+        // Instant scrub on insert — these creatives re-spawn every few seconds.
+        const obs = new MutationObserver((mutations) => {
+          try {
+            let hit = false;
+            for (const m of mutations) {
+              if (!m.addedNodes || !m.addedNodes.length) continue;
+              for (const node of m.addedNodes) {
+                if (!node || node.nodeType !== 1) continue;
+                hit = true;
+                try {
+                  let text = '';
+                  try { text = String(node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim(); } catch (_) {}
+                  if (text && text.length < 480) {
+                    if (
+                      /going viral|simple trick|thousands of people|free\\s*download|download\\s*now|E-?CAPTCHA|OVER\\s*18|Attention!?|not a robot/i.test(
+                        text,
+                      )
+                    ) {
+                      try {
+                        node.setAttribute('data-jiyu-ad-hide', '1');
+                        node.style.setProperty('display', 'none', 'important');
+                        node.style.setProperty('pointer-events', 'none', 'important');
+                        node.style.setProperty('opacity', '0', 'important');
+                        try { node.remove(); } catch (_) {}
+                      } catch (_) {}
+                    }
+                  }
+                } catch (_) {}
+              }
+            }
+            if (hit) hideFakePushAds();
+          } catch (_) {
             try { hideFakePushAds(); } catch (_) {}
-          }, 200);
-        };
-        const obs = new MutationObserver(kick);
+          }
+        });
         obs.observe(document.documentElement, { childList: true, subtree: true });
         window.__jiyuSurpriseObs = obs;
         window.setInterval(() => {
           try { hideFakePushAds(); } catch (_) {}
-        }, 2000);
+        }, 350);
+        // Capture clicks on fake cards so X / Download / ALLOW never fire the real ad.
+        if (!window.__jiyuFakeAdClickBlock) {
+          window.__jiyuFakeAdClickBlock = true;
+          document.addEventListener(
+            'click',
+            (e) => {
+              try {
+                let el = e.target;
+                for (let i = 0; i < 6 && el; i += 1) {
+                  if (el.getAttribute && el.getAttribute('data-jiyu-ad-hide') === '1') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    return;
+                  }
+                  let text = '';
+                  try { text = String(el.innerText || '').replace(/\\s+/g, ' ').trim(); } catch (_) {}
+                  if (
+                    text &&
+                    text.length < 420 &&
+                    /going viral|simple trick|thousands of people|free\\s*download|download\\s*now|E-?CAPTCHA|OVER\\s*18|Attention!?|not a robot/i.test(
+                      text,
+                    )
+                  ) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    try {
+                      el.setAttribute('data-jiyu-ad-hide', '1');
+                      el.style.setProperty('display', 'none', 'important');
+                      try { el.remove(); } catch (_) {}
+                    } catch (_) {}
+                    return;
+                  }
+                  el = el.parentElement;
+                }
+              } catch (_) {}
+            },
+            true,
+          );
+        }
       } catch (_) {
         try { hideFakePushAds(); } catch (_) {}
       }
@@ -2360,6 +2836,133 @@ const BROWSER_AD_SHIELD_SCRIPT = `(() => {
       // or ad iframes — those hosts refuse to start the video otherwise.
       wrapOpen();
       armFakePushWatch();
+      // Playmogo / DoodStream: soft mode must leave googlesyndication alone, but
+      // still strip the anime "Play" interstitial and the in-player network banner.
+      try {
+        const onPlaymogo =
+          /(^|\\.)playmogo\\.com$/i.test(host) ||
+          (/^\\/e\\/[a-z0-9]{6,}/i.test(path) && /(playmogo|dood)/i.test(host));
+        if (onPlaymogo && !window.__jiyuPmClean) {
+          window.__jiyuPmClean = true;
+          const hidePm = (el) => {
+            try {
+              if (!el || el.getAttribute('data-jiyu-pm') === '1') return;
+              el.setAttribute('data-jiyu-pm', '1');
+              el.style.setProperty('display', 'none', 'important');
+              el.style.setProperty('visibility', 'hidden', 'important');
+              el.style.setProperty('pointer-events', 'none', 'important');
+              el.style.setProperty('opacity', '0', 'important');
+              try { el.remove(); } catch (_) {}
+            } catch (_) {}
+          };
+          const looksPmInterstitial = (el) => {
+            try {
+              const st = window.getComputedStyle(el);
+              if (!st) return false;
+              const pos = String(st.position || '');
+              const r = el.getBoundingClientRect();
+              if (el.querySelector && el.querySelector('video')) return false;
+              const t = String(el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
+              // Uncloseable Google "viral" / "Free Download" cards — kill even when
+              // they are not fixed (some inject as relative overlays over the player).
+              const viralCard =
+                /going viral|simple trick|thousands of people|why thousands|is going viral/i.test(t) ||
+                (/free\\s*download/i.test(t) && /download\\s*now/i.test(t)) ||
+                (/(^|[^A-Za-z])Ad([^A-Za-z]|$)/.test(t) && /download\\s*now(?:\\s*20\\d{2})?/i.test(t));
+              if (viralCard && r.width >= 90 && r.width <= 520 && r.height >= 40 && r.height <= 280 && t.length < 320) {
+                return true;
+              }
+              if (
+                /E-?CAPTCHA|Click Allow if you are not a robot|OVER\\s*18|Attention!?/i.test(t) &&
+                /ALLOW|Continue|not a robot|OVER\\s*18/i.test(t) &&
+                t.length < 420 &&
+                r.width >= 120 &&
+                r.height >= 60
+              ) {
+                return true;
+              }
+              const topRight = r.top < window.innerHeight * 0.55 && r.left > window.innerWidth * 0.42;
+              if (
+                topRight &&
+                r.width >= 120 &&
+                r.width <= 420 &&
+                r.height >= 48 &&
+                r.height <= 180 &&
+                /(^|[^A-Za-z])Ad([^A-Za-z]|$)/.test(t) &&
+                t.length < 220
+              ) {
+                return true;
+              }
+              if (pos !== 'fixed' && pos !== 'absolute' && pos !== 'sticky') return false;
+              if (r.width < 100 || r.height < 80) return false;
+              const hasPlay = /^\\s*play\\s*$/i.test(t) || (/\\bplay\\b/i.test(t) && t.length < 48);
+              const hasImg = !!(el.querySelector && el.querySelector('img,canvas,picture'));
+              if (hasPlay && hasImg) return true;
+              if (/get\\s*link|continue|click\\s*here|download\\s*now/i.test(t) && r.width > Math.min(280, window.innerWidth * 0.35)) return true;
+              if (/#getLink|get-link|getlink|dlbutton|downloadn/i.test(String(el.id || '') + ' ' + String(el.className || ''))) return true;
+              if (hasImg && r.width >= Math.min(180, window.innerWidth * 0.42) && r.height >= Math.min(160, window.innerHeight * 0.28)) {
+                if (r.left < window.innerWidth * 0.75 && r.top < window.innerHeight * 0.85 && t.length < 80) return true;
+              }
+              return false;
+            } catch (_) { return false; }
+          };
+          const scrubPm = () => {
+            try {
+              if (!document.getElementById('jiyu-pm-hide')) {
+                const css = document.createElement('style');
+                css.id = 'jiyu-pm-hide';
+                css.textContent = 'iframe[src*="googlesyndication"],iframe[src*="doubleclick"],iframe[src*="googleadservices"],iframe[id*="google_ads"],ins.adsbygoogle,[id*="google_ads_iframe"],[class*="adsbygoogle"]{display:none!important;visibility:hidden!important;pointer-events:none!important;width:0!important;height:0!important;opacity:0!important;}';
+                (document.head || document.documentElement).appendChild(css);
+              }
+              const nodes = document.querySelectorAll('div,section,aside,a,button,ins,iframe');
+              for (const el of nodes) {
+                if (!el || el.getAttribute('data-jiyu-pm') === '1') continue;
+                const idc = (String(el.id || '') + ' ' + String(el.className || '')).toLowerCase();
+                if (/getlink|get-link|dlbutton|downloadn|pop-under|popunder|ol-ads|adsbygoogle|google_ads/.test(idc)) {
+                  hidePm(el);
+                  continue;
+                }
+                try {
+                  const src = String((el.getAttribute && el.getAttribute('src')) || el.src || '');
+                  if (/googlesyndication|doubleclick|googleadservices|pagead\\/html/i.test(src)) {
+                    hidePm(el);
+                    continue;
+                  }
+                } catch (_) {}
+                const txt = String(el.innerText || '').replace(/\\s+/g, ' ').trim();
+                if (/Network error!?\\s*Please reload/i.test(txt) && txt.length < 220) {
+                  hidePm(el);
+                  continue;
+                }
+                if (looksPmInterstitial(el)) hidePm(el);
+              }
+              const vids = document.querySelectorAll('video');
+              for (const video of vids) {
+                if (!video) continue;
+                if (video.error || video.networkState === 3) {
+                  try { video.load(); } catch (_) {}
+                }
+                if (video.paused) {
+                  try {
+                    const p = video.play();
+                    if (p && typeof p.then === 'function') p.catch(() => {});
+                  } catch (_) {}
+                }
+              }
+            } catch (_) {}
+          };
+          scrubPm();
+          try {
+            if (document.documentElement) {
+              const obs = new MutationObserver(() => {
+                try { scrubPm(); } catch (_) {}
+              });
+              obs.observe(document.documentElement, { childList: true, subtree: true });
+            }
+          } catch (_) {}
+          window.setInterval(() => { try { scrubPm(); } catch (_) {} }, 1500);
+        }
+      } catch (_) {}
       return 'replay-soft';
     }
     try {
@@ -3040,7 +3643,16 @@ async function installBrowserAdShield(contents) {
     // Still install on blank→embed navigations via frame scripts below.
   }
   const script = browserAdShieldScriptForPage(pageUrl)
-  const frames = collectContentFrames(contents, { maxFrames: 10 })
+  // Soft/replay pages: also inject into Google ad iframes — viral / Free Download
+  // cards live inside them and the parent cannot read their cross-origin text.
+  const soft =
+    isStreamCornerSiteUrl(pageUrl) ||
+    isReplayAdSensitiveUrl(pageUrl) ||
+    isSportsEmbedHost(pageUrl)
+  const frames = collectContentFrames(contents, {
+    maxFrames: soft ? 18 : 10,
+    includeAdFrames: soft,
+  })
   for (const frame of frames) {
     try {
       await raceFrameExec(frame.executeJavaScript(script, true), 1500)
@@ -3049,6 +3661,9 @@ async function installBrowserAdShield(contents) {
     }
   }
 }
+
+/** Soft/replay pages keep spawning new ad iframes — reinject scrub for a while. */
+const softAdShieldIntervals = new WeakMap()
 
 function scheduleBrowserAdShield(contents) {
   if (!contents || contents.isDestroyed()) return
@@ -3059,6 +3674,37 @@ function scheduleBrowserAdShield(contents) {
   setTimeout(run, 500)
   setTimeout(run, 2000)
   setTimeout(run, 5000)
+  // Soft/replay: viral cards + fake captchas often spawn in late ad iframes.
+  let pageUrl = ''
+  try {
+    pageUrl = contents.getURL() || ''
+  } catch {
+    pageUrl = ''
+  }
+  const soft =
+    isStreamCornerSiteUrl(pageUrl) ||
+    isReplayAdSensitiveUrl(pageUrl) ||
+    isSportsEmbedHost(pageUrl)
+  if (soft) {
+    setTimeout(run, 9000)
+    setTimeout(run, 15000)
+    if (!softAdShieldIntervals.has(contents)) {
+      const started = Date.now()
+      const id = setInterval(() => {
+        if (!contents || contents.isDestroyed() || Date.now() - started > 8 * 60 * 1000) {
+          clearInterval(id)
+          try {
+            softAdShieldIntervals.delete(contents)
+          } catch {
+            /* ignore */
+          }
+          return
+        }
+        run()
+      }, 2000)
+      softAdShieldIntervals.set(contents, id)
+    }
+  }
 }
 
 function destroyAdDock() {
@@ -3079,6 +3725,7 @@ function destroyAdDock() {
   adDockView = null
   adDockAttached = false
   adDockVisible = false
+  adDockSlotBounds = null
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('browser:ad-dock', { visible: false, url: '' })
   }
@@ -3146,17 +3793,47 @@ const AD_DOCK_HARD_MUTE_SCRIPT = `(() => {
       try { setInterval(lockAll, 750); } catch (_) {}
     }
     lockAll();
+    if (!document.getElementById('jiyu-ad-dock-fit')) {
+      const style = document.createElement('style');
+      style.id = 'jiyu-ad-dock-fit';
+      style.textContent =
+        'html,body{overflow:hidden!important;margin:0!important;padding:0!important;scrollbar-width:none!important;}' +
+        'html::-webkit-scrollbar,body::-webkit-scrollbar,*::-webkit-scrollbar{width:0!important;height:0!important;display:none!important;}';
+      (document.documentElement || document.head || document.body)?.appendChild(style);
+    }
     if (!document.getElementById('jiyu-ad-dock-cover')) {
       const cover = document.createElement('div');
       cover.id = 'jiyu-ad-dock-cover';
       cover.setAttribute('aria-hidden', 'true');
+      // Transparent click shield: show the creative, but keep it non-interactive.
       cover.style.cssText =
-        'position:fixed;inset:0;z-index:2147483647;background:#0b0d12;pointer-events:none;';
+        'position:fixed;inset:0;z-index:2147483647;background:transparent;pointer-events:auto;';
       (document.documentElement || document.body).appendChild(cover);
     }
     try {
       document.documentElement.style.background = '#0b0d12';
       if (document.body) document.body.style.background = '#0b0d12';
+    } catch (_) {}
+    try {
+      const root = document.documentElement;
+      const body = document.body;
+      if (root) {
+        const vw = Math.max(1, window.innerWidth);
+        const vh = Math.max(1, window.innerHeight);
+        const prev = window.__jiyuAdDockFitSize || { sw: 0, sh: 0, vw: 0, vh: 0 };
+        const needMeasure = !prev.sw || prev.vw !== vw || prev.vh !== vh;
+        if (needMeasure) {
+          root.style.zoom = '1';
+          const sw = Math.max(root.scrollWidth || 0, (body && body.scrollWidth) || 0, vw);
+          const sh = Math.max(root.scrollHeight || 0, (body && body.scrollHeight) || 0, vh);
+          const scale = Math.min(1, vw / Math.max(sw, 1), vh / Math.max(sh, 1));
+          const next = String(Math.max(0.05, Math.round(scale * 1000) / 1000));
+          root.style.zoom = next;
+          window.__jiyuAdDockFitSize = { sw, sh, vw, vh };
+        }
+        root.style.overflow = 'hidden';
+        if (body) body.style.overflow = 'hidden';
+      }
     } catch (_) {}
     return 'locked';
   } catch (_) {
@@ -3196,12 +3873,13 @@ function stopAdDockHardMute() {
 function ensureAdDock() {
   if (adDockView) return adDockView
   if (!mainWindow || mainWindow.isDestroyed()) return null
+  // Separate non-persistent partition — replay popups must not write into jiyu-web.
   adDockView = new WebContentsView({
     webPreferences: {
-      session: webSession(),
+      session: adDockSession(),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
       backgroundThrottling: false,
     },
   })
@@ -3210,10 +3888,13 @@ function ensureAdDock() {
   adDockView.webContents.setAudioMuted(true)
   adDockView.webContents.setWindowOpenHandler(({ url }) => {
     const target = String(url || '')
-    if (/^https?:\/\//i.test(target)) {
+    if (/^https?:\/\//i.test(target) && !isBlockedBrowserDownloadUrl(target)) {
       void adDockView.webContents.loadURL(target)
     }
     return { action: 'deny' }
+  })
+  adDockView.webContents.on('will-navigate', (event, url) => {
+    if (isBlockedBrowserDownloadUrl(url)) event.preventDefault()
   })
   adDockView.webContents.on('did-finish-load', muteAdDockMedia)
   adDockView.webContents.on('did-navigate', muteAdDockMedia)
@@ -3227,14 +3908,29 @@ function ensureAdDock() {
 
 function applyAdDockBounds() {
   if (!adDockView || !mainWindow || mainWindow.isDestroyed()) return
-  // Park off-screen: ads stay loaded/muted so they don't hijack the player,
-  // but adult creatives never paint in the corner.
-  adDockView.setBounds({
-    x: -64,
-    y: -64,
-    width: 32,
-    height: 32,
-  })
+  const slot = adDockSlotBounds
+  if (!slot || slot.width < 8 || slot.height < 8) {
+    // Don't fall back to the old floating corner box; wait for the bar slot.
+    try {
+      adDockView.setVisible(false)
+    } catch {
+      /* ignore */
+    }
+    return
+  }
+  const content = mainWindow.getContentBounds()
+  const maxW = Math.max(8, Number(content.width) || slot.width)
+  const maxH = Math.max(8, Number(content.height) || slot.height)
+  const width = Math.max(8, Math.min(slot.width, maxW))
+  const height = Math.max(8, Math.min(slot.height, maxH))
+  const x = Math.max(0, Math.min(slot.x, Math.max(0, maxW - width)))
+  const y = Math.max(0, Math.min(slot.y, Math.max(0, maxH - height)))
+  adDockView.setBounds({ x, y, width, height })
+  try {
+    adDockView.setVisible(true)
+  } catch {
+    /* ignore */
+  }
 }
 
 function isPipLikeBrowserBounds(bounds) {
@@ -3245,25 +3941,28 @@ function isPipLikeBrowserBounds(bounds) {
 }
 
 /**
- * Popups / popunders used to be loaded muted in a hidden "ad dock". Loading them is what
- * pulled adware (Defender: Trojan:Win32/Suschil) into the jiyu-web disk cache, so they
- * are now dropped outright. The opener already gets a denied window either way.
+ * Replay / live sports embeds refuse to play when popups are hard-blocked.
+ * Park those popups in a muted corner box (isolated session) so the main
+ * player keeps running. Everywhere else, still drop popups outright.
  */
-const AD_DOCK_LOADS_POPUPS = false
+function shouldParkPopupInAdDock(url) {
+  const target = String(url || '').trim()
+  if (!/^https?:\/\//i.test(target)) return false
+  if (/challenges\.cloudflare\.com|turnstile|__cf_chl/i.test(target)) return false
+  if (isBlockedBrowserDownloadUrl(target)) return false
+  // Only while a replay / sports soft-shield embed is the active watch surface.
+  if (!browserSessionAllowsReplayAds()) return false
+  // PiP stage is small; an ad dock would cover the HTML Expand/Full/Close bar.
+  if (isPipLikeBrowserBounds(webBrowserLastBounds)) return false
+  return true
+}
 
 function showAdDock(url) {
   const target = String(url || '').trim()
-  if (!AD_DOCK_LOADS_POPUPS) {
+  if (!shouldParkPopupInAdDock(target)) {
     if (target) noteAdBlocked('popup', target)
     return true
   }
-  if (!/^https?:\/\//i.test(target)) return false
-  // Never park Cloudflare challenges in the ad dock.
-  if (/challenges\.cloudflare\.com|turnstile|__cf_chl/i.test(target)) return false
-  // Never open installer / adware bait in the dock (or anywhere).
-  if (isBlockedBrowserDownloadUrl(target)) return false
-  // PiP stage is small; an ad dock would cover the HTML Expand/Full/Close bar.
-  if (isPipLikeBrowserBounds(webBrowserLastBounds)) return false
   const now = Date.now()
   // Avoid thrashing the main player with rapid popup storms.
   if (
@@ -3284,12 +3983,6 @@ function showAdDock(url) {
     adDockAttached = true
   }
   applyAdDockBounds()
-  // Keep attached + loaded, but never paint the creative (Close ad bar is enough).
-  try {
-    view.setVisible(false)
-  } catch {
-    /* ignore */
-  }
   adDockVisible = true
   adDockLastUrl = target
   adDockLastShownAt = now
@@ -3316,6 +4009,7 @@ function hideAdDock() {
     adDockVisible = false
     adDockAttached = false
     adDockLastUrl = ''
+    adDockSlotBounds = null
     return
   }
   try {
@@ -3338,6 +4032,7 @@ function hideAdDock() {
   }
   adDockVisible = false
   adDockLastUrl = ''
+  adDockSlotBounds = null
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('browser:ad-dock', { visible: false, url: '' })
   }
@@ -6278,6 +6973,11 @@ app.whenReady().then(() => {
           callback({})
           return
         }
+        // PPV.st mirrors: anti-adblock CDN must load or the player shell stays empty.
+        if (isPpvAntiAdblockLoaderUrl(url) && browserSessionAllowsReplayAds()) {
+          callback({})
+          return
+        }
         const blockedHost =
           /(^|\.)(doubleclick\.net|googlesyndication\.com|googleadservices\.com|adservice\.google\.com|popads\.net|propellerads\.com|exoclick\.com|trafficjunky\.net|juicyads\.com|tsyndicate\.com|adsterra\.com|adnxs\.com|moatads\.com|taboola\.com|outbrain\.com|adaround\.net|adultfriendfinder\.com|stripchat\.com|chaturbate\.com|pornhub\.com|xvideos\.com|xnxx\.com|xhamster\.com|spankwire\.com|livejasmin\.com|drimzzzz\.info|wpnxiswpuyrfn\.icu|vbcojhroxkoaf\.online|therocketlanguages\.com|opera\.com|geo\.opera\.com|worldofwarships\.com|wargaming\.net)$/i.test(
             host,
@@ -6821,11 +7521,16 @@ async function fetchTmdbTvCatalog(kind = 'popular', limit = 10000, options = {})
               ? 'kids'
               : kind === 'by_year'
                 ? 'by_year'
-                : 'popular'
+                : kind === 'top_rated'
+                  ? 'top_rated'
+                  : kind === 'vote_count'
+                    ? 'vote_count'
+                    : 'popular'
   const withExternalIds = options?.withExternalIds !== false
   const withoutKeywords = String(options?.withoutKeywords || '').trim()
-  const byYearStart = 2000
-  const byYearPerYear = 20
+  // Keep in sync with src/lib/tmdbTv.ts (BY_YEAR_* / TOP_RATED / VOTE_COUNT).
+  const byYearStart = 1970
+  const byYearPerYear = 50
   const byYearEnd = new Date().getFullYear()
   const byYearDefault =
     Math.max(1, byYearEnd - byYearStart + 1) * byYearPerYear
@@ -6842,9 +7547,18 @@ async function fetchTmdbTvCatalog(kind = 'popular', limit = 10000, options = {})
               ? 500
               : mode === 'by_year'
                 ? byYearDefault
-                : 10000
+                : mode === 'top_rated' || mode === 'vote_count'
+                  ? 5000
+                  : 10000
   // Series + Animation may pull up to ~10k discover rows (TMDB page cap).
-  const hardCap = mode === 'animation' || mode === 'popular' ? 10000 : 5000
+  const hardCap =
+    mode === 'animation' || mode === 'popular'
+      ? 10000
+      : mode === 'by_year'
+        ? byYearDefault
+        : mode === 'top_rated' || mode === 'vote_count'
+          ? 5000
+          : 5000
   const target = Math.max(1, Math.min(hardCap, Number(limit) || defaultLimit))
   const pageSize = 20
   const pagesNeeded = Math.ceil(target / pageSize)
@@ -6854,41 +7568,47 @@ async function fetchTmdbTvCatalog(kind = 'popular', limit = 10000, options = {})
     emitTmdbProgress({ phase: 'discover', kind: mode, page: 0, pagesNeeded, done: 0, total: target })
 
     if (mode === 'by_year') {
-      // Top N per first-air year (newest → oldest). One Discover page per year.
+      // Top N per first-air year (newest → oldest). Enough pages to fill PER_YEAR.
       const years = []
       for (let y = byYearEnd; y >= byYearStart; y -= 1) years.push(y)
       const yearTarget = Math.min(target, years.length * byYearPerYear)
       const seenIds = new Set()
+      const pagesForYear = Math.max(1, Math.ceil(byYearPerYear / pageSize))
       for (let i = 0; i < years.length && shows.length < yearTarget; i += 1) {
         await awaitTmdbFetchControl()
         const year = years[i]
-        const url = new URL('https://api.themoviedb.org/3/discover/tv')
-        url.searchParams.set('api_key', apiKey)
-        url.searchParams.set('language', 'en-US')
-        url.searchParams.set('page', '1')
-        url.searchParams.set('sort_by', 'popularity.desc')
-        url.searchParams.set('first_air_date_year', String(year))
-        url.searchParams.set('include_null_first_air_dates', 'false')
-        if (withoutKeywords) url.searchParams.set('without_keywords', withoutKeywords)
-        const res = await fetch(url)
-        if (!res.ok) {
-          const body = await res.text().catch(() => '')
-          return {
-            ok: false,
-            shows: [],
-            error: `TMDB by_year ${year} HTTP ${res.status}: ${body.slice(0, 160)}`,
-          }
-        }
-        const json = await res.json()
-        const results = Array.isArray(json.results) ? json.results : []
         let taken = 0
-        for (const row of results) {
-          if (taken >= byYearPerYear || shows.length >= yearTarget) break
-          const id = row?.id
-          if (!id || seenIds.has(id)) continue
-          seenIds.add(id)
-          shows.push(row)
-          taken += 1
+        for (let page = 1; page <= pagesForYear && taken < byYearPerYear; page += 1) {
+          const url = new URL('https://api.themoviedb.org/3/discover/tv')
+          url.searchParams.set('api_key', apiKey)
+          url.searchParams.set('language', 'en-US')
+          url.searchParams.set('page', String(page))
+          url.searchParams.set('sort_by', 'popularity.desc')
+          url.searchParams.set('first_air_date_year', String(year))
+          url.searchParams.set('include_null_first_air_dates', 'false')
+          url.searchParams.set('without_genres', '16')
+          if (withoutKeywords) url.searchParams.set('without_keywords', withoutKeywords)
+          const res = await fetch(url)
+          if (!res.ok) {
+            const body = await res.text().catch(() => '')
+            if (shows.length > 0) break
+            return {
+              ok: false,
+              shows: [],
+              error: `TMDB by_year ${year} HTTP ${res.status}: ${body.slice(0, 160)}`,
+            }
+          }
+          const json = await res.json()
+          const results = Array.isArray(json.results) ? json.results : []
+          if (results.length === 0) break
+          for (const row of results) {
+            if (taken >= byYearPerYear || shows.length >= yearTarget) break
+            const id = row?.id
+            if (!id || seenIds.has(id)) continue
+            seenIds.add(id)
+            shows.push(row)
+            taken += 1
+          }
         }
         emitTmdbProgress({
           phase: 'discover',
@@ -6907,13 +7627,20 @@ async function fetchTmdbTvCatalog(kind = 'popular', limit = 10000, options = {})
             ? new URL('https://api.themoviedb.org/3/tv/on_the_air')
             : mode === 'trending'
               ? new URL('https://api.themoviedb.org/3/trending/tv/week')
-              : new URL('https://api.themoviedb.org/3/discover/tv')
+              : mode === 'top_rated'
+                ? new URL('https://api.themoviedb.org/3/tv/top_rated')
+                : new URL('https://api.themoviedb.org/3/discover/tv')
         url.searchParams.set('api_key', apiKey)
         url.searchParams.set('language', 'en-US')
         url.searchParams.set('page', String(page))
         if (mode === 'popular') {
           // Series shelf: up to ~10k non-Animation titles (anime → Anime shelf).
           url.searchParams.set('sort_by', 'popularity.desc')
+          url.searchParams.set('without_genres', '16')
+          url.searchParams.set('include_null_first_air_dates', 'false')
+        }
+        if (mode === 'vote_count') {
+          url.searchParams.set('sort_by', 'vote_count.desc')
           url.searchParams.set('without_genres', '16')
           url.searchParams.set('include_null_first_air_dates', 'false')
         }
@@ -6942,7 +7669,8 @@ async function fetchTmdbTvCatalog(kind = 'popular', limit = 10000, options = {})
         if (
           withoutKeywords &&
           mode !== 'on_the_air' &&
-          mode !== 'trending'
+          mode !== 'trending' &&
+          mode !== 'top_rated'
         ) {
           url.searchParams.set('without_keywords', withoutKeywords)
         }
@@ -7448,6 +8176,17 @@ ipcMain.handle('browser:adDockStatus', async () => ({
   url: adDockView && !adDockView.webContents.isDestroyed() ? adDockView.webContents.getURL() : '',
 }))
 
+ipcMain.handle('browser:adDockSetBounds', async (_event, bounds) => {
+  const x = Math.round(Number(bounds?.x) || 0)
+  const y = Math.round(Number(bounds?.y) || 0)
+  const width = Math.round(Number(bounds?.width) || 0)
+  const height = Math.round(Number(bounds?.height) || 0)
+  if (width < 8 || height < 8) return false
+  adDockSlotBounds = { x, y, width, height }
+  if (adDockVisible) applyAdDockBounds()
+  return true
+})
+
 ipcMain.handle('browser:multiShow', async (_event, payload) => {
   const id = payload?.id
   const url = payload?.url
@@ -7749,7 +8488,11 @@ ipcMain.handle('page:fetchHtml', async (_event, url, opts = {}) => {
         h.endsWith('.ymovies.vip') ||
         h === 'cinetaro.to' ||
         h.endsWith('.cinetaro.to') ||
-        h === 'cinextream.cc'
+        h === 'cinextream.cc' ||
+        h === 'footballorgin.com' ||
+        h.endsWith('.footballorgin.com') ||
+        h === 'hoofoot.net' ||
+        h.endsWith('.hoofoot.net')
       ) {
         quiet = true
       }
@@ -9042,10 +9785,16 @@ ipcMain.handle('vimeo:resolveLiveHls', async (_event, input) => {
   }
 })
 
-/** StreamCorner.st SPA schedule — hidden window, extract watch links after JS. */
+/** StreamCorner SPA schedule — hidden window, extract watch links after JS.
+ *  Try live mirrors first; streamcorner.st often has no DNS. */
 ipcMain.handle('streamCorner:fetchCatalog', async () => {
   /** @type {import('electron').BrowserWindow | null} */
   let win = null
+  const mirrors = [
+    'https://strmcrnr.foo',
+    'https://streamcorner.cloud',
+    'https://strmcrnr.top',
+  ]
   try {
     win = new BrowserWindow({
       show: false,
@@ -9159,25 +9908,34 @@ ipcMain.handle('streamCorner:fetchCatalog', async () => {
   }
   return out;
 })()`
-    await win.loadURL('https://streamcorner.st/', {
-      userAgent: BROWSER_UA,
-      httpReferrer: 'https://streamcorner.st/',
-    })
-    const started = Date.now()
-    let entries = []
-    while (Date.now() - started < 22_000) {
-      await sleep(700)
+    let lastError = 'No StreamCorner schedule cards found'
+    for (const origin of mirrors) {
       try {
-        entries = await win.webContents.executeJavaScript(extractScript, true)
-      } catch {
-        entries = []
+        await win.loadURL(`${origin}/`, {
+          userAgent: BROWSER_UA,
+          httpReferrer: `${origin}/`,
+        })
+      } catch (err) {
+        lastError = err instanceof Error ? err.message : String(err)
+        continue
       }
-      if (Array.isArray(entries) && entries.length >= 4) break
+      const started = Date.now()
+      let entries = []
+      while (Date.now() - started < 22_000) {
+        await sleep(700)
+        try {
+          entries = await win.webContents.executeJavaScript(extractScript, true)
+        } catch {
+          entries = []
+        }
+        if (Array.isArray(entries) && entries.length >= 4) break
+      }
+      if (Array.isArray(entries) && entries.length > 0) {
+        return { ok: true, entries, origin, error: '' }
+      }
+      lastError = `No StreamCorner schedule cards on ${origin}`
     }
-    if (!Array.isArray(entries) || entries.length === 0) {
-      return { ok: false, entries: [], error: 'No StreamCorner schedule cards found' }
-    }
-    return { ok: true, entries, error: '' }
+    return { ok: false, entries: [], error: lastError }
   } catch (err) {
     return {
       ok: false,

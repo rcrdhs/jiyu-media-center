@@ -5,6 +5,7 @@
  */
 
 import type { StreamItem } from '../types'
+import { withSportsProviderLabel } from './sportsProviderLabel'
 
 export const FUTBOLX_ORIGIN = 'https://www.futbol-x.xyz'
 export const FUTBOLX_ID_PREFIX = 'futbolx-'
@@ -142,8 +143,8 @@ export function futbolXMatchToItem(match: FutbolXMatch, nowMs = Date.now()): Str
 
   return {
     id: futbolXItemId(uri),
-    title: name,
-    description: [tag, 'Futbol-x', live ? 'Live' : 'Upcoming'].filter(Boolean).join(' · '),
+    title: withSportsProviderLabel(name, 'FX'),
+    description: [tag, 'FX', live ? 'Live' : 'Upcoming'].filter(Boolean).join(' · '),
     category: 'sports',
     url: feed.url,
     detailUrl: `${FUTBOLX_ORIGIN}/live/${encodeURIComponent(uri)}`,

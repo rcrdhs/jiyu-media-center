@@ -66,7 +66,11 @@ import {
 } from '../lib/subtitles'
 import { getPerformanceKnobs } from '../lib/deviceProfile'
 import { isTizenTv, isTvMode } from '../lib/tvMode'
-import { resolveTizenReplayPart } from '../lib/fullmatchShows'
+import {
+  resolveFullmatchShowsPlayForDevice,
+  resolveTizenReplayPart,
+  tizenNativeReplayRows,
+} from '../lib/fullmatchShows'
 import { hasRealDebridToken } from '../lib/debridSettings'
 import {
   cleanShowDisplayTitle,
@@ -106,6 +110,7 @@ import { resolveDonghuaPlay } from '../lib/donghuaResolve'
 import { biliSubtitleHeaders, isBiliSubtitleUrl } from '../lib/biliSubs'
 import {
   ATLANTIC_PLAY_REFERER,
+  ATLANTIC_WARP_BUMPER_BPS,
   ATLANTIC_WARP_PLAYLIST_ERROR,
   isAtlanticWarpPlaylistError,
   isMovyStreamUrl,
@@ -342,7 +347,11 @@ function torrentStallMessage(): string {
 }
 
 function playerErrorHint(error: string, url: string | undefined): string {
-  if (/no peers|no reachable seeds|swarm may be dead|unavailable|no working sources/i.test(error)) {
+  // Stall hop exhausted — not the same as a dead torrent swarm.
+  if (/alternate source unavailable|tap Retry|pick another episode/i.test(error)) {
+    return 'Playback stalled after trying another source. Tap Retry, or open Episodes and pick a different release.'
+  }
+  if (/no peers|no reachable seeds|swarm may be dead|no working sources/i.test(error)) {
     return 'This source looks empty. Open Episodes and pick another release, or try a different quality.'
   }
   if (
@@ -816,8 +825,13 @@ export function Player({
     busy: boolean
   } | null>(null)
   const tryHlsFallbackRef = useRef<(resumeAt: number) => Promise<boolean>>(async () => false)
-  /** One movie re-resolve after Atlantic's Warp page, so we don't loop on it. */
-  const movieWarpFallbackRef = useRef('')
+  /**
+   * After Atlantic serves its Warp interstitial/bumper for an episode key, ban
+   * Helios/Aphrodite for that key and rotateSource once (TV/anime/movies).
+   */
+  const atlanticWarpBanKeyRef = useRef('')
+  const atlanticWarpFallbackRef = useRef('')
+  const recoverAtlanticWarpRef = useRef<(reason?: string) => boolean>(() => false)
   /** Active hls.js instance — used to nudge startLoad after Resume seeks. */
   const hlsInstanceRef = useRef<Hls | null>(null)
   /** Cap mid-episode HLS remounts so a dead CDN can't reload-loop forever. */
@@ -962,8 +976,7 @@ export function Player({
   // Highlights) — no auto-advance into the next part, "Parts" in chrome.
   const replayPartsMode =
     hasPlaylist &&
-    isTizenTv() &&
-    Boolean(item.tags?.includes('relay-hls')) &&
+    Boolean(item.tags?.includes('relay-hls') || item.tags?.includes('fms-hls')) &&
     playlist.some((row) => row.replayPartIndex != null)
   const episodesChipLabel = replayPartsMode
     ? `Parts · ${uiPlaylistItem.title || `Part ${uiPlaylistIndex + 1}`} · ${uiPlaylistIndex + 1}/${playlist.length}`
@@ -2971,10 +2984,67 @@ export function Player({
     }
   }
 
-  /** Mid-playback Movy stall → Atlantic/Cinecat HLS (Aphrodite/totallyacdn). */
+  /** Ban Atlantic for this episode and remint via rotateSource (donghua/Nyaa next). */
+  recoverAtlanticWarpRef.current = (_reason?: string) => {
+    const meta = hlsFallbackMetaRef.current
+    const tmdbId = meta?.tmdbId || rivestreamTmdbIdFromItem(item) || ''
+    const epKey =
+      playlistEpisodeKey(activePlaylistItem) ||
+      parseEpisodeKey(item.title) ||
+      ''
+    const seMatch = /^S(\d{1,2})E(\d{1,4})$/i.exec(epKey)
+    const season = meta?.season ?? (seMatch ? Number(seMatch[1]) : 1)
+    const episode = meta?.episode ?? (seMatch ? Number(seMatch[2]) : playlistIndex + 1)
+    const banKey =
+      playReliabilityKey({
+        itemId: item.id,
+        tmdbId,
+        mediaType: item.category === 'movies' ? 'movie' : 'tv',
+        season: item.category === 'movies' ? undefined : season,
+        episode: item.category === 'movies' ? undefined : episode,
+      }) || item.id
+    if (!banKey || atlanticWarpFallbackRef.current === banKey) return false
+    atlanticWarpBanKeyRef.current = banKey
+    atlanticWarpFallbackRef.current = banKey
+    forgetLastGoodPlay(banKey)
+    if (hlsFallbackMetaRef.current) {
+      hlsFallbackMetaRef.current.tried = true
+      hlsFallbackMetaRef.current.busy = false
+    }
+    if (tmdbId) {
+      markTizenSourceFailed(
+        {
+          tmdbId,
+          mediaType: item.category === 'movies' ? 'movie' : 'tv',
+          season: item.category === 'movies' ? undefined : season,
+          episode: item.category === 'movies' ? undefined : episode,
+        },
+        activePlaylistItem.url || '',
+        { backend: 'atlantic' },
+      )
+    }
+    setError(null)
+    setStatus('Atlantic blocked — trying another source…')
+    flash('Atlantic blocked — trying another source…')
+    void selectPlaylistItemRef.current(playlistIndex, {
+      force: true,
+      rotateSource: true,
+    })
+    return true
+  }
+
+  /** Mid-playback Movy stall → Atlantic/Cinecat HLS (Helios first; skip if Warp-banned). */
   tryHlsFallbackRef.current = async (resumeAt: number) => {
     const meta = hlsFallbackMetaRef.current
     if (!meta || meta.tried || meta.busy) return false
+    const banKey = playReliabilityKey({
+      itemId: item.id,
+      tmdbId: meta.tmdbId,
+      mediaType: meta.mediaType,
+      season: meta.season,
+      episode: meta.episode,
+    })
+    if (banKey && atlanticWarpBanKeyRef.current === banKey) return false
     meta.busy = true
     try {
       setError(null)
@@ -3252,66 +3322,132 @@ export function Player({
     }
 
     const replayPartIndex =
-      isTizenTv() && item.tags?.includes('relay-hls') ? entry.replayPartIndex : undefined
+      item.tags?.includes('relay-hls') || item.tags?.includes('fms-hls')
+        ? entry.replayPartIndex
+        : undefined
     if (replayPartIndex != null) {
-      // Samsung replay part picker: extract this part's stream (relay /x) and play it natively.
-      // The current part keeps playing while the next one is extracted.
+      // Replay part picker: Playmate HLS (desktop/Android) or Samsung relay /x.
+      // The current part keeps playing while the next one is resolved.
       setEpisodeLoading(true)
       setStatus('Opening part…')
-      const part = await resolveTizenReplayPart(item.id, replayPartIndex, entry.replayEmbedUrl)
-      if (episodeFailGenRef.current !== failGen) return
-      if (!part.ok) {
-        // Stay on the part that plays — its row still holds a stream, the picked one doesn't.
-        setEpisodeLoading(false)
-        setLoadingPlaylistIndex(null)
-        flash(part.error)
-        return
-      }
-      if ('mode' in part) {
-        // Part without a vidaraa / playmate host: its frameable host (vixeo) on /web,
-        // keeping the part picker there.
-        setEpisodeLoading(false)
-        setLoadingPlaylistIndex(null)
-        const webItem: StreamItem = {
-          ...item,
-          url: part.url,
-          playlist: undefined,
-          tags: [...new Set([...(item.tags ?? []), 'web-embed', 'replay'])].filter(
-            (t) => t !== 'relay-hls' && t !== 'hls',
-          ),
+      if (item.tags?.includes('fms-hls') && !isTizenTv()) {
+        const part = await resolveFullmatchShowsPlayForDevice(item, replayPartIndex)
+        if (episodeFailGenRef.current !== failGen) return
+        if (!part.ok) {
+          setEpisodeLoading(false)
+          setLoadingPlaylistIndex(null)
+          flash(part.error)
+          return
         }
-        navigate(`/web?url=${encodeURIComponent(part.url)}`, {
-          replace: true,
-          state: {
-            from: '/section/sports',
-            playerMode: 'embed',
-            pipOnBack: true,
-            continueWatch: {
-              id: item.id,
-              title: item.title,
-              poster: item.poster,
-              category: item.category,
-              playlistIndex: part.replayParts.index,
-              detailUrl: item.detailUrl || item.url,
-              playUrl: part.url,
-              replayParts: part.replayParts,
-              transport: item.transport,
-              sourceKind: item.sourceKind,
-              source: item.source,
+        if (part.mode === 'embed') {
+          setEpisodeLoading(false)
+          setLoadingPlaylistIndex(null)
+          const webItem: StreamItem = {
+            ...item,
+            url: part.url,
+            playlist: undefined,
+            tags: [...new Set([...(item.tags ?? []), 'web-embed', 'replay'])].filter(
+              (t) => t !== 'fms-hls' && t !== 'relay-hls' && t !== 'hls',
+            ),
+          }
+          navigate(`/web?url=${encodeURIComponent(part.url)}`, {
+            replace: true,
+            state: {
+              from: '/section/sports',
+              playerMode: 'embed',
+              pipOnBack: true,
+              continueWatch: {
+                id: item.id,
+                title: item.title,
+                poster: item.poster,
+                category: item.category,
+                playlistIndex: part.replayParts?.index ?? replayPartIndex,
+                detailUrl: item.detailUrl || item.url,
+                playUrl: part.url,
+                replayParts: part.replayParts,
+                transport: item.transport,
+                sourceKind: item.sourceKind,
+                source: item.source,
+              },
             },
-          },
+          })
+          playInContext(webItem, { forceFull: true, replace: true, returnTo: '/section/sports' })
+          return
+        }
+        if (window.signalDesktop?.setPlaybackHeaders) {
+          void window.signalDesktop.setPlaybackHeaders({
+            url: part.url,
+            referrer: part.referer,
+          })
+        }
+        setMediaReady(false)
+        setError(null)
+        activePlaybackReferrerRef.current = part.referer || ''
+        const nextParts = tizenNativeReplayRows(item.id, part.replayParts, { url: part.url })
+        if (nextParts) setLocalPlaylist(nextParts)
+        else {
+          setLocalPlaylist((prev) => {
+            const base = prev ?? item.playlist ?? []
+            return base.map((row, i) => (i === index ? { ...row, url: part.url } : row))
+          })
+        }
+        setEpisodeLoading(false)
+      } else {
+        const part = await resolveTizenReplayPart(item.id, replayPartIndex, entry.replayEmbedUrl)
+        if (episodeFailGenRef.current !== failGen) return
+        if (!part.ok) {
+          // Stay on the part that plays — its row still holds a stream, the picked one doesn't.
+          setEpisodeLoading(false)
+          setLoadingPlaylistIndex(null)
+          flash(part.error)
+          return
+        }
+        if ('mode' in part) {
+          // Part without a vidaraa / playmate host: its frameable host (vixeo) on /web,
+          // keeping the part picker there.
+          setEpisodeLoading(false)
+          setLoadingPlaylistIndex(null)
+          const webItem: StreamItem = {
+            ...item,
+            url: part.url,
+            playlist: undefined,
+            tags: [...new Set([...(item.tags ?? []), 'web-embed', 'replay'])].filter(
+              (t) => t !== 'relay-hls' && t !== 'hls',
+            ),
+          }
+          navigate(`/web?url=${encodeURIComponent(part.url)}`, {
+            replace: true,
+            state: {
+              from: '/section/sports',
+              playerMode: 'embed',
+              pipOnBack: true,
+              continueWatch: {
+                id: item.id,
+                title: item.title,
+                poster: item.poster,
+                category: item.category,
+                playlistIndex: part.replayParts.index,
+                detailUrl: item.detailUrl || item.url,
+                playUrl: part.url,
+                replayParts: part.replayParts,
+                transport: item.transport,
+                sourceKind: item.sourceKind,
+                source: item.source,
+              },
+            },
+          })
+          playInContext(webItem, { forceFull: true, replace: true, returnTo: '/section/sports' })
+          return
+        }
+        setMediaReady(false)
+        setError(null)
+        activePlaybackReferrerRef.current = part.referer || ''
+        setLocalPlaylist((prev) => {
+          const base = prev ?? item.playlist ?? []
+          return base.map((row, i) => (i === index ? { ...row, url: part.url } : row))
         })
-        playInContext(webItem, { forceFull: true, replace: true, returnTo: '/section/sports' })
-        return
+        setEpisodeLoading(false)
       }
-      setMediaReady(false)
-      setError(null)
-      activePlaybackReferrerRef.current = part.referer || ''
-      setLocalPlaylist((prev) => {
-        const base = prev ?? item.playlist ?? []
-        return base.map((row, i) => (i === index ? { ...row, url: part.url } : row))
-      })
-      setEpisodeLoading(false)
     } else if (needsM2Box) {
       setEpisodeLoading(true)
       setMediaReady(false)
@@ -3526,6 +3662,7 @@ export function Player({
                   options?.rotateSource && !options?.fromRestart
                     ? prevSession?.provider
                     : undefined,
+                skipAtlantic: atlanticWarpBanKeyRef.current === reliabilityKey,
               }),
               22_000,
               'Source lookup timed out.',
@@ -3874,13 +4011,17 @@ export function Player({
               season,
               episode,
               year: yearMatch?.[0],
-              preferBackend: preferredResolveBackend(lastGood),
+              preferBackend:
+                atlanticWarpBanKeyRef.current === reliabilityKey
+                  ? 'movy'
+                  : preferredResolveBackend(lastGood),
               preferProvider: lastGood?.provider,
               originalLanguage: normalizeLanguageCode(item.originalLanguage) || undefined,
               avoidProvider:
                 options?.rotateSource && !options?.fromRestart
                   ? getMovyPlaySession(entry.url)?.provider
                   : undefined,
+              skipAtlantic: atlanticWarpBanKeyRef.current === reliabilityKey,
             }),
             item.category === 'anime' ? 35_000 : 20_000,
             'Source lookup timed out.',
@@ -3951,7 +4092,10 @@ export function Player({
             setStatus('Trying another source…')
             let atlanticOk = false
             try {
-              // Samsung: Helios already failed to decode this episode - don't retry it.
+              // Warp ban / Samsung Helios fail: don't retry Atlantic for this episode.
+              if (atlanticWarpBanKeyRef.current === reliabilityKey) {
+                throw new Error('atlantic Warp-banned for this episode')
+              }
               if (
                 isTizenTv() &&
                 getTizenFailedSources({ tmdbId, mediaType: 'tv', season, episode })?.backends.has('atlantic')
@@ -5914,6 +6058,25 @@ export function Player({
               setStatus('Buffering…')
               return
             }
+            // Atlantic failed or already tried — remint Movy/Popcorn instead of
+            // dead-ending mid-episode (series like Best Medicine S01E02).
+            const stalledMovy =
+              isMovyStreamUrl(activePlaylistItem.url) ||
+              activePlaybackReferrerRef.current === MOVY_PLAY_REFERER ||
+              /movy\.sx/i.test(activePlaybackReferrerRef.current || '') ||
+              Boolean(hlsFallbackMetaRef.current?.tmdbId)
+            if (stalledMovy || isHlsVod) {
+              setError(null)
+              setStatus('Stream stalled — fetching a fresh source…')
+              if (hlsFallbackMetaRef.current) {
+                hlsFallbackMetaRef.current.busy = false
+              }
+              void selectPlaylistItemRef.current(playlistIndex, {
+                force: true,
+                rotateSource: true,
+              })
+              return
+            }
             setError('Stream stalled — alternate source unavailable. Tap Retry.')
             setStatus('Buffering…')
           })
@@ -6074,6 +6237,23 @@ export function Player({
           bumpChrome()
           void tryHlsFallbackRef.current(t).then((ok) => {
             if (cancelled || ok) return
+            const frozenMovy =
+              isMovyStreamUrl(playUrl) ||
+              activePlaybackReferrerRef.current === MOVY_PLAY_REFERER ||
+              /movy\.sx/i.test(activePlaybackReferrerRef.current || '') ||
+              Boolean(hlsFallbackMetaRef.current?.tmdbId)
+            if (frozenMovy || isHlsVod) {
+              setError(null)
+              setStatus('Stream stalled — fetching a fresh source…')
+              if (hlsFallbackMetaRef.current) {
+                hlsFallbackMetaRef.current.busy = false
+              }
+              void selectPlaylistItemRef.current(playlistIndex, {
+                force: true,
+                rotateSource: true,
+              })
+              return
+            }
             setError('Stream stalled — alternate source unavailable. Tap Retry.')
             setStatus('Buffering…')
           })
@@ -6902,6 +7082,44 @@ export function Player({
         }
         hls.attachMedia(video)
         hlsInstanceRef.current = hls
+        // Atlantic Warp bumper plays as a real low-bitrate VOD (blue atlantic.st
+        // screen) — playhead advances so stall watch never fires. Spot it via
+        // fragment bytes/sec and hop off once.
+        const atlanticPlayback =
+          ATLANTIC_HLS_URL_RE.test(activePlaylistItem.url || '') ||
+          playbackReferrer === ATLANTIC_PLAY_REFERER ||
+          item.httpReferrer === ATLANTIC_PLAY_REFERER
+        if (atlanticPlayback && !liveMode) {
+          let warpFragSamples = 0
+          let warpLowCount = 0
+          let warpRecovered = false
+          hls.on(Hls.Events.FRAG_LOADED, (_event, data) => {
+            if (cancelled || warpRecovered || !settled) return
+            const frag = data.frag
+            const bytes = Number(
+              data.payload?.byteLength ||
+                (frag as { stats?: { total?: number; loaded?: number } })?.stats?.total ||
+                (frag as { stats?: { total?: number; loaded?: number } })?.stats?.loaded ||
+                0,
+            )
+            const duration = Number(frag?.duration || 0)
+            if (!(bytes > 0) || !(duration > 0.2)) return
+            // Ignore the first tiny init/map-ish samples; need media frags.
+            if (duration < 0.5 && bytes < 40_000) return
+            warpFragSamples += 1
+            if (bytes / duration < ATLANTIC_WARP_BUMPER_BPS) warpLowCount += 1
+            if (warpFragSamples >= 2 && warpLowCount >= 2) {
+              warpRecovered = true
+              try {
+                hls?.destroy()
+              } catch {
+                /* ignore */
+              }
+              hls = null
+              recoverAtlanticWarpRef.current('bumper-bitrate')
+            }
+          })
+        }
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
           if (cancelled || settled) return
           settled = true
@@ -7139,7 +7357,11 @@ export function Player({
             (data as { error?: { message?: string } }).error?.message ||
             ''
           if (isAtlanticWarpPlaylistError(responseText)) {
-            if (settled) return
+            if (settled) {
+              // Mid-play playlist refresh returned the Warp page — hop off.
+              recoverAtlanticWarpRef.current('playlist-midplay')
+              return
+            }
             settled = true
             window.clearTimeout(loadTimer)
             try {
@@ -7436,7 +7658,8 @@ export function Player({
       if (
         hlsError &&
         /native playback failed/i.test(lastError) &&
-        isHlsUrl(activePlaylistItem.url)
+        (isHlsUrl(activePlaylistItem.url) ||
+          /jiyu(?:-nnn)?\.free-river\.workers\.dev/i.test(activePlaylistItem.url || ''))
       ) {
         lastError = hlsError
       }
@@ -7521,9 +7744,13 @@ export function Player({
                 season,
                 episode,
                 year: yearMatch?.[0],
-                preferBackend: preferredResolveBackend(lastGood),
+                preferBackend:
+                  atlanticWarpBanKeyRef.current === reliabilityKey
+                    ? 'movy'
+                    : preferredResolveBackend(lastGood),
                 preferProvider: lastGood?.provider,
                 originalLanguage: normalizeLanguageCode(item.originalLanguage) || undefined,
+                skipAtlantic: atlanticWarpBanKeyRef.current === reliabilityKey,
               }),
               20_000,
               'Source lookup timed out.',
@@ -7658,20 +7885,11 @@ export function Player({
           return
         }
         if (
-          item.category === 'movies' &&
-          movieWarpFallbackRef.current !== item.id &&
-          (isAtlanticWarpPlaylistError(lastError) ||
-            isAtlanticWarpPlaylistError(hlsError) ||
-            /error page instead of the video/i.test(lastError))
+          isAtlanticWarpPlaylistError(lastError) ||
+          isAtlanticWarpPlaylistError(hlsError) ||
+          /error page instead of the video/i.test(lastError)
         ) {
-          movieWarpFallbackRef.current = item.id
-          setError(null)
-          setStatus('Trying another source…')
-          void selectPlaylistItemRef.current(playlistIndex, {
-            force: true,
-            rotateSource: true,
-          })
-          return
+          if (recoverAtlanticWarpRef.current('playlist')) return
         }
         if (
           isEphemeralLocalStreamUrl(activePlaylistItem.url) &&

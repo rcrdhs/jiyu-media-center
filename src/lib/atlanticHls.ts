@@ -244,16 +244,26 @@ async function fetchJson(url: string): Promise<{ ok: boolean; status: number; js
   }
 }
 
+/** Warp bumper VODs clock in ~20–40 KB/s; real Helios/Aphrodite is hundreds of KB/s+. */
+export const ATLANTIC_WARP_BUMPER_BPS = 80_000
+
 /**
- * Aphrodite/totallyacdn sometimes returns a long VOD that is only the Warp
- * interstitial re-encoded (~20–40 KB/s). Real 1080p is hundreds of KB/s+.
+ * Helios and Aphrodite both sometimes return a long VOD that is only the Warp
+ * interstitial re-encoded. Reject those before the player treats them as the show.
  */
-async function aphroditeLooksLikeWarpBumper(masterUrl: string): Promise<boolean> {
+export async function atlanticLooksLikeWarpBumper(
+  masterUrl: string,
+  masterText?: string,
+): Promise<boolean> {
   try {
-    const master = await fetchText(masterUrl, 6_000)
-    if (!master.ok || !/#EXTM3U/i.test(master.text)) return true
-    if (looksLikeAtlanticWarpPage(master.text)) return true
-    const levels = master.text
+    let text = masterText || ''
+    if (!text) {
+      const master = await fetchText(masterUrl, 6_000)
+      if (!master.ok || !/#EXTM3U/i.test(master.text)) return true
+      text = master.text
+    }
+    if (looksLikeAtlanticWarpPage(text)) return true
+    const levels = text
       .split(/\n/)
       .map((l) => l.trim())
       .filter((l) => /^https?:\/\//i.test(l))
@@ -286,8 +296,7 @@ async function aphroditeLooksLikeWarpBumper(masterUrl: string): Promise<boolean>
     const bytes = await fetchBinarySize(mediaUrl, 8_000)
     if (!(bytes > 0)) return true
     const bytesPerSec = bytes / duration
-    // Warp bumper we measured ~24 KB/s; real Helios ~650 KB/s+.
-    return bytesPerSec < 80_000
+    return bytesPerSec < ATLANTIC_WARP_BUMPER_BPS
   } catch {
     return true
   }
@@ -316,7 +325,7 @@ async function resolveAphrodite(
   if (/atlantic\.st/i.test(url) && !/totallyacdn|cdn\.hls\.lol|stream\.hls\.lol/i.test(url)) {
     return null
   }
-  if (await aphroditeLooksLikeWarpBumper(url)) return null
+  if (await atlanticLooksLikeWarpBumper(url)) return null
   return { url }
 }
 
@@ -340,11 +349,12 @@ async function resolveHelios(
   try {
     const url = await decryptHeliosUrl(enc)
     if (!/^https?:\/\//i.test(url)) return null
-    // Quick sanity: master must be m3u8, not HTML/forbidden.
+    // Master must be m3u8, not HTML — and not a Warp bumper re-encoded as VOD.
     const master = await fetchText(url, 8_000)
     if (!master.ok || !/#EXTM3U/i.test(master.text) || looksLikeAtlanticWarpPage(master.text)) {
       return null
     }
+    if (await atlanticLooksLikeWarpBumper(url, master.text)) return null
     return { url }
   } catch {
     return null

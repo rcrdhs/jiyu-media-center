@@ -3,6 +3,7 @@
  * Sports shelves, LiveXTV, and FullMatchShows.
  */
 
+import { stripSportsProviderLabel } from './sportsProviderLabel'
 import { resolveMatchTeamLogos } from './teamLogos'
 
 function escapeSvgText(value: string): string {
@@ -19,7 +20,7 @@ function escapeSvgUrl(value: string): string {
 
 /** Strip replay/date noise so “Germany vs Serbia Full Match Replay…” parses cleanly. */
 export function cleanSportsSideName(raw: string): string {
-  return String(raw || '')
+  return stripSportsProviderLabel(String(raw || ''))
     .replace(/\bFull\s*Match(?:es)?\s*Replay\b[\s\S]*$/i, '')
     .replace(/\b(?:Match\s*)?Replay\b[\s\S]*$/i, '')
     .replace(/\bHighlights?\b[\s\S]*$/i, '')
@@ -34,7 +35,7 @@ export function cleanSportsSideName(raw: string): string {
 export function parseSportsMatchSides(
   title: string,
 ): { home: string; away: string } | null {
-  const parts = String(title || '')
+  const parts = stripSportsProviderLabel(title)
     .split(/\s+vs\.?\s+/i)
     .map((p) => cleanSportsSideName(p))
     .filter(Boolean)

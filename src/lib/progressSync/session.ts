@@ -27,6 +27,11 @@ export type SyncState = {
    * row still matches is dropped without a PUT (pause → minimise → close saves the same row).
    */
   pushed: Record<string, string>
+  /** Saved (watchlist) — same shape, separate server cursor (`saved_rev`). */
+  savedLastRev: number
+  savedDirty: Record<string, true>
+  savedDeletes: Record<string, { at: number; category: string }>
+  savedPushed: Record<string, string>
 }
 
 function readJson<T>(key: string): T | null {
@@ -106,6 +111,10 @@ export function readSyncState(): SyncState {
     dirty: raw.dirty && typeof raw.dirty === 'object' ? raw.dirty : {},
     deletes: raw.deletes && typeof raw.deletes === 'object' ? raw.deletes : {},
     pushed: raw.pushed && typeof raw.pushed === 'object' ? raw.pushed : {},
+    savedLastRev: Number(raw.savedLastRev) || 0,
+    savedDirty: raw.savedDirty && typeof raw.savedDirty === 'object' ? raw.savedDirty : {},
+    savedDeletes: raw.savedDeletes && typeof raw.savedDeletes === 'object' ? raw.savedDeletes : {},
+    savedPushed: raw.savedPushed && typeof raw.savedPushed === 'object' ? raw.savedPushed : {},
   }
 }
 
@@ -138,7 +147,12 @@ export function getProgressSyncStatus(): ProgressSyncStatus {
     lastPullAt: meta.lastPullAt ?? null,
     lastPushAt: meta.lastPushAt ?? null,
     lastError: meta.lastError ?? null,
-    pending: state ? Object.keys(state.dirty).length + Object.keys(state.deletes).length : 0,
+    pending: state
+      ? Object.keys(state.dirty).length +
+        Object.keys(state.deletes).length +
+        Object.keys(state.savedDirty).length +
+        Object.keys(state.savedDeletes).length
+      : 0,
   }
 }
 

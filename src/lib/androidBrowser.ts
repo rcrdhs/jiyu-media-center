@@ -36,11 +36,18 @@ type InAppBrowserPlugin = {
      * links exist (StreamCorner SPA). Other callers omit this.
      */
     untilWatchLinks?: boolean
+    /**
+     * When set, evaluate this script in the scrape WebView after links appear
+     * and return JSON in `entriesJson` (desktop-parity StreamCorner extract).
+     */
+    extractScript?: string
   }) => Promise<{
     ok: boolean
     content?: string
     status?: number
     error?: string
+    /** JSON string from extractScript (array of schedule entries). */
+    entriesJson?: string
   }>
   unlockOrigin: (options: { origin: string; timeoutMs?: number }) => Promise<{
     ok: boolean
@@ -189,23 +196,30 @@ export async function androidBrowserGetState(): Promise<BrowserNavState | null> 
 
 export async function androidBrowserFetchHtml(
   url: string,
-  options?: { headers?: Record<string, string>; untilWatchLinks?: boolean },
+  options?: {
+    headers?: Record<string, string>
+    untilWatchLinks?: boolean
+    extractScript?: string
+  },
 ): Promise<{
   ok: boolean
   content: string
   status: number
   error: string
+  entriesJson?: string
 }> {
   const result = await NativeBrowser.fetchHtml({
     url,
     headers: options?.headers,
     untilWatchLinks: options?.untilWatchLinks ? true : undefined,
+    extractScript: options?.extractScript || undefined,
   })
   return {
     ok: Boolean(result.ok),
     content: result.content || '',
     status: result.status || 0,
     error: result.error || '',
+    entriesJson: result.entriesJson || undefined,
   }
 }
 

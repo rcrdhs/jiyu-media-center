@@ -81,6 +81,10 @@ export function readPreferredReplayHost(): ReplayHostKey | '' {
 }
 
 export function rememberReplayHost(url: string): void {
+  // Never sticky-prefer Playmogo — its DoodStream shell shows interstitial ads and
+  // "Network error" reloads that bounce Unwrapping stream. Only remember hosts we
+  // have seen play cleanly (Playmate / vidaraa / vixeo).
+  if (!isVerifiedReplayHost(url)) return
   const key = replayHostKey(url)
   if (!key) return
   try {
@@ -294,7 +298,7 @@ export function isFullmatchShowsCatalogItem(item: {
   return false
 }
 
-/** Shared Replay shelf predicate (LiveXTV + FullMatchShows + StreamCorner VOD). */
+/** Shared Replay shelf predicate (LiveXTV + FullMatchShows + StreamCorner VOD + Hoofoot). */
 export function isSportsReplayCatalogItem(item: {
   id?: string
   tags?: string[]
@@ -305,16 +309,21 @@ export function isSportsReplayCatalogItem(item: {
   if (item.tags?.includes('replay')) return true
   if (isFullmatchShowsCatalogItem(item)) return true
   try {
-    // Avoid circular import at module init — LiveXTV ids / hosts.
+    // Avoid circular import at module init — LiveXTV / Hoofoot ids / hosts.
     if (item.id?.startsWith('livextv-replay-')) return true
     if (item.id?.startsWith('streamcorner-vod-')) return true
+    if (item.id?.startsWith('hoofoot-replay-')) return true
+    if (item.id?.startsWith('footballorgin-replay-')) return true
     for (const raw of [item.url, item.detailUrl]) {
       if (!raw) continue
       const host = new URL(raw).hostname.replace(/^www\./, '').toLowerCase()
       if (host.includes('livextv') || host === 'soccerfull.net' || host.endsWith('.soccerfull.net')) {
         return true
       }
-      if (host.includes('streamcorner') && /\/nba\/vod\//i.test(raw)) return true
+      if ((host.includes('streamcorner') || host.includes('strmcrnr')) && /\/nba\/vod\//i.test(raw)) return true
+      if (host === 'hoofoot.net' || host.endsWith('.hoofoot.net')) return true
+      if (host === 'cdn.dailyvid.click' || host.endsWith('.dailyvid.click')) return true
+      if (host === 'footballorgin.com' || host.endsWith('.footballorgin.com')) return true
     }
   } catch {
     /* ignore */
@@ -576,11 +585,27 @@ export async function resolveFullmatchShowsPlay(
 
   let first = playable[0]
   // Same part on the host that last played well (Samsung keeps its own frameable order).
+  // Skip a sticky Playmogo preference when a verified host exists for that part.
   const preferredHost = opts?.avoid ? '' : readPreferredReplayHost()
-  if (first && preferredHost && replayHostKey(first) !== preferredHost) {
+  if (
+    first &&
+    preferredHost &&
+    preferredHost !== 'playmogo' &&
+    replayHostKey(first) !== preferredHost
+  ) {
     const firstKey = keyOf(first)
     const alt = playable.find((url) => keyOf(url) === firstKey && replayHostKey(url) === preferredHost)
     if (alt) first = alt
+  }
+  if (first && replayHostKey(first) === 'playmogo') {
+    const firstKey = keyOf(first)
+    const better =
+      (firstKey &&
+        playable.find(
+          (url) => keyOf(url) === firstKey && isVerifiedReplayHost(url),
+        )) ||
+      playable.find((url) => isVerifiedReplayHost(url))
+    if (better) first = better
   }
   if (first && isPlaymateUrl(first) && (await isPlaymateStreamDown(first))) {
     // Playmate's own error card ("This video did not play") on every replay when
@@ -619,8 +644,26 @@ export async function resolveFullmatchShowsPlayForDevice(
   preferredIndex?: number,
 ): Promise<FullmatchShowsDevicePlay> {
   const res = await resolveFullmatchShowsPlay(item, preferredIndex)
-  if (!isTizenTv() || !res.ok || !isTizenFrameBlockedEmbed(res.url)) {
-    if (isTizenTv() && res.ok && /fullmatchshows\.com/i.test(res.url)) {
+  if (!res.ok) return res
+
+  // Desktop / Android / TV: Playmate HLS in Jiyu's player (stable ABR) instead of
+  // the JW embed that stalls when their CDN hiccups.
+  if (isPlaymateUrl(res.url)) {
+    const hls = await resolvePlaymateHls(res.url)
+    if (hls.ok) {
+      return {
+        ok: true,
+        mode: 'hls',
+        url: hls.url,
+        referer: hls.referer,
+        embedUrl: res.url,
+        replayParts: res.replayParts,
+      }
+    }
+  }
+
+  if (!isTizenTv() || !isTizenFrameBlockedEmbed(res.url)) {
+    if (isTizenTv() && /fullmatchshows\.com/i.test(res.url)) {
       return { ok: false, error: 'This replay has no player that opens on Samsung TV' }
     }
     return res
@@ -711,41 +754,59 @@ function tizenFrameablePartHost(info: ReplayPartsInfo, partIndex: number): strin
   return row ? toMinimalReplayEmbedUrl(row.url) : ''
 }
 
-/** Link lists of the replays now playing natively on Samsung, by catalog item id. */
+/** Link lists of the replays now playing natively, by catalog item id. */
 const tizenReplayParts = new Map<string, ReplayPartsInfo>()
 
 /**
- * Samsung native replay part picker: one playlist row per part that has a host the
- * relay can extract (vidaraa / playmate). The row playing now carries the stream;
- * the others carry their embed page and are extracted when picked. Undefined when
- * there is nothing to pick (not Tizen, or fewer than two such parts).
+ * Native replay part picker (Samsung extract / desktop-Android Playmate HLS).
+ * The row playing now carries the stream; other rows keep an embed URL and are
+ * resolved when picked. Undefined when there is nothing to pick.
  */
 export function tizenNativeReplayRows(
   itemId: string,
   info: ReplayPartsInfo | undefined,
   current: { url: string },
 ): StreamPlaylistItem[] | undefined {
-  if (!isTizenTv() || !info || info.parts.length < 2) return undefined
-  const extractable = (partIndex: number) => {
-    const key = replayPartKey(info.playlist[partIndex]?.title)
-    return info.playlist.some(
-      (row) => row?.url && replayPartKey(row.title) === key && isTizenFrameBlockedEmbed(row.url),
+  if (!info || info.parts.length < 2) return undefined
+  if (isTizenTv()) {
+    const extractable = (partIndex: number) => {
+      const key = replayPartKey(info.playlist[partIndex]?.title)
+      return info.playlist.some(
+        (row) => row?.url && replayPartKey(row.title) === key && isTizenFrameBlockedEmbed(row.url),
+      )
+    }
+    // A part without a vidaraa / playmate host stays when a frameable verified host
+    // (vixeo) plays it; only parts nothing on the TV can open are hidden.
+    const parts = info.parts.filter(
+      (p) => p.index === info.index || extractable(p.index) || Boolean(tizenFrameablePartHost(info, p.index)),
     )
+    if (parts.length < 2 || !parts.some((p) => p.index === info.index)) return undefined
+    tizenReplayParts.set(itemId, info)
+    return parts.map((p) => {
+      const embed = extractable(p.index)
+        ? toMinimalReplayEmbedUrl(info.playlist[p.index]?.url || '')
+        : tizenFrameablePartHost(info, p.index)
+      return {
+        title: p.title,
+        url: p.index === info.index ? current.url : embed,
+        replayPartIndex: p.index,
+        replayEmbedUrl: embed,
+      }
+    })
   }
-  // A part without a vidaraa / playmate host stays when a frameable verified host
-  // (vixeo) plays it; only parts nothing on the TV can open are hidden.
-  const parts = info.parts.filter(
-    (p) => p.index === info.index || extractable(p.index) || Boolean(tizenFrameablePartHost(info, p.index)),
-  )
-  if (parts.length < 2 || !parts.some((p) => p.index === info.index)) return undefined
+  // Desktop / Android: every catalog part stays pickable; switching re-resolves
+  // Playmate HLS (or falls back to the embed host) for that part.
   tizenReplayParts.set(itemId, info)
-  return parts.map((p) => {
-    const embed = extractable(p.index)
-      ? toMinimalReplayEmbedUrl(info.playlist[p.index]?.url || '')
-      : tizenFrameablePartHost(info, p.index)
+  return info.parts.map((p) => {
+    const key = replayPartKey(p.title)
+    const best =
+      info.playlist
+        .filter((row) => row?.url && replayPartKey(row.title) === key && replayHostTier(row.url) > 0)
+        .sort((a, b) => replayHostTier(b.url) - replayHostTier(a.url))[0]?.url || ''
+    const embed = best ? toMinimalReplayEmbedUrl(best) : ''
     return {
       title: p.title,
-      url: p.index === info.index ? current.url : embed,
+      url: p.index === info.index ? current.url : embed || current.url,
       replayPartIndex: p.index,
       replayEmbedUrl: embed,
     }
@@ -808,6 +869,7 @@ function isPlaymateUrl(url: string): boolean {
 const PLAYMATE_HEALTH_TTL_MS = 5 * 60 * 1000
 const PLAYMATE_HEALTH_TIMEOUT_MS = 7000
 let playmateHealth: { at: number; down: boolean } | null = null
+let playmateHlsCache: { at: number; embed: string; url: string; referer: string } | null = null
 
 function withTimeout<T>(work: Promise<T>, ms: number, fallback: T): Promise<T> {
   return new Promise((resolve) => {
@@ -826,6 +888,93 @@ function withTimeout<T>(work: Promise<T>, ms: number, fallback: T): Promise<T> {
 }
 
 /**
+ * Playmate `/api/s` → direct HLS (`sx`). Prefer this in Jiyu's own player so
+ * replays don't depend on the JW embed CDN stalling mid-match.
+ */
+export async function resolvePlaymateHls(
+  embedUrl: string,
+): Promise<{ ok: true; url: string; referer: string } | { ok: false }> {
+  const embed = toMinimalReplayEmbedUrl(embedUrl)
+  if (
+    playmateHlsCache &&
+    playmateHlsCache.embed === embed &&
+    Date.now() - playmateHlsCache.at < PLAYMATE_HEALTH_TTL_MS
+  ) {
+    return { ok: true, url: playmateHlsCache.url, referer: playmateHlsCache.referer }
+  }
+  let code = ''
+  let origin = 'https://playmate.to'
+  try {
+    const parsed = new URL(embed)
+    origin = parsed.origin
+    code = parsed.pathname.match(/^\/(?:embed|watch)\/([^/?#]+)/i)?.[1] || ''
+  } catch {
+    return { ok: false }
+  }
+  if (!code) return { ok: false }
+
+  try {
+    const { nativeFetchJsonPost, isNativeHttpPlatform } = await import('./nativeHttp')
+    const desktop = Boolean(window.signalDesktop?.fetchJsonPost)
+    const android = !desktop && isNativeHttpPlatform()
+    if (!desktop && !android) return { ok: false }
+    const api = await withTimeout(
+      nativeFetchJsonPost<{ sx?: string }>(
+        `${origin}/api/s`,
+        { c: code, d: android ? 'android' : 'desktop' },
+        { referer: embed, headers: { Origin: origin } },
+      ),
+      PLAYMATE_HEALTH_TIMEOUT_MS,
+      { ok: false, data: null, error: 'timeout' },
+    )
+    const sx = String(api.data?.sx || '').trim()
+    if (!api.ok || !/^https?:\/\//i.test(sx)) return { ok: false }
+
+    // Confirm the CDN answers before handing it to the player.
+    if (desktop && window.signalDesktop?.probeStream) {
+      const probe = await withTimeout(
+        window.signalDesktop.probeStream(sx, PLAYMATE_HEALTH_TIMEOUT_MS - 1000),
+        PLAYMATE_HEALTH_TIMEOUT_MS,
+        null,
+      )
+      if (!probe || (!probe.ok && (probe.status === 0 || probe.status >= 500))) {
+        playmateHealth = { at: Date.now(), down: true }
+        return { ok: false }
+      }
+    } else if (android) {
+      const { CapacitorHttp } = await import('@capacitor/core')
+      try {
+        const res = await withTimeout(
+          CapacitorHttp.get({
+            url: sx,
+            headers: { Referer: `${origin}/`, Origin: origin, Accept: '*/*' },
+            responseType: 'text',
+            connectTimeout: PLAYMATE_HEALTH_TIMEOUT_MS - 1000,
+            readTimeout: PLAYMATE_HEALTH_TIMEOUT_MS - 1000,
+          }),
+          PLAYMATE_HEALTH_TIMEOUT_MS,
+          null,
+        )
+        if (!res || !res.status || res.status >= 500) {
+          playmateHealth = { at: Date.now(), down: true }
+          return { ok: false }
+        }
+      } catch {
+        playmateHealth = { at: Date.now(), down: true }
+        return { ok: false }
+      }
+    }
+
+    const referer = `${origin}/`
+    playmateHealth = { at: Date.now(), down: false }
+    playmateHlsCache = { at: Date.now(), embed, url: sx, referer }
+    return { ok: true, url: sx, referer }
+  } catch {
+    return { ok: false }
+  }
+}
+
+/**
  * True only when Playmate's HLS CDN is positively unreachable (network error /
  * timeout / 5xx). API errors, 4xx and plain browser tabs count as "not down"
  * so a flaky check never hides a working Playmate.
@@ -834,75 +983,16 @@ async function isPlaymateStreamDown(embedUrl: string): Promise<boolean> {
   if (playmateHealth && Date.now() - playmateHealth.at < PLAYMATE_HEALTH_TTL_MS) {
     return playmateHealth.down
   }
-  let code = ''
-  let origin = 'https://playmate.to'
-  try {
-    const parsed = new URL(embedUrl)
-    origin = parsed.origin
-    code = parsed.pathname.match(/^\/(?:embed|watch)\/([^/?#]+)/i)?.[1] || ''
-  } catch {
+  const hls = await resolvePlaymateHls(embedUrl)
+  if (hls.ok) {
+    playmateHealth = { at: Date.now(), down: false }
     return false
   }
-  if (!code) return false
-
-  const check = async (): Promise<boolean | null> => {
-    const { nativeFetchJsonPost, isNativeHttpPlatform } = await import('./nativeHttp')
-    const desktop = Boolean(window.signalDesktop?.fetchJsonPost)
-    const android = !desktop && isNativeHttpPlatform()
-    if (!desktop && !android) return null
-    // Playmate API slow / refusing: unknown, keep Playmate.
-    const api = await withTimeout(
-      nativeFetchJsonPost<{ sx?: string }>(
-        `${origin}/api/s`,
-        { c: code, d: android ? 'android' : 'desktop' },
-        { referer: embedUrl, headers: { Origin: origin } },
-      ),
-      PLAYMATE_HEALTH_TIMEOUT_MS,
-      { ok: false, data: null, error: 'timeout' },
-    )
-    const sx = String(api.data?.sx || '').trim()
-    if (!api.ok || !/^https?:\/\//i.test(sx)) return null
-
-    if (desktop) {
-      if (!window.signalDesktop?.probeStream) return null
-      const probe = await withTimeout(
-        window.signalDesktop.probeStream(sx, PLAYMATE_HEALTH_TIMEOUT_MS - 1000),
-        PLAYMATE_HEALTH_TIMEOUT_MS,
-        null,
-      )
-      // A hung connect (this PC: 20s+ before failing) counts as down.
-      if (!probe) return true
-      return !probe.ok && (probe.status === 0 || probe.status >= 500)
-    }
-    const { CapacitorHttp } = await import('@capacitor/core')
-    try {
-      const res = await withTimeout(
-        CapacitorHttp.get({
-          url: sx,
-          headers: { Referer: `${origin}/`, Origin: origin, Accept: '*/*' },
-          responseType: 'text',
-          connectTimeout: PLAYMATE_HEALTH_TIMEOUT_MS - 1000,
-          readTimeout: PLAYMATE_HEALTH_TIMEOUT_MS - 1000,
-        }),
-        PLAYMATE_HEALTH_TIMEOUT_MS,
-        null,
-      )
-      if (!res) return true
-      return !res.status || res.status >= 500
-    } catch {
-      return true
-    }
+  // resolvePlaymateHls sets down=true only on CDN failure; API miss stays "not down".
+  if (playmateHealth && Date.now() - playmateHealth.at < PLAYMATE_HEALTH_TTL_MS) {
+    return playmateHealth.down
   }
-
-  let result: boolean | null = null
-  try {
-    result = await check()
-  } catch {
-    result = null
-  }
-  if (result == null) return false
-  playmateHealth = { at: Date.now(), down: result }
-  return result
+  return false
 }
 
 function normalizeMatchTitle(raw: string): string {
@@ -998,13 +1088,16 @@ export async function resolveFullmatchShowsPlayForTitle(
 }
 
 /**
- * Replay shelf: FullMatchShows football (Playmate) + LiveXTV when parts are not
- * soccerfull-only. Hide dead soccerfull-only LiveXTV cards (with or without FMS).
+ * Replay shelf: Hoofoot front-page highlights + FullMatchShows football
+ * (Playmate) + LiveXTV when parts are not soccerfull-only. Hide dead
+ * soccerfull-only LiveXTV cards (with or without FMS).
  */
 export function mergeSportsReplayShelfItems(
   livextv: StreamItem[],
   fms: StreamItem[],
   streamCorner: StreamItem[] = [],
+  hoofoot: StreamItem[] = [],
+  footballOrgin: StreamItem[] = [],
 ): StreamItem[] {
   const seen = new Set<string>()
   const out: StreamItem[] = []
@@ -1013,6 +1106,8 @@ export function mergeSportsReplayShelfItems(
     seen.add(item.id)
     out.push(item)
   }
+  for (const item of hoofoot) push(item)
+  for (const item of footballOrgin) push(item)
   for (const item of fms) push(item)
   for (const item of streamCorner) {
     if (item.tags?.includes('replay') || item.tags?.includes('streamcorner')) push(item)
@@ -1033,6 +1128,15 @@ export function sportsReplaySportId(item: StreamItem): string | null {
   )
   if (tag) return String(tag).toLowerCase()
   if (isFullmatchShowsCatalogItem(item)) return 'football'
+  if (item.id?.startsWith('hoofoot-replay-') || item.tags?.includes('hoofoot')) {
+    return 'football'
+  }
+  if (
+    item.id?.startsWith('footballorgin-replay-') ||
+    item.tags?.includes('footballorgin')
+  ) {
+    return 'football'
+  }
   if (item.tags?.includes('streamcorner') && item.tags?.includes('basketball')) {
     return 'basketball'
   }

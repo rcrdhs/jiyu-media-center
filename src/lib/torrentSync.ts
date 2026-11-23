@@ -24,6 +24,7 @@ import {
   isEztvTmdbFeedUrl,
   isMoviesNewItem,
   isMoviesPopularItem,
+  isSeriesPopularItem,
   isSubsPleaseUrl,
   isTorrentFunkUrl,
   isYtsSource,
@@ -42,6 +43,7 @@ import {
   fetchTmdbTvCatalogLinks,
   isTmdbAnimeFullFeedUrl,
   isTmdbKidsShowsFeedUrl,
+  isTmdbSeriesGenreBleedItem,
   isTmdbTvAiringFeedUrl,
   isTmdbTvByYearFeedUrl,
   isTmdbTvFeedUrl,
@@ -50,6 +52,7 @@ import {
   tmdbTvFeedKind,
   TMDB_ANIME_SOURCE_ID,
   TMDB_KIDS_SOURCE_ID,
+  TMDB_TV_SERIES_MIN_TITLES,
   TMDB_TV_SOURCE_ID,
 } from './tmdbTv'
 import { isZenoxAnimationFeedUrl } from './zenox'
@@ -70,7 +73,7 @@ import type { StreamItem } from '../types'
  * Bump whenever a site adapter changes how titles/posters are extracted, so
  * already-synced shelves are rebuilt automatically on the next launch.
  */
-export const TORRENT_SCRAPER_VERSION = 47
+export const TORRENT_SCRAPER_VERSION = 48
 
 export interface TorrentSyncProgress {
   sourceId: string
@@ -303,7 +306,22 @@ export async function syncTorrentSource(
       if (isTmdbTvFeedUrl(feed.url)) {
         pages += 1
         const kind = tmdbTvFeedKind(feed.url)
-        const shelfName = kind === 'kids' ? 'Kids Shows' : kind === 'anime' ? 'Anime' : 'TV Series'
+        const shelfName =
+          kind === 'kids'
+            ? 'Kids Shows'
+            : kind === 'anime'
+              ? 'Anime'
+              : kind === 'on_the_air'
+                ? 'Series Airing'
+                : kind === 'trending'
+                  ? 'Series Trending'
+                  : kind === 'by_year'
+                    ? 'Series by year'
+                    : kind === 'top_rated'
+                      ? 'Series top rated'
+                      : kind === 'vote_count'
+                        ? 'Series most voted'
+                        : 'Series Popular'
         let flushChain: Promise<void> = Promise.resolve()
         const outcome = await fetchTmdbTvCatalogLinks(
           kind,
@@ -733,10 +751,69 @@ export async function syncTorrentSource(
             .filter((item) => isKidsShowItem(item) && !incomingIds.has(item.id))
             .map((item) => item.id)
           await commitTorrentCatalogChange({ deleteIds: staleKidsShowIds, upserts: items })
+        } else if (
+          source.id === TMDB_TV_SOURCE_ID ||
+          isTmdbTvFeedUrl(source.url) ||
+          items.some((item) => item.category === 'series')
+        ) {
+          // Series light pass: upsert new Airing/Trending rows and drop Kids /
+          // Animation (and News/Talk on those shelves) that leaked onto Series.
+          const existing = await listTorrentItemsForSource(source.id)
+          const bleedIds = existing
+            .filter((item) => isTmdbSeriesGenreBleedItem(item))
+            .map((item) => item.id)
+          if (bleedIds.length > 0) {
+            await commitTorrentCatalogChange({ deleteIds: bleedIds, upserts: items })
+          } else {
+            await upsertInBatches(items)
+          }
         } else {
           await upsertInBatches(items)
         }
         savedCount = items.length
+      } else if (
+        source.id === TMDB_TV_SOURCE_ID ||
+        isTmdbTvFeedUrl(source.url)
+      ) {
+        // TMDB Series: merge like YTS Popular so a thin crawl cannot wipe a
+        // library that already cleared the 10k floor. Keep prior Popular rows
+        // that this pass did not re-fetch (by-year / top-rated / vote-count tails).
+        const existing = await listTorrentItemsForSource(source.id)
+        const incomingIds = new Set(items.map((item) => item.id))
+        const existingPopular = existing.filter(
+          (item) => item.category === 'series' && isSeriesPopularItem(item),
+        )
+        const keptPopular = existingPopular.filter((item) => !incomingIds.has(item.id))
+        const kidsShowSyncOk = items.some(isKidsShowItem)
+        const keptKidsShows = kidsShowSyncOk
+          ? []
+          : existing.filter((item) => isKidsShowItem(item))
+        const merged = [...items, ...keptPopular, ...keptKidsShows]
+        const popularAfter = merged.filter(
+          (item) => item.category === 'series' && isSeriesPopularItem(item),
+        ).length
+        if (
+          existingPopular.length >= TMDB_TV_SERIES_MIN_TITLES &&
+          popularAfter < TMDB_TV_SERIES_MIN_TITLES
+        ) {
+          const message = `${source.label}: Series sync found only ${popularAfter.toLocaleString()} titles (had ${existingPopular.length.toLocaleString()}); kept existing Series shelf`
+          onProgress?.({
+            sourceId: source.id,
+            label: source.label,
+            page: pages,
+            added: existing.length,
+            percent: 100,
+            message,
+          })
+          return {
+            sourceId: source.id,
+            added: 0,
+            pages,
+            error: message,
+          }
+        }
+        await commitTorrentCatalogChange({ deleteSourceId: source.id, upserts: merged })
+        savedCount = merged.length
       } else {
         // One replace at the end. Delete and insert share a transaction so closing
         // the app mid-save rolls back instead of leaving an empty shelf.
@@ -814,14 +891,14 @@ export async function syncTorrentSource(
 
 /**
  * Lower = sooner.
- * Kids Shows and TV Series are TMDB (no Cloudflare) and were stuck behind YTS
- * plus Cinetaro/YMovies Verify, so those shelves stayed empty on Android TV.
- * Cloudflare backups run last so a Verify prompt cannot block them.
+ * Sports Live/Replay refresh outside this queue (first on open). Among catalog
+ * sources: Series first, then everything else. Cloudflare backups last so a
+ * Verify prompt cannot block TMDB shelves.
  */
 function torrentSyncPriority(source: TorrentSource): number {
   const url = source.url || ''
   const id = source.id || ''
-  if (id === TMDB_KIDS_SOURCE_ID || isTmdbKidsShowsFeedUrl(url)) return 0
+  // 1) TV Series (TMDB) — right after Sports in the overall update order.
   if (
     id === TMDB_TV_SOURCE_ID ||
     isTmdbTvPopularFeedUrl(url) ||
@@ -829,12 +906,15 @@ function torrentSyncPriority(source: TorrentSource): number {
     isTmdbTvTrendingFeedUrl(url) ||
     isTmdbTvByYearFeedUrl(url)
   ) {
-    return 1
+    return 0
   }
+  // 2) Everything else (Kids → Anime → EZTV → SubsPlease → YTS → …).
+  if (id === TMDB_KIDS_SOURCE_ID || isTmdbKidsShowsFeedUrl(url)) return 1
   if (id === TMDB_ANIME_SOURCE_ID || isTmdbAnimeFullFeedUrl(url)) return 2
   if (isEztvSource(url, source.label)) return 3
   if (isSubsPleaseUrl(url)) return 4
   if (isYtsSource(url, source.label)) return 5
+  if (isTorrentFunkUrl(url)) return 6
   if (
     isCinetaroUrl(url) ||
     isYmoviesUrl(url) ||
@@ -843,7 +923,6 @@ function torrentSyncPriority(source: TorrentSource): number {
   ) {
     return 9
   }
-  if (isTorrentFunkUrl(url)) return 6
   return 7
 }
 

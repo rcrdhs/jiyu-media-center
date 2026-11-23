@@ -9,6 +9,7 @@ import { Sidebar } from './components/Sidebar'
 import { KidsModeGate } from './components/KidsModeGate'
 import { BillingGate } from './components/BillingGate'
 import { GlobalPlayer } from './components/GlobalPlayer'
+import { Media3Pip } from './components/Media3Pip'
 import { WebBrowserPip } from './components/WebBrowserPip'
 import { NavigationPiPBridge } from './components/NavigationPiPBridge'
 import { MinimizeToPipBridge } from './components/MinimizeToPipBridge'
@@ -105,6 +106,7 @@ export default function App() {
                   </main>
                   <BackToTop />
                   <GlobalPlayer />
+                  <Media3Pip />
                   <WebBrowserPip />
                   <DesktopContinueSaveBridge />
                   <DevicePerformanceBridge />

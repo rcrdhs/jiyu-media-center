@@ -12,6 +12,91 @@ export const APP_VERSION_LABEL = `v${APP_VERSION}`
 /** Short milestone log — newest first — so progress is visible in-app. */
 export const APP_RELEASES: ReadonlyArray<{ version: string; summary: string }> = [
   {
+    version: '0.4.15',
+    summary:
+      'Tim Streams (TS) joins Sports with SC labels; always-on channels sit in a 24/7 tab instead of Live; upcoming kickoffs stay in Upcoming; a dead stream shows Stream offline and hops when another source exists; StreamCorner desktop boots and hides chat with the ad docked in the bar',
+  },
+  {
+    version: '0.4.14',
+    summary:
+      'Sports cards show provider codes in the title (SC / SF / PPV / FX); StreamCorner scheduled games stay on Upcoming and VODs on Replay; StreamFree stays on Live/Upcoming league shelves; StreamCorner mirrors avoid the Android 301 page',
+  },
+  {
+    version: '0.4.13',
+    summary:
+      'Android StreamCorner Live uses the same DOM extract as desktop and treats undated board cards as live-now so matches appear in Live, not only Upcoming',
+  },
+  {
+    version: '0.4.12',
+    summary:
+      'PPV mid-stream buffers no longer reload into a black spinner; StreamCorner live matches show on Android Live (not only Upcoming); Local channels stay at the bottom of Home',
+  },
+  {
+    version: '0.4.11',
+    summary:
+      'Sports unwrap once per tap; PPV opens in the web player instead of jumping to Futbol-x/Home; StreamCorner skips Media3 sniff (no 403 protection page); Local channels sit at the bottom of Home again',
+  },
+  {
+    version: '0.4.10',
+    summary:
+      'Christmas Jiyu wordmark stays readable on narrow HD+ phones; PPV PiP no longer goes black or unwraps three times; Live/Upcoming use working StreamCorner mirrors; bare .m3u8 PPV plays via HLS',
+  },
+  {
+    version: '0.4.9',
+    summary:
+      'Sports Replay loads progressively with playable Hoofoot cards; PiP keeps streams alive across navigate-back; replay overlay ads (viral/download/age-gate) are scrubbed continuously and ±10s seek works',
+  },
+  {
+    version: '0.4.8',
+    summary:
+      'Home search results appear above Local channels; TVJ Live badge probes the stream instead of hanging on Connecting; mid-episode stalls remint another Movy source when Atlantic is unavailable',
+  },
+  {
+    version: '0.4.7',
+    summary:
+      'CVM falls back to YouTube when Vimeo is down; TVJ stays on Android Home (Local channels moved up, seed no longer swapped for an empty YouTube card) and falls back to YouTube when univtec HLS fails',
+  },
+  {
+    version: '0.4.6',
+    summary:
+      'Replay adds Hoofoot front-page football highlights and FootballOrgin EPL/Bundesliga/Serie A highlight packages; Android sections swipe left/right between subsections; FootballOrgin/Hoofoot catalog refresh no longer pops Cloudflare Verify on desktop',
+  },
+  {
+    version: '0.4.5',
+    summary:
+      'Atlantic Warp wall/bumper hops to another source on TV and anime (not only movies) and Helios rejects those streams before play; Chinese donghua tries iQIYI before fan uploads and opens Bilibili embeds on Android when fan HLS stalls',
+  },
+  {
+    version: '0.4.4',
+    summary:
+      'PPV streams start again and Full no longer reloads or flickers; Playmogo ads and YouTube buffering surveys are cleared; Nationwide shows Live without unwrap; replays use native HLS and auto-hop hosts; PPV picks HD/SD by device and hops when no video',
+  },
+  {
+    version: '0.4.3',
+    summary:
+      'Android brand wordmark fills the strip; TV Series keeps filling past 10k (extra TMDB by-year / top-rated / vote-count feeds) and thin syncs can no longer wipe a full Series shelf',
+  },
+  {
+    version: '0.4.2',
+    summary:
+      'Saved hearts sync across paired devices again (re-uploads titles that never reached the sync server)',
+  },
+  {
+    version: '0.4.1',
+    summary:
+      'Android Home backgrounds Jiyu instead of quitting; Nationwide plays via live.m3u8 again; Christmas wordmark puts the Santa hat on the J with lights around the name',
+  },
+  {
+    version: '0.4.0',
+    summary:
+      'Christmas hat on the Jiyu logo for Nov–early Jan; TV Series no longer doubles the same show from TMDB and YMovies/Cinetaro backups; upcoming TMDB episodes show with an air date instead of an empty list',
+  },
+  {
+    version: '0.3.99',
+    summary:
+      'TV Series Airing/Trending fill first when you open Jiyu and keep syncing until those shelves are healthy; Kids cartoons no longer show on Series; Nationwide opens as native HLS instead of sitting on Unwrapping stream, with a clear offline message when it is not on air',
+  },
+  {
     version: '0.3.98',
     summary:
       'Android TV and Fire TV use a TV-sized layout, keep section names on the left, and still show Sections on a short Home screen. Press OK on the Library passphrase to open the keyboard. A movie that lands on Atlantic\'s error page leaves it and tries another source. Stream Corner\'s legal block tells you to go back. TV Series and Kids Shows sync before the Cloudflare backups, and the first titles appear while the rest is still loading. When a subtitle is moving but the picture is blank, playback stays on H.264 when that quality exists. On Android, StreamCorner\'s sports list waits until the match cards are on the page before saving the catalog.',

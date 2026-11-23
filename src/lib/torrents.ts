@@ -99,7 +99,9 @@ import {
   tmdbTvFeedKind,
   tmdbTvIdFromUrl,
   tmdbTvPopularFeedUrl,
+  tmdbTvTopRatedFeedUrl,
   tmdbTvTrendingFeedUrl,
+  tmdbTvVoteCountFeedUrl,
   TMDB_ANIME_SOURCE_ID,
   TMDB_KIDS_SOURCE_ID,
   TMDB_TV_SOURCE_ID,
@@ -222,12 +224,16 @@ const CINETARO_SOURCE: TorrentSource = {
   id: 'builtin-cinetaro',
   label: 'Cinetaro · TV Series (backup)',
   url: 'https://cinetaro.to/movie/tv-series?page=1',
+  /** Keep syncable from Library; TMDB owns the Series shelf. */
+  hiddenFromShelves: true,
 }
-/** Backup TV Series shelf (alongside TMDB / M2Box / NetMirror). */
+/** Backup TV Series catalog (Library only — TMDB owns Series shelves). */
 const YMOVIES_SOURCE: TorrentSource = {
   id: 'builtin-ymovies',
   label: 'YMovies · TV Series (backup)',
   url: 'https://ww.ymovies.vip/movie/filter/series/',
+  /** Keep syncable from Library; TMDB owns the Series shelf. */
+  hiddenFromShelves: true,
 }
 const TMDB_TV_SOURCE: TorrentSource = {
   id: TMDB_TV_SOURCE_ID,
@@ -264,8 +270,8 @@ export const SHIPPED_TORRENT_SOURCES: readonly TorrentSource[] = [
   { ...ZENOX_SOURCE, locked: true },
 ]
 
-/** Rev 7: show YMovies + Cinetaro on Series shelves again (were backup-hidden in rev 3–4). */
-const SHIPPED_SOURCES_REVISION = 7
+/** Rev 8: hide YMovies + Cinetaro from Series shelves again (TMDB owns them; backups doubled titles). */
+const SHIPPED_SOURCES_REVISION = 8
 const SHIPPED_SOURCES_REVISION_KEY = 'jiyu.torrent.sources.shippedRev'
 
 function sourceUrlKey(url: string): string {
@@ -475,6 +481,17 @@ export function loadTorrentSources(): TorrentSource[] {
         source.id === 'builtin-cinetaro' ||
         isCinetaroUrl(source.url)
           ? { ...source, hiddenFromShelves: false }
+          : source,
+      )
+    }
+    if (rev < 8) {
+      // Rev 7 put backups beside TMDB and doubled Vampire Diaries / Columbo / etc.
+      sources = sources.map((source) =>
+        source.id === 'builtin-ymovies' ||
+        isYmoviesUrl(source.url) ||
+        source.id === 'builtin-cinetaro' ||
+        isCinetaroUrl(source.url)
+          ? { ...source, hiddenFromShelves: true }
           : source,
       )
     }
@@ -2688,6 +2705,10 @@ export interface EpisodeChoice {
   /** Other magnets for this episode (seeders desc) when the primary swarm is dead. */
   alternates?: string[]
   seeders?: number
+  /** YYYY-MM-DD when known (TMDB). */
+  airDate?: string
+  /** Listed for schedule, but not playable yet. */
+  upcoming?: boolean
 }
 
 /**
@@ -2982,6 +3003,8 @@ export async function resolveShowEpisodes(
         title: ep.title,
         torrentUri: '',
         quality: 0,
+        ...(ep.airDate ? { airDate: ep.airDate } : {}),
+        ...(ep.upcoming ? { upcoming: true } : {}),
       })),
       error: result.error,
       description: result.description,
@@ -5291,6 +5314,17 @@ export interface CatalogFeed {
    * light passes; `popular-movies` completeness gates Kids Movies pruning.
    */
   kidsRefresh?: 'new-movies' | 'popular-movies' | 'shows'
+  /**
+   * Series light-pass role: Airing / Trending can re-pull without waiting on
+   * the full Popular / by-year / top-rated crawl.
+   */
+  seriesRefresh?:
+    | 'airing'
+    | 'trending'
+    | 'popular'
+    | 'by-year'
+    | 'top-rated'
+    | 'vote-count'
 }
 
 /**
@@ -5492,31 +5526,51 @@ export function catalogFeedsForSource(source: TorrentSource): CatalogFeed[] {
       ]
     }
     if (source.id === TMDB_TV_SOURCE_ID || isTmdbTvUrl(source.url)) {
+      // Airing + Trending first so Library → Series tops paint before the
+      // multi-thousand Popular / by-year crawl (and before YTS Movies).
       return [
-        {
-          url: tmdbTvPopularFeedUrl(),
-          category: 'series',
-          maxPages: 1,
-          shelfTag: SERIES_SHELF_POPULAR,
-        },
-        {
-          // Top 20 TMDB-popular shows for each first-air year 2000 → now.
-          url: tmdbTvByYearFeedUrl(),
-          category: 'series',
-          maxPages: 1,
-          shelfTag: SERIES_SHELF_POPULAR,
-        },
         {
           url: tmdbTvAiringFeedUrl(),
           category: 'series',
           maxPages: 1,
           shelfTag: SERIES_SHELF_AIRING,
+          seriesRefresh: 'airing',
         },
         {
           url: tmdbTvTrendingFeedUrl(),
           category: 'series',
           maxPages: 1,
           shelfTag: SERIES_SHELF_TRENDING,
+          seriesRefresh: 'trending',
+        },
+        {
+          url: tmdbTvPopularFeedUrl(),
+          category: 'series',
+          maxPages: 1,
+          shelfTag: SERIES_SHELF_POPULAR,
+          seriesRefresh: 'popular',
+        },
+        {
+          // Top 50 TMDB-popular shows for each first-air year 1970 → now.
+          url: tmdbTvByYearFeedUrl(),
+          category: 'series',
+          maxPages: 1,
+          shelfTag: SERIES_SHELF_POPULAR,
+          seriesRefresh: 'by-year',
+        },
+        {
+          url: tmdbTvTopRatedFeedUrl(),
+          category: 'series',
+          maxPages: 1,
+          shelfTag: SERIES_SHELF_POPULAR,
+          seriesRefresh: 'top-rated',
+        },
+        {
+          url: tmdbTvVoteCountFeedUrl(),
+          category: 'series',
+          maxPages: 1,
+          shelfTag: SERIES_SHELF_POPULAR,
+          seriesRefresh: 'vote-count',
         },
       ]
     }

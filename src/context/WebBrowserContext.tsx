@@ -20,14 +20,17 @@ import {
   RIVESTREAM_PREFER_DIRECT_SCRIPT,
   RIVESTREAM_PREFER_ENGLISH_AUDIO_SCRIPT,
   STREAMFREE_EMBED_PLAY_SCRIPT,
+  PLAYMOGO_CLEANUP_SCRIPT,
+  YOUTUBE_BUFFER_FEEDBACK_SCRIPT,
   isDesktopApp,
   isCloudflareChallengeTarget,
   isBlankBrowserUrl,
   isEmbedPlayerHost,
   isPlaceholderBrowserTitle,
+  isPlaymogoEmbedUrl,
   isSportsOrReplayEmbedUrl,
   isStreamFreeEmbedUrl,
-  sameBrowserPageUrl,
+  isYouTubeUrl,
   toAutoplayUrl,
   WEB_GUEST_ACTIVITY_EVENT,
 } from '../lib/webBrowser'
@@ -67,20 +70,37 @@ const PIP_MARGIN = 12
 /** Live streams: keep "Unwrapping stream…" over the page until a video is really playing. */
 const UNWRAP_COVER_TICK_MS = 300
 const UNWRAP_COVER_MAX_MS = 30_000
+/** PPV mirrors reload JW a few times before the first frame — give them room. */
+const UNWRAP_COVER_SPORTS_MAX_MS = 50_000
 const UNWRAP_COVER_MIN_MS = 800
 /** After the cover gives up: keep checking (slowly) so a late start clears the notice. */
 const STALL_WATCH_TICK_MS = 2_500
 const STALL_WATCH_MAX_MS = 3 * 3600_000
-const STALL_MESSAGE = "No video yet - the stream didn't start. Tap Retry, or go Back and pick another source."
+const STALL_MESSAGE =
+  'This stream is offline, or it never started. Tap Retry, or go Back and pick another listing.'
+const STREAM_OFFLINE_MESSAGE =
+  'This stream is offline. Tap Retry, or go Back and pick another listing.'
 const LEGAL_BLOCK_MESSAGE =
   'This site refused the page for legal reasons (Error 451). Nothing will play here. Go Back and pick another listing.'
 
-/** Live embeds (sports / replays / YouTube live like Nationwide) get the unwrap cover. */
+/** Live embeds (sports / replays / YouTube) get the unwrap cover — not Nationwide. */
 function wantsUnwrapCover(url: string): boolean {
   const u = String(url || '')
   if (!/^https?:\/\//i.test(u)) return false
+  // Nationwide Worker HLS or its YouTube /live fallback — never "Unwrapping stream…".
+  if (/jiyu-nnn\.free-river\.workers\.dev|jiyu\.free-river\.workers\.dev\/(?:nnn|nationwide)/i.test(u)) {
+    return false
+  }
+  if (/youtube\.com\/@(?:nnn-RADIOLIVE|nationwidenewsnetwork)/i.test(u)) return false
   if (isSportsOrReplayEmbedUrl(u)) return true
   return /^https?:\/\/(www\.|m\.)?youtube(-nocookie)?\.com\/(embed\/|watch\?|live\/)/i.test(u)
+}
+
+function unwrapCoverBudgetMs(url: string): number {
+  if (isSportsOrReplayEmbedUrl(url) || /embed(?:india|hd)?\.st|ppv\.st|streamed\.pk|streamfree|strmfree/i.test(url)) {
+    return UNWRAP_COVER_SPORTS_MAX_MS
+  }
+  return UNWRAP_COVER_MAX_MS
 }
 
 /**
@@ -102,15 +122,41 @@ if(/error\\s*451|unavailable for legal reasons/i.test(legal)){
   var cL=d.getElementById(ID);if(cL&&cL.parentNode)cL.parentNode.removeChild(cL);
   return 'jiyu-live-legal';
 }
+if(!window.__jiyuSegHook){
+  window.__jiyuSegHook=1;window.__jiyuSeg403=0;
+  var hit=function(u,s){if(s===403&&/tiktokcdn|servehttp|m3u8|\\.image(\\?|$)/i.test(String(u||'')))window.__jiyuSeg403++;};
+  try{var of=window.fetch;if(of){window.fetch=function(){return of.apply(this,arguments).then(function(r){try{hit(r.url,r.status)}catch(e){}return r})}}}catch(e){}
+  try{var XO=XMLHttpRequest.prototype.open,XS=XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open=function(m,u){this.__jiyuU=u;return XO.apply(this,arguments)};
+  XMLHttpRequest.prototype.send=function(){var x=this;try{x.addEventListener('loadend',function(){try{hit(x.__jiyuU||x.responseURL,x.status)}catch(e){}})}catch(e){}return XS.apply(this,arguments)};}catch(e){}
+}
 if(!window.__jiyuCoverT0)window.__jiyuCoverT0=now;
 var S=window.__jiyuMoveState||(window.__jiyuMoveState=new WeakMap());
-var vids=d.getElementsByTagName('video'),live=false,mediaErr=false;
+var vids=d.getElementsByTagName('video'),live=false,mediaErr=false,mimeFatal=false;
 for(var i=0;i<vids.length;i++){var v=vids[i];var r=v.getBoundingClientRect();
-var er=v.error&&v.error.code;if(er===2||er===4){var R=window.__jiyuMediaErr||(window.__jiyuMediaErr={n:0,at:0});
-if(R.n<3&&now-R.at>4000){R.n++;R.at=now;try{v.load();var pp=v.play();if(pp&&pp.catch)pp.catch(function(){});}catch(e){}}
-mediaErr=true;S.delete(v);continue;}
+var er=v.error&&v.error.code;var src0=String(v.currentSrc||v.src||'');
+var isM3u8=/\\.m3u8(\\?|$)/i.test(src0)||/mpegurl|x-mpegURL/i.test(src0);
+if(er===2||er===4){
+  // Gecko cannot play bare HLS — load()/play() just re-shows the MIME dialog.
+  // Prefer hls.js (JW often leaves Hls on window); else signal host to hop HD/SD.
+  if(er===4&&isM3u8){
+    try{
+      if(window.Hls&&Hls.isSupported&&Hls.isSupported()&&!v.__jiyuHlsFix){
+        v.__jiyuHlsFix=1;
+        var hh=new Hls({enableWorker:true,lowLatencyMode:true});
+        hh.loadSource(src0);hh.attachMedia(v);
+        hh.on(Hls.Events.MANIFEST_PARSED,function(){try{var p2=v.play();if(p2&&p2.catch)p2.catch(function(){});}catch(e){}});
+        mediaErr=true;S.delete(v);continue;
+      }
+    }catch(e){}
+    mimeFatal=true;mediaErr=true;S.delete(v);continue;
+  }
+  var R=window.__jiyuMediaErr||(window.__jiyuMediaErr={n:0,at:0});
+  if(R.n<3&&now-R.at>4000){R.n++;R.at=now;try{v.load();var pp=v.play();if(pp&&pp.catch)pp.catch(function(){});}catch(e){}}
+  mediaErr=true;S.delete(v);continue;
+}
 if(v.paused||v.ended||v.readyState<2||r.width<120||r.height<68){S.delete(v);continue;}
-var dur=v.duration,src=String(v.currentSrc||v.src||'');
+var dur=v.duration,src=src0;
 if(v.closest&&v.closest('.ad-showing,.ad-interrupting'))continue;
 if(src.indexOf('blob:')!==0&&isFinite(dur)&&dur>0&&dur<75&&now-window.__jiyuCoverT0<12000)continue;
 var fr=0;try{var q=v.getVideoPlaybackQuality&&v.getVideoPlaybackQuality();fr=q?(q.totalVideoFrames||0):0;}catch(e){}
@@ -122,7 +168,8 @@ var adv=(t-p.t>0.08&&t-p.t<30)||(fr-p.f>=2);
 p.n=adv?p.n+1:0;p.t=t;p.f=fr;p.at=now;
 if(p.n>=2){live=true;break;}}
 if(live){window.__jiyuUnwrapDone=true;var c0=d.getElementById(ID);if(c0&&c0.parentNode)c0.parentNode.removeChild(c0);return 'jiyu-live-playing';}
-var idle=mediaErr?'jiyu-live-mediaerr':'jiyu-live-idle';
+if(!live&&(window.__jiyuSeg403||0)>=5){try{var cF=d.getElementById(ID);if(cF&&cF.parentNode)cF.parentNode.removeChild(cF);var root=d.body||d.documentElement;if(root){var cN=d.createElement('div');cN.id=ID;cN.setAttribute('style','position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,.88);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:24px;color:#fff;font:600 18px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;text-align:center;pointer-events:auto');var mN=d.createElement('div');mN.textContent='This stream is offline. Tap Retry, or go Back and pick another listing.';mN.setAttribute('style','max-width:28rem');cN.appendChild(mN);root.appendChild(cN);}}catch(e){}return 'jiyu-live-offline';}
+var idle=mimeFatal?'jiyu-live-mime':(mediaErr?'jiyu-live-mediaerr':'jiyu-live-idle');
 if(window.top!==window||window.__jiyuUnwrapDone)return idle;
 if(!d.getElementById(ID)){var root=d.body||d.documentElement;if(!root)return 'jiyu-live-idle';
 var c=d.createElement('div');c.id=ID;
@@ -139,6 +186,15 @@ const LIVE_WATCH_SCRIPT = UNWRAP_COVER_TICK_SCRIPT.replace(
   'return idle;',
 )
 
+function execResultSaysOffline(res: unknown): boolean {
+  if (!res || typeof res !== 'object') return false
+  const r = res as { result?: unknown; frameResults?: Array<{ result?: unknown }> }
+  if (String(r.result ?? '').includes('jiyu-live-offline')) return true
+  return Array.isArray(r.frameResults)
+    ? r.frameResults.some((f) => String(f?.result ?? '').includes('jiyu-live-offline'))
+    : false
+}
+
 function execResultSaysLegalBlock(res: unknown): boolean {
   if (!res || typeof res !== 'object') return false
   const r = res as { result?: unknown; frameResults?: Array<{ result?: unknown }> }
@@ -152,12 +208,38 @@ function execResultSaysMediaError(res: unknown): boolean {
   if (!res || typeof res !== 'object') return false
   const r = res as { result?: unknown; frameResults?: Array<{ result?: unknown }> }
   if (String(r.result ?? '').includes('jiyu-live-mediaerr')) return true
+  if (String(r.result ?? '').includes('jiyu-live-mime')) return true
   return Array.isArray(r.frameResults)
-    ? r.frameResults.some((f) => String(f?.result ?? '').includes('jiyu-live-mediaerr'))
+    ? r.frameResults.some(
+        (f) =>
+          String(f?.result ?? '').includes('jiyu-live-mediaerr') ||
+          String(f?.result ?? '').includes('jiyu-live-mime'),
+      )
+    : false
+}
+
+/** Bare HLS on Gecko ("No video with supported format and MIME type found"). */
+function execResultSaysMimeUnsupported(res: unknown): boolean {
+  if (!res || typeof res !== 'object') return false
+  const r = res as { result?: unknown; frameResults?: Array<{ result?: unknown }> }
+  if (String(r.result ?? '').includes('jiyu-live-mime')) return true
+  return Array.isArray(r.frameResults)
+    ? r.frameResults.some((f) => String(f?.result ?? '').includes('jiyu-live-mime'))
     : false
 }
 
 const UNWRAP_COVER_REMOVE_SCRIPT = `(function(){try{window.__jiyuUnwrapDone=true;var c=document.getElementById('__jiyu_unwrap_cover');if(c&&c.parentNode)c.parentNode.removeChild(c);}catch(e){}return 'noop';})()`
+
+const STREAM_OFFLINE_COVER_SCRIPT = `(function(){try{
+var d=document,ID='__jiyu_unwrap_cover',root=d.body||d.documentElement;if(!root)return 'noop';
+var c=d.getElementById(ID);if(c&&c.parentNode)c.parentNode.removeChild(c);
+c=d.createElement('div');c.id=ID;
+c.setAttribute('style','position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,.88);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:24px;color:#fff;font:600 18px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;text-align:center;pointer-events:auto');
+var m=d.createElement('div');m.textContent='This stream is offline. Tap Retry, or go Back and pick another listing.';
+m.setAttribute('style','max-width:28rem');
+c.appendChild(m);root.appendChild(c);
+return 'jiyu-live-offline';
+}catch(e){return 'noop';}})()`
 
 function execResultSaysPlaying(res: unknown): boolean {
   if (!res || typeof res !== 'object') return false
@@ -199,7 +281,8 @@ type WebBrowserContextValue = {
   /** Bind the native browser to the page tile (no reload if already on a URL). */
   attachFrame: (frame: HTMLElement) => void
   detachFrame: () => void
-  openUrl: (raw: string) => Promise<void>
+  /** `unwrapCover: false` skips a second "Unwrapping stream…" after Media3 already sniffed. */
+  openUrl: (raw: string, options?: { unwrapCover?: boolean }) => Promise<void>
   goBack: () => void
   goForward: () => void
   reload: () => void
@@ -380,15 +463,13 @@ function fullscreenBounds(opts?: { fullBleed?: boolean }): BrowserBounds {
 }
 
 /**
- * Desktop Full goes edge-to-edge only while the /web top bar is auto-hidden. The
- * native view paints over HTML, so a full-bleed view would bury Back / Exit.
+ * Page Full always keeps a top chrome strip. Toggling full-bleed when the bar
+ * auto-hides used to resize the BrowserView every few seconds — JW/Clappr PPV
+ * embeds remount on that resize (looks like a stream reload) and often re-request
+ * HTML fullscreen, which fought Jiyu's Full toggle.
  */
-function webChromeHidden(): boolean {
-  try {
-    return Boolean(document.querySelector('.web-browser-page.chrome-hidden'))
-  } catch {
-    return false
-  }
+function pageFullscreenBounds(): BrowserBounds {
+  return fullscreenBounds({ fullBleed: false })
 }
 
 /** Fit a stream inside the screen so Full doesn't crop a 16:9 picture on a phone. */
@@ -442,10 +523,6 @@ const GUEST_VIDEO_ASPECT_SCRIPT = `(() => {
   }
 })()`
 
-function sameWatchUrl(a: string, b: string): boolean {
-  return sameBrowserPageUrl(a, b)
-}
-
 export function WebBrowserProvider({ children }: { children: ReactNode }) {
   const navigate = useNavigate()
   /** Electron or Android overlay — UI treats either as a working in-app browser. */
@@ -471,6 +548,8 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
   }, [])
   const [fullscreen, setFullscreen] = useState(false)
   const fullscreenRef = useRef(false)
+  /** After an explicit Exit, ignore guest Full clicks briefly so embeds can't yank Full back on. */
+  const guestFsCooldownUntilRef = useRef(0)
   const embedAspectRef = useRef(16 / 9)
   const [address, setAddress] = useState('https://www.youtube.com/')
   const [status, setStatus] = useState<string | null>(
@@ -539,10 +618,13 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
   const clearStall = useCallback(() => {
     stallGenRef.current += 1
     setStalled((was) => {
-      if (was) setStatus((cur) => (cur === STALL_MESSAGE ? null : cur))
+      if (was) {
+        setStatus((cur) => (cur === STALL_MESSAGE || cur === STREAM_OFFLINE_MESSAGE ? null : cur))
+        void execInGuest(UNWRAP_COVER_REMOVE_SCRIPT)
+      }
       return false
     })
-  }, [])
+  }, [execInGuest])
   const beginStallWatch = useCallback(
     (notice = true) => {
       const gen = ++stallGenRef.current
@@ -550,13 +632,15 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
       let errTicks = 0
       let reloads = 0
       let lastReloadAt = 0
+      /** Once the feed has moved frames, mid-stream rebuffers must not reload. */
+      let everPlayed = false
       if (notice) {
         setStalled(true)
         setStatus(STALL_MESSAGE)
       }
       const hide = () => {
         setStalled((was) => {
-          if (was) setStatus((cur) => (cur === STALL_MESSAGE ? null : cur))
+          if (was) setStatus((cur) => (cur === STALL_MESSAGE || cur === STREAM_OFFLINE_MESSAGE ? null : cur))
           return false
         })
       }
@@ -574,20 +658,44 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
             void androidBrowserTvPointer('off')
             return
           }
+          if (execResultSaysOffline(res)) {
+            if (!everPlayed) {
+              void execInGuest(STREAM_OFFLINE_COVER_SCRIPT)
+              setStalled(true)
+              setStatus(STREAM_OFFLINE_MESSAGE)
+            }
+            window.setTimeout(tick, STALL_WATCH_TICK_MS)
+            return
+          }
           if (execResultSaysPlaying(res)) {
+            everPlayed = true
             errTicks = 0
             hide()
           } else if (execResultSaysMediaError(res)) {
-            // "Video playback aborted due to a network error": the page retries the
-            // <video> itself (3x); if it stays broken, quietly reload the embed page.
+            // Bare .m3u8 on Gecko → MIME dialog; surface Retry. After a real start,
+            // network/buffer blips are normal — do not reload (black spinner again).
             errTicks += 1
-            if (errTicks >= 6 && reloads < 3 && Date.now() - lastReloadAt > 45_000) {
+            if (execResultSaysMimeUnsupported(res)) {
+              setStalled(true)
+              setStatus(STALL_MESSAGE)
+              window.setTimeout(tick, STALL_WATCH_TICK_MS)
+              return
+            }
+            if (everPlayed) {
+              errTicks = 0
+              window.setTimeout(tick, STALL_WATCH_TICK_MS)
+              return
+            }
+            const pageUrl = navUrlForNudgeRef.current || ''
+            const playmogo = isPlaymogoEmbedUrl(pageUrl)
+            const maxReloads = playmogo ? 1 : 3
+            if (errTicks >= 6 && reloads < maxReloads && Date.now() - lastReloadAt > 45_000) {
               reloads += 1
               lastReloadAt = Date.now()
               errTicks = 0
               if (electron) void window.signalDesktop?.browserReload?.()
               else if (android) void androidBrowserReload()
-            } else if (reloads >= 3 && errTicks >= 6) {
+            } else if (reloads >= maxReloads && errTicks >= 6) {
               setStalled(true)
               setStatus(STALL_MESSAGE)
             }
@@ -600,21 +708,36 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
     [android, clearStall, electron, execInGuest],
   )
 
-  /** Keep "Unwrapping stream…" up until a <video> is really playing (≈30s cap). */
+  /** Keep "Unwrapping stream…" up until a <video> is really playing (≈30–50s cap). */
   const startUnwrapCover = useCallback(() => {
     const gen = ++unwrapGenRef.current
     const startedAt = Date.now()
+    const budgetMs = unwrapCoverBudgetMs(navUrlForNudgeRef.current || '')
     let busy = false
     let timer = 0
+    void execInGuest('try{window.__jiyuSeg403=0}catch(e){}')
     const tick = () => {
       if (gen !== unwrapGenRef.current || busy) return
       if (modeRef.current === 'off') {
         stopUnwrapCover(false)
         return
       }
-      if (Date.now() - startedAt > UNWRAP_COVER_MAX_MS) {
+      // Corner PiP must never keep (or re-paint) the unwrap cover — Back→PiP was
+      // leaving "Unwrapping stream…" over a stream that was already playing.
+      if (modeRef.current === 'pip') {
         stopUnwrapCover(true)
-        if (modeRef.current === 'page') beginStallWatch()
+        return
+      }
+      // Re-check URL — sports navigate can land after cover start.
+      const maxMs = Math.max(budgetMs, unwrapCoverBudgetMs(navUrlForNudgeRef.current || ''))
+      if (Date.now() - startedAt > maxMs) {
+        stopUnwrapCover(false)
+        void execInGuest(STREAM_OFFLINE_COVER_SCRIPT)
+        if (modeRef.current === 'page') {
+          setStalled(true)
+          setStatus(STREAM_OFFLINE_MESSAGE)
+          beginStallWatch(false)
+        }
         return
       }
       busy = true
@@ -627,6 +750,24 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
           setStalled(true)
           setStatus(LEGAL_BLOCK_MESSAGE)
           void androidBrowserTvPointer('off')
+          return
+        }
+        if (
+          execResultSaysOffline(res) &&
+          Date.now() - startedAt >= UNWRAP_COVER_MIN_MS
+        ) {
+          stopUnwrapCover(false)
+          void execInGuest(STREAM_OFFLINE_COVER_SCRIPT)
+          setStalled(true)
+          setStatus(STREAM_OFFLINE_MESSAGE)
+          if (modeRef.current === 'page') beginStallWatch(false)
+          return
+        }
+        // Bare HLS MIME error — drop cover and stall/hop right away (don't burn the
+        // full sports unwrap budget staring at Firefox's sad-face dialog).
+        if (execResultSaysMimeUnsupported(res) && Date.now() - startedAt >= UNWRAP_COVER_MIN_MS) {
+          stopUnwrapCover(true)
+          if (modeRef.current === 'page') beginStallWatch(true)
           return
         }
         // Ignore "playing" in the first moments: the previous document can still be
@@ -696,6 +837,79 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
   )
   useEffect(() => () => stopStreamFreeLoop(), [stopStreamFreeLoop])
 
+  /** Playmogo: strip DoodStream interstitials + network-error banners while soft ads stay. */
+  const playmogoLoopRef = useRef<{ url: string; timer: number }>({ url: '', timer: 0 })
+  const stopPlaymogoLoop = useCallback(() => {
+    window.clearInterval(playmogoLoopRef.current.timer)
+    playmogoLoopRef.current = { url: '', timer: 0 }
+  }, [])
+  const startPlaymogoLoop = useCallback(
+    (url: string) => {
+      if (!isPlaymogoEmbedUrl(url)) return
+      if (playmogoLoopRef.current.url === url && playmogoLoopRef.current.timer) return
+      stopPlaymogoLoop()
+      const startedAt = Date.now()
+      let busy = false
+      const tick = () => {
+        if (busy) return
+        const page = navUrlForNudgeRef.current || ''
+        if (
+          modeRef.current === 'off' ||
+          Date.now() - startedAt > 30 * 60_000 ||
+          (page && !isPlaymogoEmbedUrl(page))
+        ) {
+          stopPlaymogoLoop()
+          return
+        }
+        busy = true
+        void execInGuest(PLAYMOGO_CLEANUP_SCRIPT).then(() => {
+          busy = false
+        })
+      }
+      playmogoLoopRef.current = { url, timer: window.setInterval(tick, 700) }
+      window.setTimeout(tick, 200)
+      window.setTimeout(tick, 600)
+    },
+    [execInGuest, stopPlaymogoLoop],
+  )
+  useEffect(() => () => stopPlaymogoLoop(), [stopPlaymogoLoop])
+
+  /** YouTube live: auto-dismiss the "Noticed some buffering" feedback survey. */
+  const youtubeFbLoopRef = useRef<{ url: string; timer: number }>({ url: '', timer: 0 })
+  const stopYouTubeFbLoop = useCallback(() => {
+    window.clearInterval(youtubeFbLoopRef.current.timer)
+    youtubeFbLoopRef.current = { url: '', timer: 0 }
+  }, [])
+  const startYouTubeFbLoop = useCallback(
+    (url: string) => {
+      if (!isYouTubeUrl(url)) return
+      if (youtubeFbLoopRef.current.url === url && youtubeFbLoopRef.current.timer) return
+      stopYouTubeFbLoop()
+      const startedAt = Date.now()
+      let busy = false
+      const tick = () => {
+        if (busy) return
+        const page = navUrlForNudgeRef.current || ''
+        if (
+          modeRef.current === 'off' ||
+          Date.now() - startedAt > 6 * 3600_000 ||
+          (page && !isYouTubeUrl(page))
+        ) {
+          stopYouTubeFbLoop()
+          return
+        }
+        busy = true
+        void execInGuest(YOUTUBE_BUFFER_FEEDBACK_SCRIPT).then(() => {
+          busy = false
+        })
+      }
+      youtubeFbLoopRef.current = { url, timer: window.setInterval(tick, 2500) }
+      window.setTimeout(tick, 800)
+    },
+    [execInGuest, stopYouTubeFbLoop],
+  )
+  useEffect(() => () => stopYouTubeFbLoop(), [stopYouTubeFbLoop])
+
   const nudgePlayback = useCallback((urlOverride?: string, opts?: { early?: boolean }) => {
     if (!desktop) return
     const runScript = (script: string) => {
@@ -706,6 +920,10 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
     if (isCinetaroCatalogPageUrl(url) || isCloudflareChallengeTarget(url, nav.title)) return
     // StreamFree mounts JW idle outside its own site: own play loop (idempotent per URL).
     startStreamFreeLoop(url)
+    // Playmogo: keep clearing DoodStream interstitials / network-error banners.
+    startPlaymogoLoop(url)
+    // YouTube live: dismiss the rebuffer "Send feedback" survey.
+    startYouTubeFbLoop(url)
     const now = Date.now()
     // Always re-hide Rive server chrome — autoplay throttle must not skip this.
     if (/rivestream\.(ru|app)/i.test(url) || /vaplayer\.ru|vidup\.to|videasy\.to|cinezo\.live|vidzee\.wtf|mapple\.fun|primesrc\.me|streamingnow\.mov/i.test(url)) {
@@ -749,6 +967,8 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
     const runAds = () => {
       runScript(EMBED_STRIP_SANDBOX_SCRIPT)
       runScript(EMBED_AD_HIDE_SCRIPT)
+      if (isPlaymogoEmbedUrl(url)) runScript(PLAYMOGO_CLEANUP_SCRIPT)
+      if (isYouTubeUrl(url)) runScript(YOUTUBE_BUFFER_FEEDBACK_SCRIPT)
       // Desktop hides site "CLICK UNMUTE" in favor of Jiyu chrome. On Android the
       // overlay Gecko view used to bury that chrome — keep the site CTA as backup.
       if (!android) runScript(EMBED_UNMUTE_OVERLAY_SCRIPT)
@@ -864,7 +1084,7 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
     autoplayTimers.current.push(window.setTimeout(runClick, 4000))
     autoplayTimers.current.push(window.setTimeout(runCore, 5500))
     autoplayTimers.current.push(window.setTimeout(runAds, 7000))
-  }, [android, clearAutoplayTimers, desktop, electron, startStreamFreeLoop])
+  }, [android, clearAutoplayTimers, desktop, electron, startPlaymogoLoop, startStreamFreeLoop, startYouTubeFbLoop])
 
   /**
    * Resize into the corner pauses Gecko. Call play() on a paused video.
@@ -950,8 +1170,14 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
 
   const hostHide = useCallback(
     async (options?: { blank?: boolean; pause?: boolean }) => {
-      if (electron) await window.signalDesktop?.browserHide?.(options)
-      else if (android) await androidBrowserHide(options)
+      // Always pass an explicit pause flag — Android used to default pause:true
+      // and that killed PPV PiP when detachFrame called bare hide().
+      const opts = {
+        blank: Boolean(options?.blank),
+        pause: Boolean(options?.pause),
+      }
+      if (electron) await window.signalDesktop?.browserHide?.(opts)
+      else if (android) await androidBrowserHide(opts)
     },
     [android, electron],
   )
@@ -977,7 +1203,7 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
       await showAt(pipFullscreenBounds())
       return
     }
-    await showAt(fullscreenBounds({ fullBleed: webChromeHidden() }))
+    await showAt(pageFullscreenBounds())
   }, [android, showAt])
 
   const attachFrame = useCallback(
@@ -994,9 +1220,7 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
           if (android) {
             void showAt(letterboxedFullscreenBounds(embedAspectRef.current))
           } else {
-            void showAt(
-              modeRef.current === 'pip' ? pipFullscreenBounds() : fullscreenBounds({ fullBleed: webChromeHidden() }),
-            )
+            void showAt(modeRef.current === 'pip' ? pipFullscreenBounds() : pageFullscreenBounds())
           }
           return
         }
@@ -1031,7 +1255,7 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
         setMode('off')
         modeRef.current = 'off'
         setFullscreen(false)
-        void hostHide()
+        void hostHide({ pause: true })
         return
       }
       // Last-chance PiP: /web unmounted before openInPip / NavigationPiPBridge ran.
@@ -1049,19 +1273,24 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
           void hostNavigate(embed)
         }
         void showAt(pipStageBounds())
-        resumePipPlayback()
+        if (android) {
+          softResumePlayback()
+          window.setTimeout(() => softResumePlayback(), 700)
+        } else {
+          resumePipPlayback()
+        }
         return
       }
       setMode('off')
       modeRef.current = 'off'
       setFullscreen(false)
       // Pause + hide only — do not blank (keeps the YouTube session alive).
-      void hostHide()
+      void hostHide({ pause: true })
     }, 32)
-  }, [hostHide, hostNavigate, resumePipPlayback, showAt])
+  }, [android, hostHide, hostNavigate, resumePipPlayback, softResumePlayback, showAt])
 
   const openUrl = useCallback(
-    async (raw: string) => {
+    async (raw: string, options?: { unwrapCover?: boolean }) => {
       const target = toAutoplayUrl(cinetaroPlaybackUrl(raw))
       if (isEmbedPlayerHost(target)) lastEmbedUrlRef.current = target
       if (!desktop) {
@@ -1085,12 +1314,15 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
       suppressLastChancePipRef.current = false
       // Multi-view just handed this live tile to the single view: no cover, no kicks.
       const promoted = takePromotedEmbed(target)
-      const unwrap = !promoted && wantsUnwrapCover(target)
+      // Explicit false after Media3 sniff / hop — never paint "Unwrapping" twice for one play.
+      const unwrap =
+        options?.unwrapCover !== false && !promoted && wantsUnwrapCover(target)
       // The cover lives in the guest page (web-status is a red inline error row).
       if (unwrap) {
         startUnwrapCover()
       } else {
         stopUnwrapCover(false)
+        if (!promoted && wantsUnwrapCover(target)) beginStallWatch(false)
       }
       await showAt(pageOverlayBounds(frameRef.current))
       const result = await hostNavigate(target)
@@ -1146,7 +1378,7 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
         }, 1200)
       }
     },
-    [android, clearStall, desktop, hostNavigate, nudgePlayback, showAt, startUnwrapCover, stopUnwrapCover],
+    [android, beginStallWatch, clearStall, desktop, hostNavigate, nudgePlayback, showAt, startUnwrapCover, stopUnwrapCover],
   )
 
   const openInPip = useCallback(
@@ -1154,9 +1386,10 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
       if (!desktop) return
       suppressLastChancePipRef.current = false
       const current = nav.url || address
+      // Live guest first — never replace a playing sports mirror with the seed URL.
       const preferred =
-        (url && isEmbedPlayerHost(url) ? url : '') ||
         (current && isEmbedPlayerHost(current) ? current : '') ||
+        (url && isEmbedPlayerHost(url) ? url : '') ||
         (lastEmbedUrlRef.current && isEmbedPlayerHost(lastEmbedUrlRef.current)
           ? lastEmbedUrlRef.current
           : '') ||
@@ -1164,7 +1397,7 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
       const target = toAutoplayUrl(preferred || '')
       // Never PiP a blank/black placeholder — that leaves a black box over Sports/Home.
       if (!target || isBlankBrowserUrl(target) || !isEmbedPlayerHost(target)) {
-        void hostHide({ blank: true })
+        void hostHide({ blank: true, pause: true })
         setMode('off')
         modeRef.current = 'off'
         if (options?.navigateTo) navigate(options.navigateTo)
@@ -1173,6 +1406,9 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
       lastEmbedUrlRef.current = target
       // Cancel any pending detachFrame → browserHide (pause/mute) from /web unmount.
       detachGeneration.current += 1
+      // Drop the unwrap cover before resize — PiP must not re-show Unwrapping.
+      stopUnwrapCover(true)
+      clearStall()
       setFullscreen(false)
       setMode('pip')
       modeRef.current = 'pip'
@@ -1200,10 +1436,17 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
         placePip()
         requestAnimationFrame(placePip)
       })
-      resumePipPlayback()
-      // Same watch URL: only move the view. Re-nudging (center-click / play scripts)
-      // pauses sports embeds and often loads a fresh mid-roll ad over the stream.
-      if (!current || !sameWatchUrl(current, target) || !isEmbedPlayerHost(current)) {
+      if (android) {
+        softResumePlayback()
+        window.setTimeout(() => softResumePlayback(), 700)
+        window.setTimeout(() => softResumePlayback(), 1600)
+      } else {
+        resumePipPlayback()
+      }
+      // Already have a live embed document — resize only. Reloading sports restarts
+      // unwrap / mid-roll ads. Only navigate when the guest is blank or non-embed.
+      const liveEmbed = Boolean(current && isEmbedPlayerHost(current) && !isBlankBrowserUrl(current))
+      if (!liveEmbed) {
         void hostNavigate(target)
         if (!isEmbedPlayerHost(target)) nudgePlayback(target)
       }
@@ -1211,6 +1454,8 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
     },
     [
       address,
+      android,
+      clearStall,
       desktop,
       hostHide,
       hostNavigate,
@@ -1218,7 +1463,9 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
       navigate,
       nudgePlayback,
       resumePipPlayback,
+      softResumePlayback,
       showAt,
+      stopUnwrapCover,
     ],
   )
 
@@ -1233,6 +1480,8 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
     if (android) {
       suppressLastChancePipRef.current = false
       detachGeneration.current += 1
+      stopUnwrapCover(true)
+      clearStall()
       const current = nav.url || address
       const embed =
         current && isEmbedPlayerHost(current) ? current : lastEmbedUrlRef.current
@@ -1251,7 +1500,8 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
         }))
         setStatus(null)
         // Keep the stream visible in the corner — don't hide/pause (resume needs a double-tap).
-        if (!current || !isEmbedPlayerHost(current)) {
+        // Never reload a live embed; that restarts unwrap on sports.
+        if (!current || !isEmbedPlayerHost(current) || isBlankBrowserUrl(current)) {
           void hostNavigate(embed)
         }
         const placePip = () => {
@@ -1262,7 +1512,11 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
           placePip()
           requestAnimationFrame(placePip)
         })
-        resumePipPlayback()
+        // Soft resume (play + tap if still idle) — PPV JW/Clappr often pauses on
+        // the corner resize and top-frame play() cannot reach the player iframe.
+        softResumePlayback()
+        window.setTimeout(() => softResumePlayback(), 700)
+        window.setTimeout(() => softResumePlayback(), 1600)
         return true
       }
       return false
@@ -1277,6 +1531,8 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
 
     // Cancel pending detachFrame → browserHide from the unmounting /web page.
     detachGeneration.current += 1
+    stopUnwrapCover(true)
+    clearStall()
     setFullscreen(false)
     setMode('pip')
     modeRef.current = 'pip'
@@ -1285,7 +1541,8 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
     void exitOsFullscreen({ force: true })
     void window.signalDesktop?.browserAdDockClose?.()
     // Guest left the player (ad hop). Put the embed back, then size PiP.
-    if (!current || !isEmbedPlayerHost(current)) {
+    // Never reload while the live guest is already an embed.
+    if (!current || !isEmbedPlayerHost(current) || isBlankBrowserUrl(current)) {
       void hostNavigate(embed)
     }
     // Resize only — never click/nudge an already-playing sports embed into PiP.
@@ -1298,7 +1555,17 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
       requestAnimationFrame(placePip)
     })
     return true
-  }, [address, android, desktop, hostNavigate, nav.url, resumePipPlayback, showAt])
+  }, [
+    address,
+    android,
+    clearStall,
+    desktop,
+    hostNavigate,
+    nav.url,
+    softResumePlayback,
+    showAt,
+    stopUnwrapCover,
+  ])
 
   const expandFromPip = useCallback(() => {
     setFullscreen(false)
@@ -1313,7 +1580,10 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
     ).trim()
     if (url && isEmbedPlayerHost(url)) {
       lastEmbedUrlRef.current = url
-      void hostNavigate(url)
+      // Same live document — expand without reloading (no re-unwrap).
+      if (!current || !isEmbedPlayerHost(current) || isBlankBrowserUrl(current)) {
+        void hostNavigate(url)
+      }
       navigate(`/web?url=${encodeURIComponent(url)}`, {
         state: {
           playerMode: 'embed',
@@ -1337,7 +1607,7 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
     setFullscreen(false)
     setStatus(null)
     setContentTitleState('')
-    void hostHide({ blank: true })
+    void hostHide({ blank: true, pause: true })
     // Drop web Full only — leave a native stream's claim intact.
     if (getFullscreenOwner() === 'web') {
       void exitOsFullscreen({ force: true })
@@ -1385,34 +1655,33 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
 
   const exitFullscreen = useCallback(() => {
     if (!desktop) return
+    guestFsCooldownUntilRef.current = Date.now() + 2500
     setFullscreen(false)
     void exitOsFullscreen({ force: true })
     if (modeRef.current === 'pip') void showAt(pipStageBounds())
     else if (frameRef.current) void showAt(boundsFromElement(frameRef.current))
-    else if (modeRef.current === 'page') void showAt(fullscreenBounds({ fullBleed: false }))
+    else if (modeRef.current === 'page') void showAt(pageFullscreenBounds())
   }, [desktop, showAt])
+
+  const enterWebFullscreen = useCallback(() => {
+    if (!desktop || modeRef.current === 'off') return
+    if (fullscreenRef.current) {
+      void placeWebFullscreen()
+      return
+    }
+    setFullscreen(true)
+    void enterOsFullscreen('web')
+    void placeWebFullscreen()
+  }, [desktop, placeWebFullscreen])
 
   const toggleFullscreen = useCallback(() => {
     if (!desktop || modeRef.current === 'off') return
-    setFullscreen((current) => {
-      const next = !current
-      if (next) {
-        // Request OS fullscreen first; main process keeps it pinned against
-        // guest HTML-fullscreen enter/leave fights.
-        void enterOsFullscreen('web')
-        // Android letterboxes to the picture so Full doesn't crop the frame.
-        void placeWebFullscreen()
-      } else {
-        void exitOsFullscreen({ force: true })
-        if (modeRef.current === 'pip') {
-          void showAt(pipStageBounds())
-        } else if (frameRef.current) {
-          void showAt(boundsFromElement(frameRef.current))
-        }
-      }
-      return next
-    })
-  }, [android, desktop, placeWebFullscreen, showAt])
+    if (fullscreenRef.current) {
+      exitFullscreen()
+      return
+    }
+    enterWebFullscreen()
+  }, [desktop, enterWebFullscreen, exitFullscreen])
 
   const syncBrowserView = useCallback(() => {
     if (!desktop || modeRef.current === 'off') return
@@ -1425,22 +1694,28 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
         void showAt(pipFullscreenBounds())
         return
       }
-      void showAt(fullscreenBounds({ fullBleed: webChromeHidden() }))
+      void showAt(pageFullscreenBounds())
       return
     }
     if (modeRef.current === 'pip') {
       void showAt(pipStageBounds())
+      // Sports/Home remounts often leave Gecko paused or GONE under the HTML
+      // Mute/Full/Expand chrome — re-show then soft-resume the player iframe.
+      if (android) {
+        window.setTimeout(() => softResumePlayback(), 120)
+        window.setTimeout(() => softResumePlayback(), 600)
+      }
       return
     }
     if (frameRef.current) void showAt(boundsFromElement(frameRef.current))
-  }, [android, desktop, fullscreen, showAt])
+  }, [android, desktop, fullscreen, showAt, softResumePlayback])
 
-  const toggleFullscreenRef = useRef(toggleFullscreen)
-  toggleFullscreenRef.current = toggleFullscreen
+  const enterWebFullscreenRef = useRef(enterWebFullscreen)
+  enterWebFullscreenRef.current = enterWebFullscreen
 
   // Desktop: mouse / keys over the native view never reach the HTML top bar, and the
   // embed's own Full button is blocked. Poll counters kept inside the guest frames:
-  // input reveals the bar, a fullscreen request toggles Jiyu's Full.
+  // input reveals the bar; a fullscreen request enters Jiyu's Full (never toggles off).
   useEffect(() => {
     if (!electron || mode !== 'page') return
     let stopped = false
@@ -1475,7 +1750,16 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
         prev = next
         seeded = true
         if (activity) window.dispatchEvent(new Event(WEB_GUEST_ACTIVITY_EVENT))
-        if (fsRequest && modeRef.current === 'page') toggleFullscreenRef.current()
+        // Guest Full → enter only. Toggle used to flip out of OS Full when JW
+        // re-requested HTML fullscreen after a BrowserView resize.
+        if (
+          fsRequest &&
+          modeRef.current === 'page' &&
+          !fullscreenRef.current &&
+          Date.now() >= guestFsCooldownUntilRef.current
+        ) {
+          enterWebFullscreenRef.current()
+        }
       } finally {
         busy = false
       }
@@ -1722,10 +2006,11 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const stop = window.signalDesktop?.onForceExitFullscreen?.(() => {
       if (!desktop) return
+      guestFsCooldownUntilRef.current = Date.now() + 2500
       setFullscreen(false)
       if (modeRef.current === 'pip') void showAt(pipStageBounds())
       else if (frameRef.current) void showAt(boundsFromElement(frameRef.current))
-      else if (modeRef.current === 'page') void showAt(fullscreenBounds({ fullBleed: false }))
+      else if (modeRef.current === 'page') void showAt(pageFullscreenBounds())
     })
     return () => stop?.()
   }, [desktop, showAt])
@@ -1741,6 +2026,7 @@ export function WebBrowserProvider({ children }: { children: ReactNode }) {
           : undefined
       syncFullscreenOwnerFromOs(next, prefer)
       if (!next && fullscreenRef.current) {
+        guestFsCooldownUntilRef.current = Date.now() + 2500
         setFullscreen(false)
         if (modeRef.current === 'pip') void showAt(pipStageBounds())
         else if (frameRef.current) void showAt(boundsFromElement(frameRef.current))

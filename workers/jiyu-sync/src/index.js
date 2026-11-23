@@ -1,5 +1,5 @@
 /**
- * jiyu-sync — cross-device Continue watching for every Jiyu build (Android, desktop).
+ * jiyu-sync — cross-device Continue watching + Saved for every Jiyu build (Android, desktop).
  *
  * Storage: Cloudflare D1 (binding DB). Free-tier friendly: indexed reads only, one batch per
  * write request, at most one `last_seen_at` write per device per hour.
@@ -40,6 +40,13 @@ const RECORD_FIELDS = {
   transport: 'string',
   sourceKind: 'string',
   source: 'string',
+}
+/** Saved (watchlist) wire fields. */
+const SAVED_FIELDS = {
+  title: 'string',
+  poster: 'string',
+  category: 'string',
+  href: 'string',
 }
 const CATEGORIES = new Set(['movies', 'series', 'anime', 'kids'])
 
@@ -200,6 +207,19 @@ function sanitizeRecord(input) {
   return out
 }
 
+function sanitizeSavedRecord(input) {
+  const out = {}
+  for (const [key, type] of Object.entries(SAVED_FIELDS)) {
+    const v = input[key]
+    if (v === undefined || v === null) continue
+    if (type === 'string' && typeof v === 'string') out[key] = v.slice(0, 1500)
+  }
+  if (!CATEGORIES.has(out.category)) out.category = 'movies'
+  if (!out.title) out.title = 'Saved'
+  if (!out.href) out.href = `/watch/${String(input.id || '').slice(0, 280)}`
+  return out
+}
+
 function rowToRecord(row) {
   let data = {}
   try {
@@ -311,6 +331,100 @@ async function pushProgress(env, userId, rawEntries) {
   return { results, rev, now }
 }
 
+async function pullSaved(env, userId, since) {
+  const [entries, user] = await env.DB.batch([
+    env.DB.prepare(
+      'SELECT item_id, rev, updated_at, deleted, data FROM saved WHERE user_id = ? AND rev > ? ORDER BY rev',
+    ).bind(userId, since),
+    env.DB.prepare('SELECT saved_rev FROM users WHERE id = ?').bind(userId),
+  ])
+  return {
+    entries: (entries.results || []).map(rowToRecord),
+    rev: Number(user.results?.[0]?.saved_rev || 0),
+    now: Date.now(),
+  }
+}
+
+async function pushSaved(env, userId, rawEntries) {
+  if (!Array.isArray(rawEntries)) throw Object.assign(new Error('entries must be an array'), { status: 400 })
+  if (rawEntries.length > MAX_ENTRIES_PER_PUT) {
+    throw Object.assign(new Error(`At most ${MAX_ENTRIES_PER_PUT} entries per request`), { status: 413 })
+  }
+  const now = Date.now()
+  /** @type {Map<string, { id: string, updatedAt: number, deleted: boolean, data: string }>} */
+  const incoming = new Map()
+  for (const raw of rawEntries) {
+    if (!raw || typeof raw.id !== 'string' || !raw.id || raw.id.length > 300) continue
+    const age = Number.isFinite(Number(raw.ageMs)) ? Math.max(0, Math.min(Number(raw.ageMs), MAX_AGE_MS)) : 0
+    const updatedAt = now - age
+    const deleted = Boolean(raw.deleted)
+    const data = JSON.stringify(
+      deleted ? { category: sanitizeSavedRecord(raw).category } : sanitizeSavedRecord(raw),
+    )
+    if (data.length > MAX_ROW_BYTES) continue
+    const prev = incoming.get(raw.id)
+    if (!prev || updatedAt >= prev.updatedAt) incoming.set(raw.id, { id: raw.id, updatedAt, deleted, data })
+  }
+  if (incoming.size === 0) {
+    const user = await env.DB.prepare('SELECT saved_rev FROM users WHERE id = ?').bind(userId).first()
+    return { results: [], rev: Number(user?.saved_rev || 0), now }
+  }
+
+  const ids = [...incoming.keys()]
+  const existing = await env.DB.prepare(
+    'SELECT item_id, rev, updated_at, deleted, data FROM saved WHERE user_id = ? AND item_id IN (SELECT value FROM json_each(?))',
+  )
+    .bind(userId, JSON.stringify(ids))
+    .all()
+  const byId = new Map((existing.results || []).map((row) => [row.item_id, row]))
+
+  const accepted = []
+  const results = []
+  for (const row of incoming.values()) {
+    const prev = byId.get(row.id)
+    const ok = !prev || row.updatedAt >= Number(prev.updated_at)
+    if (ok) accepted.push(row)
+    else results.push({ id: row.id, accepted: false, current: rowToRecord(prev) })
+  }
+
+  let rev = 0
+  if (accepted.length > 0) {
+    const stmts = [env.DB.prepare('UPDATE users SET saved_rev = saved_rev + 1 WHERE id = ?').bind(userId)]
+    for (const row of accepted) {
+      stmts.push(
+        env.DB.prepare(
+          `INSERT INTO saved (user_id, item_id, rev, updated_at, deleted, data)
+           VALUES (?1, ?2, (SELECT saved_rev FROM users WHERE id = ?1), ?3, ?4, ?5)
+           ON CONFLICT (user_id, item_id) DO UPDATE SET
+             rev = excluded.rev, updated_at = excluded.updated_at, deleted = excluded.deleted, data = excluded.data
+           WHERE excluded.updated_at >= saved.updated_at`,
+        ).bind(userId, row.id, row.updatedAt, row.deleted ? 1 : 0, row.data),
+      )
+    }
+    stmts.push(env.DB.prepare('SELECT saved_rev FROM users WHERE id = ?').bind(userId))
+    const out = await env.DB.batch(stmts)
+    rev = Number(out[out.length - 1].results?.[0]?.saved_rev || 0)
+    for (const row of accepted) {
+      results.push({
+        id: row.id,
+        accepted: true,
+        rev,
+        updatedAt: row.updatedAt,
+        ...(row.deleted ? { deleted: true } : {}),
+      })
+    }
+    if (Math.random() < 0.05) {
+      await env.DB.prepare('DELETE FROM saved WHERE user_id = ? AND deleted = 1 AND updated_at < ?')
+        .bind(userId, now - TOMBSTONE_TTL_MS)
+        .run()
+    }
+  } else {
+    const user = await env.DB.prepare('SELECT saved_rev FROM users WHERE id = ?').bind(userId).first()
+    rev = Number(user?.saved_rev || 0)
+  }
+  return { results, rev, now }
+}
+
 // Entitlements / payments scaffold. Inert unless BILLING_ENABLED = "true" (docs/payments.md).
 const billing = createBilling({ json, fail, readJson })
 
@@ -320,10 +434,11 @@ async function revokeDevice(env, userId, deviceId) {
   const left = await env.DB.prepare('SELECT COUNT(*) AS n FROM devices WHERE user_id = ?').bind(userId).first()
   if (!Number(left?.n)) {
     // Last device gone: nothing can read this account any more, so remove its data.
-    // Billing off (default): exactly the original three deletes. Billing on: see billing.js.
+    // Billing off (default): progress + saved + pair codes. Billing on: see billing.js.
     const extra = await billing.lastDeviceCleanup(env, userId)
     await env.DB.batch([
       env.DB.prepare('DELETE FROM progress WHERE user_id = ?').bind(userId),
+      env.DB.prepare('DELETE FROM saved WHERE user_id = ?').bind(userId),
       env.DB.prepare('DELETE FROM pair_codes WHERE user_id = ?').bind(userId),
       ...extra.stmts,
       ...(extra.keepUser ? [] : [env.DB.prepare('DELETE FROM users WHERE id = ?').bind(userId)]),
@@ -436,6 +551,23 @@ async function route(request, env) {
   if (method === 'DELETE' && path.startsWith('/v1/progress/')) {
     const id = decodeURIComponent(path.slice('/v1/progress/'.length))
     return json(200, await pushProgress(env, auth.userId, [{ id, deleted: true, ageMs: 0 }]))
+  }
+
+  if (method === 'GET' && path === '/v1/saved') {
+    const since = Math.max(0, Math.floor(Number(url.searchParams.get('since') || 0)) || 0)
+    return json(200, await pullSaved(env, auth.userId, since))
+  }
+
+  if (method === 'PUT' && path === '/v1/saved') {
+    const body = await readJson(request)
+    const entries = Array.isArray(body.entries) ? body.entries : body.id ? [body] : null
+    if (!entries) return fail(400, 'entries must be an array')
+    return json(200, await pushSaved(env, auth.userId, entries))
+  }
+
+  if (method === 'DELETE' && path.startsWith('/v1/saved/')) {
+    const id = decodeURIComponent(path.slice('/v1/saved/'.length))
+    return json(200, await pushSaved(env, auth.userId, [{ id, deleted: true, ageMs: 0 }]))
   }
 
   return fail(404, 'Not found')

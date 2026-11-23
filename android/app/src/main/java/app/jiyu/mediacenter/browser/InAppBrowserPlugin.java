@@ -159,7 +159,10 @@ public class InAppBrowserPlugin extends Plugin {
   @PluginMethod
   public void hide(PluginCall call) {
     boolean blank = Boolean.TRUE.equals(call.getBoolean("blank", false));
-    boolean pause = Boolean.TRUE.equals(call.getBoolean("pause", true));
+    // Default pause:false — a bare hide() used to pause every PiP hop and leave
+    // a black Mute/Full/Expand chrome over Home/Sports. Callers that mean pause
+    // (close / multiview park) pass pause:true explicitly.
+    boolean pause = Boolean.TRUE.equals(call.getBoolean("pause", false));
     final int epoch = surfaceEpoch.incrementAndGet();
     main.post(() -> {
       if (epoch != surfaceEpoch.get()) {
@@ -470,14 +473,17 @@ public class InAppBrowserPlugin extends Plugin {
     // StreamCorner only. The homepage shell is a normal 200, so the usual
     // "first non-challenge HTML" return happens before the schedule paints.
     final boolean untilWatchLinks = call.getBoolean("untilWatchLinks", false);
+    final String extractScript = call.getString("extractScript", "");
     new Thread(() -> {
       synchronized (fetchLock) {
         final String[] htmlBox = new String[] { "" };
+        final String[] entriesBox = new String[] { "" };
         final int[] statusBox = new int[] { 0 };
         final String[] errorBox = new String[] { "" };
         final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
         main.post(() -> loadScrapeHtml(
-          target, headersObj, htmlBox, statusBox, errorBox, latch, untilWatchLinks
+          target, headersObj, htmlBox, statusBox, errorBox, latch, untilWatchLinks,
+          extractScript, entriesBox
         ));
         try {
           if (!latch.await(40, java.util.concurrent.TimeUnit.SECONDS)) {
@@ -489,13 +495,18 @@ public class InAppBrowserPlugin extends Plugin {
           errorBox[0] = "Interrupted";
         }
         String html = htmlBox[0] == null ? "" : htmlBox[0];
+        String entriesJson = entriesBox[0] == null ? "" : entriesBox[0];
         // Empty HTML counts as a challenge. A scrape view that died first is a real error.
         boolean viewClosed = SCRAPE_VIEW_CLOSED.equals(errorBox[0]);
         boolean challenge = !viewClosed && isChallengePage(html);
-        boolean success = !html.isEmpty() && !challenge && (statusBox[0] == 0 || (statusBox[0] >= 200 && statusBox[0] < 400));
+        boolean success =
+          (!html.isEmpty() || !entriesJson.isEmpty())
+            && !challenge
+            && (statusBox[0] == 0 || (statusBox[0] >= 200 && statusBox[0] < 400));
         JSObject out = new JSObject();
         out.put("ok", success);
         out.put("content", html);
+        out.put("entriesJson", entriesJson);
         out.put("status", challenge ? 503 : statusBox[0]);
         String err = success ? "" : (challenge ? "Cloudflare challenge" : (errorBox[0].isEmpty() ? "HTTP " + statusBox[0] : errorBox[0]));
         out.put("error", err);
@@ -845,9 +856,12 @@ public class InAppBrowserPlugin extends Plugin {
     int[] statusBox,
     String[] errorBox,
     java.util.concurrent.CountDownLatch latch,
-    boolean untilWatchLinks
+    boolean untilWatchLinks,
+    String extractScript,
+    String[] entriesBox
   ) {
     final boolean[] delivered = new boolean[] { false };
+    final String extract = extractScript == null ? "" : extractScript;
     try {
       ensureScrapeView();
       if (scrapeView == null) {
@@ -888,13 +902,13 @@ public class InAppBrowserPlugin extends Plugin {
               if (!delivered[0]) {
                 deliverHtmlPoll(
                   target, htmlBox, statusBox, errorBox, latch, delivered, attempts,
-                  untilWatchLinks, linkDeadline
+                  untilWatchLinks, linkDeadline, extract, entriesBox
                 );
               }
             }, delay);
             return;
           }
-          finishScrapeHtml(htmlBox, statusBox, latch, delivered, html);
+          finishScrapeHtml(htmlBox, statusBox, latch, delivered, html, target, extract, entriesBox);
         })) {
           failScrapeHtml(errorBox, statusBox, latch, delivered);
         }
@@ -972,7 +986,9 @@ public class InAppBrowserPlugin extends Plugin {
     boolean[] delivered,
     int[] attempts,
     boolean untilWatchLinks,
-    long linkDeadline
+    long linkDeadline,
+    String extractScript,
+    String[] entriesBox
   ) {
     if (delivered[0]) return;
     if (!evalScrapeJs(view, SCRAPE_OUTER_HTML_JS, value -> {
@@ -983,11 +999,11 @@ public class InAppBrowserPlugin extends Plugin {
         final int delay = isChallengePage(html) ? 1500 : 700;
         main.postDelayed(() -> deliverHtmlPoll(
           view, htmlBox, statusBox, errorBox, latch, delivered, attempts,
-          untilWatchLinks, linkDeadline
+          untilWatchLinks, linkDeadline, extractScript, entriesBox
         ), delay);
         return;
       }
-      finishScrapeHtml(htmlBox, statusBox, latch, delivered, html);
+      finishScrapeHtml(htmlBox, statusBox, latch, delivered, html, view, extractScript, entriesBox);
     })) {
       failScrapeHtml(errorBox, statusBox, latch, delivered);
     }
@@ -1014,14 +1030,54 @@ public class InAppBrowserPlugin extends Plugin {
     int[] statusBox,
     java.util.concurrent.CountDownLatch latch,
     boolean[] delivered,
-    String html
+    String html,
+    WebView view,
+    String extractScript,
+    String[] entriesBox
   ) {
     if (delivered[0]) return;
-    delivered[0] = true;
-    scrapeHtmlAbort = null;
     htmlBox[0] = html;
-    if (statusBox[0] == 0 && html != null && !html.isEmpty() && !isChallengePage(html)) statusBox[0] = 200;
-    latch.countDown();
+    if (statusBox[0] == 0 && html != null && !html.isEmpty() && !isChallengePage(html)) {
+      statusBox[0] = 200;
+    }
+    // Optional DOM extract (StreamCorner LIVE/Watch Now via textContent).
+    if (
+      extractScript == null
+        || extractScript.isEmpty()
+        || entriesBox == null
+        || view == null
+    ) {
+      delivered[0] = true;
+      scrapeHtmlAbort = null;
+      latch.countDown();
+      return;
+    }
+    if (!evalScrapeJs(view, extractScript, value -> {
+      if (delivered[0]) return;
+      delivered[0] = true;
+      scrapeHtmlAbort = null;
+      entriesBox[0] = normalizeExtractJson(value);
+      latch.countDown();
+    })) {
+      delivered[0] = true;
+      scrapeHtmlAbort = null;
+      latch.countDown();
+    }
+  }
+
+  /** evaluateJavascript JSON for an array is already `[...]`; unwrap string wrappers. */
+  private static String normalizeExtractJson(String value) {
+    if (value == null || "null".equals(value)) return "";
+    String v = value.trim();
+    if (v.startsWith("[")) return v;
+    try {
+      return new org.json.JSONArray("[" + value + "]").getString(0);
+    } catch (Throwable t) {
+      if (v.length() >= 2 && v.startsWith("\"") && v.endsWith("\"")) {
+        return v.substring(1, v.length() - 1);
+      }
+      return v;
+    }
   }
 
   private void failScrapeHtml(

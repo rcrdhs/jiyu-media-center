@@ -314,6 +314,10 @@ export function MediaCard({ item }: MediaCardProps) {
                 if (low === item.title.trim().toLowerCase()) return false
                 if (badge && low === badge) return false
                 if (/^(replay|live|ended|upcoming)$/i.test(p)) return false
+                // Provider code already rides on the title (SC / SF / PPV / FX / TS).
+                if (/^(sc|sf|ppv|fx|ts)$/i.test(p)) return false
+                if (/^tim\s*streams$/i.test(p)) return false
+                if (/^stream\s*corner$/i.test(p)) return false
                 return true
               })
             if (parts.length === 0) return null

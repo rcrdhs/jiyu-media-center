@@ -9,7 +9,12 @@ import {
   hideSectionForTmdbTvKind,
   tmdbWithoutKeywordsParam,
 } from './hideKeywords'
-import { TMDB_PUBLIC_API_KEY, type TmdbTvFeedKind } from './tmdbTv'
+import {
+  TMDB_PUBLIC_API_KEY,
+  TMDB_TV_BY_YEAR_PER_YEAR,
+  TMDB_TV_BY_YEAR_START,
+  type TmdbTvFeedKind,
+} from './tmdbTv'
 import { getTorrentSyncControlState, TorrentSyncCancelledError } from './torrentSyncControl'
 
 export type ClientTmdbShow = {
@@ -90,6 +95,13 @@ function buildDiscoverUrl(kind: TmdbTvFeedKind, page: number, year?: number): st
     url.searchParams.set('page', String(page))
     return url.toString()
   }
+  if (kind === 'top_rated') {
+    const url = new URL('https://api.themoviedb.org/3/tv/top_rated')
+    url.searchParams.set('api_key', apiKey)
+    url.searchParams.set('language', 'en-US')
+    url.searchParams.set('page', String(page))
+    return url.toString()
+  }
   const url = new URL('https://api.themoviedb.org/3/discover/tv')
   url.searchParams.set('api_key', apiKey)
   url.searchParams.set('language', 'en-US')
@@ -98,6 +110,10 @@ function buildDiscoverUrl(kind: TmdbTvFeedKind, page: number, year?: number): st
   if (kind === 'by_year' && year) {
     url.searchParams.set('sort_by', 'popularity.desc')
     url.searchParams.set('first_air_date_year', String(year))
+    url.searchParams.set('without_genres', '16')
+  } else if (kind === 'vote_count') {
+    url.searchParams.set('sort_by', 'vote_count.desc')
+    url.searchParams.set('without_genres', '16')
   } else if (kind === 'anime') {
     url.searchParams.set('with_genres', '16')
     url.searchParams.set('with_original_language', 'ja')
@@ -149,8 +165,11 @@ export async function fetchTmdbTvCatalogClient(
     kind === 'animation' || kind === 'popular'
       ? 10000
       : kind === 'by_year'
-        ? 800
-        : 5000
+        ? TMDB_TV_BY_YEAR_PER_YEAR *
+          Math.max(1, new Date().getFullYear() - TMDB_TV_BY_YEAR_START + 1)
+        : kind === 'top_rated' || kind === 'vote_count'
+          ? 5000
+          : 5000
   const target = Math.max(1, Math.min(hardCap, Number(limit) || 500))
   const pageSize = 20
   const shows: TmdbRow[] = []
@@ -168,8 +187,8 @@ export async function fetchTmdbTvCatalogClient(
 
   try {
     if (kind === 'by_year') {
-      const byYearStart = 2000
-      const byYearPerYear = 20
+      const byYearStart = TMDB_TV_BY_YEAR_START
+      const byYearPerYear = TMDB_TV_BY_YEAR_PER_YEAR
       const byYearEnd = new Date().getFullYear()
       const years: number[] = []
       for (let y = byYearEnd; y >= byYearStart; y -= 1) years.push(y)
@@ -179,24 +198,29 @@ export async function fetchTmdbTvCatalogClient(
       for (let i = 0; i < years.length && shows.length < yearTarget; i += 1) {
         throwIfCatalogSyncCancelled()
         const year = years[i]!
-        const { ok, data, error } = await nativeFetchJson<{ results?: TmdbRow[] }>(
-          buildDiscoverUrl(kind, 1, year),
-        )
-        if (!ok || !data) {
-          if (shows.length > 0) break
-          return { ok: false, shows: [], error: error || `TMDB by_year ${year} failed` }
-        }
-        const results = Array.isArray(data.results) ? data.results : []
+        // TMDB returns 20/page — pull enough pages to fill PER_YEAR.
+        const pagesForYear = Math.max(1, Math.ceil(byYearPerYear / pageSize))
         const accepted: TmdbRow[] = []
         let taken = 0
-        for (const row of results) {
-          if (taken >= byYearPerYear || shows.length >= yearTarget) break
-          const id = row?.id
-          if (!id || seen.has(id)) continue
-          seen.add(id)
-          shows.push(row)
-          accepted.push(row)
-          taken += 1
+        for (let page = 1; page <= pagesForYear && taken < byYearPerYear; page += 1) {
+          const { ok, data, error } = await nativeFetchJson<{ results?: TmdbRow[] }>(
+            buildDiscoverUrl(kind, page, year),
+          )
+          if (!ok || !data) {
+            if (shows.length > 0 || accepted.length > 0) break
+            return { ok: false, shows: [], error: error || `TMDB by_year ${year} failed` }
+          }
+          const results = Array.isArray(data.results) ? data.results : []
+          if (results.length === 0) break
+          for (const row of results) {
+            if (taken >= byYearPerYear || shows.length >= yearTarget) break
+            const id = row?.id
+            if (!id || seen.has(id)) continue
+            seen.add(id)
+            shows.push(row)
+            accepted.push(row)
+            taken += 1
+          }
         }
         emitBatch(accepted)
         onProgress?.(Math.min(shows.length, yearTarget), yearTarget)

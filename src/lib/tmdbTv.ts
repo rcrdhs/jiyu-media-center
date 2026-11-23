@@ -15,6 +15,8 @@ export const TMDB_TV_POPULAR_FEED_PREFIX = 'jiyu://tmdb-tv-popular'
 export const TMDB_TV_AIRING_FEED_PREFIX = 'jiyu://tmdb-tv-airing'
 export const TMDB_TV_TRENDING_FEED_PREFIX = 'jiyu://tmdb-tv-trending'
 export const TMDB_TV_BY_YEAR_FEED_PREFIX = 'jiyu://tmdb-tv-by-year'
+export const TMDB_TV_TOP_RATED_FEED_PREFIX = 'jiyu://tmdb-tv-top-rated'
+export const TMDB_TV_VOTE_COUNT_FEED_PREFIX = 'jiyu://tmdb-tv-vote-count'
 export const TMDB_ANIME_FULL_FEED_PREFIX = 'jiyu://tmdb-anime-full'
 export const TMDB_KIDS_SHOWS_FEED_PREFIX = 'jiyu://tmdb-kids-shows'
 export const TMDB_TV_DETAIL_PREFIX = 'jiyu://tmdb-tv'
@@ -24,27 +26,73 @@ export const TMDB_PUBLIC_API_KEY = 'd64117f26031a428449f102ced3aba73'
 
 /**
  * Series discover pages (20/page, TMDB max ~500 pages).
- * Animation (incl. anime) is excluded via without_genres=16 — anime stays on Anime.
+ * Animation (16) and Kids (10762) are excluded — Anime / Kids own those shelves.
+ * Airing / Trending also drop News (10763) and Talk (10767).
  */
 export const TMDB_TV_POPULAR_LIMIT = 10000
 export const TMDB_TV_AIRING_LIMIT = 500
 export const TMDB_TV_TRENDING_LIMIT = 100
-/** Top 20 / year from 2000 → current (~27×20). */
-export const TMDB_TV_BY_YEAR_START = 2000
-export const TMDB_TV_BY_YEAR_PER_YEAR = 20
-export const TMDB_TV_BY_YEAR_LIMIT = 800
+/**
+ * Deeper by-year slice (1970→now × 50) — older years fall out of global Popular
+ * and help Series stay above the 10k floor without relying on backup doubles.
+ */
+export const TMDB_TV_BY_YEAR_START = 1970
+export const TMDB_TV_BY_YEAR_PER_YEAR = 50
+export const TMDB_TV_BY_YEAR_LIMIT =
+  Math.max(1, new Date().getFullYear() - TMDB_TV_BY_YEAR_START + 1) * TMDB_TV_BY_YEAR_PER_YEAR
+/** `/tv/top_rated` — high vote-average shows outside Popular's long tail. */
+export const TMDB_TV_TOP_RATED_LIMIT = 5000
+/** `discover/tv` sorted by vote_count — another non-popularity slice. */
+export const TMDB_TV_VOTE_COUNT_LIMIT = 5000
+/**
+ * Never let the TMDB Series catalog shrink below this once reached (merge floor).
+ * Visible shelf count can be a bit lower after playability / English filters.
+ */
+export const TMDB_TV_SERIES_MIN_TITLES = 10000
 /** JP animation discover for Anime → Full Shows (Ended / complete series only). */
 export const TMDB_ANIME_FULL_LIMIT = 5000
 /** TMDB Kids genre TV for Kids → Shows (Rive play). */
 export const TMDB_KIDS_SHOWS_LIMIT = 500
 
-export type TmdbTvFeedKind = 'popular' | 'on_the_air' | 'trending' | 'by_year' | 'anime' | 'kids' | 'animation'
+export type TmdbTvFeedKind =
+  | 'popular'
+  | 'on_the_air'
+  | 'trending'
+  | 'by_year'
+  | 'top_rated'
+  | 'vote_count'
+  | 'anime'
+  | 'kids'
+  | 'animation'
+
+export const TMDB_SERIES_EXCLUDED_GENRE_IDS = [16, 10762] as const
+export const TMDB_SERIES_AIRING_EXCLUDED_GENRE_IDS = [16, 10762, 10763, 10767] as const
+
+/** True when TMDB genre ids belong on Kids / Anime (or News/Talk on Airing). */
+export function tmdbGenreIdsExcludedFromSeries(
+  genreIds: number[] | undefined,
+  kind: TmdbTvFeedKind,
+): boolean {
+  if (!Array.isArray(genreIds) || genreIds.length === 0) return false
+  const banned =
+    kind === 'on_the_air' || kind === 'trending'
+      ? TMDB_SERIES_AIRING_EXCLUDED_GENRE_IDS
+      : TMDB_SERIES_EXCLUDED_GENRE_IDS
+  for (const id of banned) {
+    if (genreIds.includes(id)) return true
+  }
+  return false
+}
 
 export interface TmdbTvEpisodeInfo {
   key: string
   season: number
   episode: number
   title: string
+  /** YYYY-MM-DD from TMDB when known. */
+  airDate?: string
+  /** True when air_date is still in the future — list it, but do not play. */
+  upcoming?: boolean
 }
 
 export function tmdbTvPopularFeedUrl(): string {
@@ -61,6 +109,14 @@ export function tmdbTvTrendingFeedUrl(): string {
 
 export function tmdbTvByYearFeedUrl(): string {
   return TMDB_TV_BY_YEAR_FEED_PREFIX
+}
+
+export function tmdbTvTopRatedFeedUrl(): string {
+  return TMDB_TV_TOP_RATED_FEED_PREFIX
+}
+
+export function tmdbTvVoteCountFeedUrl(): string {
+  return TMDB_TV_VOTE_COUNT_FEED_PREFIX
 }
 
 export function tmdbAnimeFullFeedUrl(): string {
@@ -87,6 +143,14 @@ export function isTmdbTvByYearFeedUrl(pageUrl: string): boolean {
   return pageUrl.startsWith(TMDB_TV_BY_YEAR_FEED_PREFIX)
 }
 
+export function isTmdbTvTopRatedFeedUrl(pageUrl: string): boolean {
+  return pageUrl.startsWith(TMDB_TV_TOP_RATED_FEED_PREFIX)
+}
+
+export function isTmdbTvVoteCountFeedUrl(pageUrl: string): boolean {
+  return pageUrl.startsWith(TMDB_TV_VOTE_COUNT_FEED_PREFIX)
+}
+
 export function isTmdbAnimeFullFeedUrl(pageUrl: string): boolean {
   return pageUrl.startsWith(TMDB_ANIME_FULL_FEED_PREFIX)
 }
@@ -101,6 +165,8 @@ export function isTmdbTvFeedUrl(pageUrl: string): boolean {
     isTmdbTvAiringFeedUrl(pageUrl) ||
     isTmdbTvTrendingFeedUrl(pageUrl) ||
     isTmdbTvByYearFeedUrl(pageUrl) ||
+    isTmdbTvTopRatedFeedUrl(pageUrl) ||
+    isTmdbTvVoteCountFeedUrl(pageUrl) ||
     isTmdbAnimeFullFeedUrl(pageUrl) ||
     isTmdbKidsShowsFeedUrl(pageUrl)
   )
@@ -110,6 +176,8 @@ export function tmdbTvFeedKind(pageUrl: string): TmdbTvFeedKind {
   if (isTmdbTvAiringFeedUrl(pageUrl)) return 'on_the_air'
   if (isTmdbTvTrendingFeedUrl(pageUrl)) return 'trending'
   if (isTmdbTvByYearFeedUrl(pageUrl)) return 'by_year'
+  if (isTmdbTvTopRatedFeedUrl(pageUrl)) return 'top_rated'
+  if (isTmdbTvVoteCountFeedUrl(pageUrl)) return 'vote_count'
   if (isTmdbAnimeFullFeedUrl(pageUrl)) return 'anime'
   if (isTmdbKidsShowsFeedUrl(pageUrl)) return 'kids'
   return 'popular'
@@ -158,10 +226,50 @@ export function isTmdbTvCatalogItem(item: {
   return false
 }
 
+/**
+ * Catalog rows saved under Series that belong on Kids (or News/Talk on
+ * Airing/Trending). Used to hide immediately and prune on the next Series sync.
+ */
+export function isTmdbSeriesGenreBleedItem(item: {
+  category?: string
+  torrentSourceId?: string
+  genres?: string[]
+  tags?: string[]
+  url?: string
+  detailUrl?: string
+  rivestreamTmdbId?: string
+}): boolean {
+  if (item.category !== 'series') return false
+  // Only the Series TMDB source — not Anime / Kids / Zenox (those can be
+  // Animation genre on purpose).
+  if (item.torrentSourceId) {
+    if (item.torrentSourceId !== TMDB_TV_SOURCE_ID) return false
+  } else {
+    const href = `${item.url || ''} ${item.detailUrl || ''}`
+    if (!href.includes(TMDB_TV_DETAIL_PREFIX) && !isTmdbTvFeedUrl(href.trim())) {
+      return false
+    }
+  }
+  const genres = item.genres ?? []
+  if (genres.includes('kids') || genres.includes('animation')) return true
+  const onAiringOrTrending = (item.tags ?? []).some((tag) => {
+    const t = String(tag || '').toLowerCase()
+    return (
+      t === 'airing-series' ||
+      t === 'trending-series' ||
+      t === 'trending-airing'
+    )
+  })
+  if (!onAiringOrTrending) return false
+  return genres.includes('news') || genres.includes('talk')
+}
+
 function feedLimit(kind: TmdbTvFeedKind): number {
   if (kind === 'on_the_air') return TMDB_TV_AIRING_LIMIT
   if (kind === 'trending') return TMDB_TV_TRENDING_LIMIT
   if (kind === 'by_year') return TMDB_TV_BY_YEAR_LIMIT
+  if (kind === 'top_rated') return TMDB_TV_TOP_RATED_LIMIT
+  if (kind === 'vote_count') return TMDB_TV_VOTE_COUNT_LIMIT
   if (kind === 'anime') return TMDB_ANIME_FULL_LIMIT
   if (kind === 'animation') return 10000
   if (kind === 'kids') return TMDB_KIDS_SHOWS_LIMIT
@@ -202,18 +310,16 @@ export async function fetchTmdbTvCatalogLinks(
   let rankIndex = 0
   let lastByYear = -1
   let withinYearRank = 0
-  const seriesOnly = !isAnime && !isKids && kind === 'popular'
+  const seriesFeed = !isAnime && !isKids
   const take = (shows: NonNullable<CatalogResult['shows']>): void => {
     const added: TorrentPageLink[] = []
     for (const show of shows) {
       const id = String(show.tmdbId || '').trim()
       const title = String(show.name || '').trim()
       if (!id || !title || seen.has(id)) continue
-      // Belt-and-suspenders: Series shelf must not ingest Animation/anime rows.
-      if (seriesOnly) {
-        const genres = Array.isArray(show.genreIds) ? show.genreIds : []
-        if (genres.includes(16)) continue
-      }
+      // Series shelves must not ingest Kids / Animation (or News/Talk on Airing).
+      // Popular already uses without_genres=16; Airing/Trending are raw lists.
+      if (seriesFeed && tmdbGenreIdsExcludedFromSeries(show.genreIds, kind)) continue
       seen.add(id)
       const year = String(show.firstAirDate || '').slice(0, 4)
       const yearNum = Number(year) || 0
@@ -251,7 +357,17 @@ export async function fetchTmdbTvCatalogLinks(
         title,
         url: tmdbTvDetailUrl(id),
         summary: [
-          isKids ? 'Kids' : isAnime ? 'Anime' : isByYear ? `Top ${year}` : 'TV Series',
+          isKids
+            ? 'Kids'
+            : isAnime
+              ? 'Anime'
+              : isByYear
+                ? `Top ${year}`
+                : kind === 'top_rated'
+                  ? 'Top rated'
+                  : kind === 'vote_count'
+                    ? 'Most voted'
+                    : 'TV Series',
           year,
           'TMDB',
           'Rive',
@@ -410,6 +526,22 @@ function tmdbEpisodeHasAired(airDate: string | null | undefined, seasonHasDates:
   return t <= Date.now()
 }
 
+export function formatTmdbAirDateLabel(airDate: string): string {
+  const raw = airDate.slice(0, 10)
+  const t = Date.parse(`${raw}T00:00:00Z`)
+  if (!Number.isFinite(t)) return raw
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      timeZone: 'UTC',
+    }).format(t)
+  } catch {
+    return raw
+  }
+}
+
 export async function fetchTmdbTvEpisodeList(
   tmdbId: string,
 ): Promise<{
@@ -504,13 +636,16 @@ export async function fetchTmdbTvEpisodeList(
     for (const ep of eps) {
       const episode = Number(ep.episode_number)
       if (!Number.isFinite(episode) || episode < 1) continue
-      if (!tmdbEpisodeHasAired(ep.air_date, seasonHasDates)) continue
+      const airDate = String(ep.air_date || '').trim().slice(0, 10) || undefined
+      const upcoming = !tmdbEpisodeHasAired(ep.air_date, seasonHasDates)
       const key = `S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`
       byKey.set(key, {
         key,
         season,
         episode,
         title: String(ep.name || '').trim() || `Episode ${episode}`,
+        ...(airDate ? { airDate } : {}),
+        ...(upcoming ? { upcoming: true } : {}),
       })
     }
   }
@@ -534,12 +669,13 @@ export async function fetchTmdbTvEpisodeList(
   const episodes = [...byKey.values()].sort((a, b) =>
     a.season !== b.season ? a.season - b.season : a.episode - b.episode,
   )
-
   const result = {
     tmdbId: id,
     episodes,
     description: overview || undefined,
     networks: networks.length > 0 ? networks : undefined,
+    // Upcoming-only shows (e.g. "12 12 12" before premiere) still return the
+    // episode rows — ShowPage lists them disabled with air dates.
     error: episodes.length === 0 ? 'No episodes found on TMDB' : undefined,
   }
   rememberTmdbTvNetworks(id, networks)
@@ -808,6 +944,38 @@ export function indexTmdbTvTitles(items: readonly StreamItem[]): void {
     const year = releaseYear(item.releasedAt)
     if (year) indexTitleKey(`${key}|${year}`, id)
   }
+}
+
+function seriesShelfPreferScore(item: StreamItem): number {
+  let n = 0
+  if (isTmdbTvCatalogItem(item)) n += 100
+  if (item.rivestreamTmdbId) n += 40
+  if (item.cinetaroTmdbId || item.netmirrorTmdbId) n += 20
+  if (item.poster) n += 5
+  if (item.torrentSourceId === TMDB_TV_SOURCE_ID) n += 10
+  return n
+}
+
+/**
+ * One Series card per TMDB id (else normalized title). Prefers the TMDB row so
+ * YMovies / Cinetaro backups cannot sit beside the same show.
+ * Call after indexTmdbTvTitles so id-less rows can borrow a same-title id.
+ */
+export function dedupeSeriesShelfItems(items: StreamItem[]): StreamItem[] {
+  if (items.length < 2) return items
+  const winners = new Map<string, StreamItem>()
+  for (const item of items) {
+    const tmdbId = cardTmdbTvId(item)
+    const titleKey = seriesTitleKey(item.title)
+    const key = tmdbId ? `tmdb:${tmdbId}` : titleKey ? `title:${titleKey}` : `id:${item.id}`
+    const prev = winners.get(key)
+    if (!prev || seriesShelfPreferScore(item) > seriesShelfPreferScore(prev)) {
+      winners.set(key, item)
+    }
+  }
+  if (winners.size === items.length) return items
+  const kept = new Set([...winners.values()].map((item) => item.id))
+  return items.filter((item) => kept.has(item.id))
 }
 
 /**

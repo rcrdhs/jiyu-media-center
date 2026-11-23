@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useLocation, useNavigate } from 'react-router-dom'
+import { placeMedia3InPipCorner } from './Media3Pip'
 import { usePlayback } from '../context/PlaybackContext'
 import { useWebBrowser } from '../context/WebBrowserContext'
 import {
@@ -10,7 +11,9 @@ import {
   onAndroidBackButton,
   setAndroidBackHandling,
 } from '../lib/androidFullscreen'
+import { armMedia3PipHandoff } from '../lib/androidMedia3'
 import { exitOsFullscreen, getFullscreenOwner } from '../lib/fullscreenSession'
+import { isNativeMedia3PlaybackItem } from '../lib/webBrowser'
 import { dismissTopOverlay } from '../lib/overlayDismiss'
 import {
   closeOpenTvPopup,
@@ -94,7 +97,7 @@ function carryFrom(dest: string, routeFrom: string | null): { from: string } | u
 export function AndroidBackBridge() {
   const navigate = useNavigate()
   const location = useLocation()
-  const { mode, returnTo, minimizeToPip } = usePlayback()
+  const { mode, returnTo, minimizeToPip, item } = usePlayback()
   const {
     mode: webMode,
     fullscreen: webFullscreen,
@@ -111,6 +114,7 @@ export function AndroidBackBridge() {
     returnTo,
     webMode,
     webFullscreen,
+    item,
   })
   snap.current = {
     path: location.pathname,
@@ -119,6 +123,7 @@ export function AndroidBackBridge() {
     returnTo,
     webMode,
     webFullscreen,
+    item,
   }
 
   useEffect(() => {
@@ -183,12 +188,24 @@ export function AndroidBackBridge() {
         if (s.mode === 'full') {
           exitArmedUntil.current = 0
           setExitHint(null)
+          if (
+            s.path === '/native-stream' &&
+            s.item &&
+            isNativeMedia3PlaybackItem(s.item)
+          ) {
+            armMedia3PipHandoff()
+            placeMedia3InPipCorner()
+          }
           minimizeToPip()
           const dest =
             (s.returnTo && s.returnTo !== '/' ? s.returnTo : null) ||
             s.routeFrom ||
             '/'
-          if (s.path.startsWith('/watch') || s.path.startsWith('/show')) {
+          if (
+            s.path.startsWith('/watch') ||
+            s.path.startsWith('/show') ||
+            s.path === '/native-stream'
+          ) {
             navigate(dest, { replace: true, state: carryFrom(dest, s.routeFrom) })
           }
           return

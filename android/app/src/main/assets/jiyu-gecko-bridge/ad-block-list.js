@@ -75,6 +75,11 @@ self.JIYU_AD_BLOCK = {
     "[?&]utm_medium=adnetwork",
     "[?&]selAdType=",
     "utm_source=PRIMEROLL",
-    "OperaSetup"
+    "OperaSetup",
+    "cdn\\.jsdelivr\\.net/npm/disable-devtool",
+    "disable-devtool@",
+    "senbonzakura000/popa/",
+    "popa_strmcrnr",
+    "aclib\\.js|aclib\\.runPop"
   ]
 }

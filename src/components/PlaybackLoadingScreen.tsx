@@ -1,3 +1,5 @@
+import { jiyuBrandLogoSrc } from '../lib/brandLogo'
+
 interface PlaybackLoadingScreenProps {
   title: string
   status?: string
@@ -23,7 +25,7 @@ export function PlaybackLoadingScreen({
     >
       <img
         className="playback-loading-logo"
-        src="./jiyu-logo.png"
+        src={jiyuBrandLogoSrc()}
         alt=""
         width={96}
         height={96}

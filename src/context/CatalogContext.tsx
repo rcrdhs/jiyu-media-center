@@ -40,6 +40,9 @@ import {
   isCatalogAutosyncSource,
   isEztvSource,
   isM2BoxUrl,
+  isSeriesAiringItem,
+  isSeriesPopularItem,
+  isSeriesTrendingItem,
   isSeriesWebCatalogItem,
   isSubsPleaseUrl,
   isZenoxUrl,
@@ -50,10 +53,13 @@ import {
 import {
   isTmdbAnimeFullFeedUrl,
   isTmdbKidsShowsFeedUrl,
+  isTmdbSeriesGenreBleedItem,
   isTmdbTvFeedUrl,
   TMDB_ANIME_SOURCE_ID,
   TMDB_KIDS_SOURCE_ID,
+  TMDB_TV_SERIES_MIN_TITLES,
   TMDB_TV_SOURCE_ID,
+  dedupeSeriesShelfItems,
   indexTmdbTvTitles,
 } from '../lib/tmdbTv'
 import { ZENOX_SOURCE_ID } from '../lib/zenox'
@@ -94,6 +100,16 @@ const KIDS_NEW_PASS_KEY = 'jiyu.kids.new-pass-at'
 const KIDS_SHOWS_PASS_KEY = 'jiyu.kids.shows-pass-at'
 /** Full YTS refresh cadence (Kids New rides along when that is due). */
 const YTS_FULL_REFRESH_MS = 12 * 60 * 60 * 1000
+/**
+ * Main Series shelf floors — below these, open Jiyu re-pulls those feeds
+ * (light pass) before / ahead of long Movie crawls. Counts are raw catalog
+ * rows with the shelf tag (playability may hide some on the grid).
+ * Popular floor matches TMDB_TV_SERIES_MIN_TITLES so Series stays ≥10k.
+ */
+const SERIES_AIRING_MIN = 40
+const SERIES_TRENDING_MIN = 20
+const SERIES_POPULAR_MIN = TMDB_TV_SERIES_MIN_TITLES
+const SERIES_SHELVES_PASS_KEY = 'jiyu.series.shelves-pass-at'
 
 function readPassAt(key: string): number {
   try {
@@ -118,12 +134,18 @@ import {
   streamCornerSportsFromItems,
 } from '../lib/streamCorner'
 import { fetchPpvStLiveCatalog } from '../lib/ppvSt'
+import { fetchTimStreamsLiveCatalog, isTimStreamsCatalogItem } from '../lib/timStreams'
 import { fetchLivextvReplayCatalog, isLivextvReplayCatalogItem } from '../lib/livextvReplays'
 import {
   fetchFullmatchShowsReplayCatalog,
   isFullmatchShowsCatalogItem,
   mergeSportsReplayShelfItems,
 } from '../lib/fullmatchShows'
+import { fetchHoofootReplayCatalog, isHoofootCatalogItem } from '../lib/hoofoot'
+import {
+  fetchFootballOrginReplayCatalog,
+  isFootballOrginCatalogItem,
+} from '../lib/footballOrgin'
 
 function setSyncProgressMessage(message: string, percent: number | null): void {
   // Keep the frozen "Paused · …" line — don't advance counts while parked.
@@ -166,6 +188,8 @@ interface CatalogContextValue {
   syncAllTorrentWebsites: () => Promise<{ added: number; sources: number }>
   /** Sport chips derived from StreamCorner (+ legacy name for Sports filters) */
   streamedSports: StreamedSport[]
+  /** True while the Sports Replay catalog is fetching (first paint / refresh). */
+  sportsReplaysLoading: boolean
 }
 
 const CatalogContext = createContext<CatalogContextValue | null>(null)
@@ -178,9 +202,13 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false)
   const [sources, setSources] = useState<PlaylistSource[]>([])
   const [torrentItems, setTorrentItems] = useState<StreamItem[]>([])
+  const torrentItemsRef = useRef(torrentItems)
+  torrentItemsRef.current = torrentItems
   const [streamedItems, setStreamedItems] = useState<StreamItem[]>([])
   const [ppvStItems, setPpvStItems] = useState<StreamItem[]>([])
+  const [timStreamsItems, setTimStreamsItems] = useState<StreamItem[]>([])
   const [livextvReplayItems, setLivextvReplayItems] = useState<StreamItem[]>([])
+  const [sportsReplaysLoading, setSportsReplaysLoading] = useState(() => !isKidsModeEnabled())
   const [streamedSports, setStreamedSports] = useState<StreamedSport[]>([])
   const [englishOnly, setEnglishOnlyState] = useState(() => getEnglishOnlyPref())
   const [hideDuplicates, setHideDuplicatesState] = useState(() => getHideDuplicatesPref())
@@ -379,6 +407,7 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
       ...builtins,
       ...streamedItems,
       ...ppvStItems,
+      ...timStreamsItems,
       ...livextvReplayItems,
       ...torrentItems,
       ...imported,
@@ -394,6 +423,7 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
     torrentItems,
     streamedItems,
     ppvStItems,
+    timStreamsItems,
     livextvReplayItems,
     hideDuplicates,
     kidsMode,
@@ -404,11 +434,15 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
   const seriesShelfItems = useMemo(() => {
     void torrentSourceRevision
     void hideKeywordsTick
-    let base = items.filter((item) => item.category === 'series')
+    let base = items.filter(
+      (item) => item.category === 'series' && !isTmdbSeriesGenreBleedItem(item),
+    )
     // Card network chips: M2Box rows borrow a same-title TMDB row's id.
     indexTmdbTvTitles(base)
     base = filterKnownPlayable(filterShelfVisibleItems(base))
-    return base.filter(isSeriesWebCatalogItem)
+    // TMDB + YMovies/Cinetaro backups share titles but not catalog ids —
+    // Hide duplicates skips stable catalog rows, so collapse here.
+    return dedupeSeriesShelfItems(base.filter(isSeriesWebCatalogItem))
   }, [items, torrentSourceRevision, hideKeywordsTick])
 
   // Samsung: check torrent-only anime rows (one at a time, cached 14 d) so the
@@ -459,7 +493,10 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
         (item) =>
           isLivextvReplayCatalogItem(item) ||
           isFullmatchShowsCatalogItem(item) ||
+          isHoofootCatalogItem(item) ||
+          isFootballOrginCatalogItem(item) ||
           isStreamCornerCatalogItem(item) ||
+          isTimStreamsCatalogItem(item) ||
           isLikelyEnglish(item),
       )
     },
@@ -673,6 +710,73 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
     [reloadTorrentCatalog],
   )
 
+  /**
+   * Fill thin Series main shelves (Airing / Trending / Popular) without a
+   * full TMDB replace. Queues behind any in-flight sync so Movies mid-crawl
+   * still finishes, then Series catches up while Jiyu stays open.
+   */
+  const runSeriesMainShelfPass = useCallback(
+    async (catalog: typeof torrentItems): Promise<number> => {
+      const source = loadTorrentSources().find(
+        (entry) =>
+          isCatalogAutosyncSource(entry) &&
+          (entry.id === TMDB_TV_SOURCE_ID || isTmdbTvFeedUrl(entry.url)),
+      )
+      if (!source) return 0
+      const seriesOk = (item: (typeof catalog)[number]) =>
+        item.category === 'series' && !isTmdbSeriesGenreBleedItem(item)
+      const needAiring =
+        catalog.filter((item) => seriesOk(item) && isSeriesAiringItem(item)).length <
+        SERIES_AIRING_MIN
+      const needTrending =
+        catalog.filter((item) => seriesOk(item) && isSeriesTrendingItem(item)).length <
+        SERIES_TRENDING_MIN
+      const needPopular =
+        catalog.filter((item) => seriesOk(item) && isSeriesPopularItem(item)).length <
+        SERIES_POPULAR_MIN
+      if (!needAiring && !needTrending && !needPopular) return 0
+      type SeriesRole =
+        | 'airing'
+        | 'trending'
+        | 'popular'
+        | 'by-year'
+        | 'top-rated'
+        | 'vote-count'
+      const roles = new Set<SeriesRole>()
+      if (needAiring) roles.add('airing')
+      if (needTrending) roles.add('trending')
+      // Popular under 10k: pull Popular plus the non-popularity slices that
+      // grow unique titles past TMDB's discover page cap.
+      if (needPopular) {
+        roles.add('popular')
+        roles.add('by-year')
+        roles.add('top-rated')
+        roles.add('vote-count')
+      }
+      const result = await enqueueTorrentSyncTask(async () => {
+        setTorrentSyncMessage('Series shelves: updating…', 1)
+        const outcome = await syncTorrentSource(source, applySyncProgress, {
+          lightPass: true,
+          feedFilter: (feed) =>
+            Boolean(feed.seriesRefresh && roles.has(feed.seriesRefresh as SeriesRole)),
+        })
+        return outcome
+      })
+      if (!result || result.cancelled) return 0
+      writePassAt(SERIES_SHELVES_PASS_KEY, Date.now())
+      if (result.added > 0) await reloadTorrentCatalog()
+      if (!result.error) {
+        setTorrentSyncMessage(
+          `Series shelves ready · ${result.added.toLocaleString()} titles`,
+          100,
+        )
+        window.setTimeout(() => clearTorrentSyncStatus(), 2500)
+      }
+      return result.added
+    },
+    [applySyncProgress, reloadTorrentCatalog],
+  )
+
   const syncAllTorrentWebsites = useCallback(async () => {
     const queued = await enqueueTorrentSyncTask(async () => {
       const list = loadTorrentSources().filter(isCatalogAutosyncSource)
@@ -789,7 +893,7 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
       )
       // Re-pull when TMDB Series / Zenox Animation are well under target.
       const SERIES_MIN_COUNT: Record<string, number> = {
-        [TMDB_TV_SOURCE_ID]: 7500,
+        [TMDB_TV_SOURCE_ID]: TMDB_TV_SERIES_MIN_TITLES,
         [ZENOX_SOURCE_ID]: 7500,
       }
       const underfilled = websites.filter((source) => {
@@ -801,6 +905,8 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
       const needSync = [...unsynced, ...underfilled].filter(
         (source, index, all) => all.findIndex((s) => s.id === source.id) === index,
       )
+      // Total TMDB count can look fine while Airing is empty — shelf fill is
+      // handled by runSeriesMainShelfPass; only enqueue a full source sync here.
       if (needSync.length === 0) return
       void enqueueTorrentSyncTask(async () => {
         if (!alive) return
@@ -918,10 +1024,76 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
     }
   }, [ready, syncTorrentWebsite])
 
-  // YTS Popular grows via merge; refresh every 12h so newly popular titles are pulled in.
+  // Main Series shelves: once Jiyu is open, keep pulling Airing / Trending /
+  // Popular until they clear the floor (queued behind any in-flight sync).
   useEffect(() => {
     if (!ready) return
+    let cancelled = false
+    let attempts = 0
+    // Popular + by-year + top-rated + vote-count can take several passes.
+    const MAX_ATTEMPTS = 8
+
+    const thinSeriesShelves = (catalog: typeof torrentItems) => {
+      const seriesOk = (item: (typeof catalog)[number]) =>
+        item.category === 'series' && !isTmdbSeriesGenreBleedItem(item)
+      const airing = catalog.filter(
+        (item) => seriesOk(item) && isSeriesAiringItem(item),
+      ).length
+      const trending = catalog.filter(
+        (item) => seriesOk(item) && isSeriesTrendingItem(item),
+      ).length
+      const popular = catalog.filter(
+        (item) => seriesOk(item) && isSeriesPopularItem(item),
+      ).length
+      return (
+        airing < SERIES_AIRING_MIN ||
+        trending < SERIES_TRENDING_MIN ||
+        popular < SERIES_POPULAR_MIN
+      )
+    }
+
+    const ensure = async () => {
+      if (cancelled || attempts >= MAX_ATTEMPTS) return
+      if (!thinSeriesShelves(torrentItemsRef.current)) return
+      attempts += 1
+      await runSeriesMainShelfPass(torrentItemsRef.current)
+      if (cancelled) return
+      // Re-check after the pass (and after any sync that was ahead in the queue).
+      if (thinSeriesShelves(torrentItemsRef.current) && attempts < MAX_ATTEMPTS) {
+        window.setTimeout(() => {
+          void ensure()
+        }, 8_000)
+      }
+    }
+
+    // After Sports Live/Replay kick off (~0s); Series is next in the update order.
+    const startup = window.setTimeout(() => {
+      void ensure()
+    }, 6_000)
+    return () => {
+      cancelled = true
+      window.clearTimeout(startup)
+    }
+  }, [ready, runSeriesMainShelfPass])
+
+  // YTS Popular grows via merge; refresh every 12h so newly popular titles are pulled in.
+  // Skip the startup kick while Series main shelves are still underfilled.
+  useEffect(() => {
+    if (!ready) return
+    const seriesThin = () => {
+      const catalog = torrentItemsRef.current
+      const seriesOk = (item: (typeof catalog)[number]) =>
+        item.category === 'series' && !isTmdbSeriesGenreBleedItem(item)
+      const airing = catalog.filter(
+        (item) => seriesOk(item) && isSeriesAiringItem(item),
+      ).length
+      const trending = catalog.filter(
+        (item) => seriesOk(item) && isSeriesTrendingItem(item),
+      ).length
+      return airing < SERIES_AIRING_MIN || trending < SERIES_TRENDING_MIN
+    }
     const refreshYts = () => {
+      if (seriesThin()) return
       const source = loadTorrentSources().find((entry) => isYtsSource(entry.url, entry.label))
       if (!source) return
       const syncedAt = loadTorrentCatalogMeta().bySource[source.id]?.syncedAt ?? 0
@@ -1013,8 +1185,8 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
         }
       })()
     }
-    // Kids Shows empty → sync soon; other TMDB feeds wait so startup isn’t a pile-up.
-    const kidsStartup = window.setTimeout(() => refreshTmdb({ forceKidsIfEmpty: true }), 8_000)
+    // After Sports + Series have had a head start; Kids/Anime are later in the order.
+    const kidsStartup = window.setTimeout(() => refreshTmdb({ forceKidsIfEmpty: true }), 20_000)
     const startup = window.setTimeout(() => refreshTmdb(), 150_000)
     const timer = window.setInterval(() => refreshTmdb(), DAY_MS)
     return () => {
@@ -1026,16 +1198,17 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, syncTorrentWebsite, runKidsLightPass])
 
-  // StreamCorner + PPV.st / StreamFree / Futbol-x — live sports; refresh as games start/end.
+  // StreamCorner + PPV.st / StreamFree / Futbol-x + Tim Streams — live sports; refresh as games start/end.
   useEffect(() => {
     if (!ready || kidsMode) return
     let cancelled = false
     let failStreak = 0
     let retryTimer: number | undefined
     const refresh = async () => {
-      const [cornerResult, ppvResult] = await Promise.all([
+      const [cornerResult, ppvResult, timResult] = await Promise.all([
         fetchStreamCornerLiveCatalog(),
         fetchPpvStLiveCatalog(),
+        fetchTimStreamsLiveCatalog(),
       ])
       if (cancelled) return
       const cornerOk = cornerResult.ok
@@ -1046,15 +1219,20 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
       if (!ppvOk) {
         console.warn('PPV.st streams unavailable:', ppvResult.error)
       }
+      const timOk = timResult.ok
+      if (!timOk) {
+        console.warn('Tim Streams unavailable:', timResult.error)
+      }
       startTransition(() => {
         if (cornerOk) {
           setStreamedItems(cornerResult.items)
           setStreamedSports(streamCornerSportsFromItems(cornerResult.items))
         }
         if (ppvOk) setPpvStItems(ppvResult.items)
+        if (timOk) setTimStreamsItems(timResult.items)
       })
       // Startup / brief outages: retry soon instead of waiting for the 90s poll.
-      if (!cornerOk || !ppvOk) {
+      if (!cornerOk || !ppvOk || !timOk) {
         failStreak += 1
         const delay = Math.min(30_000, 2_000 * failStreak)
         window.clearTimeout(retryTimer)
@@ -1076,23 +1254,67 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
     }
   }, [ready, kidsMode])
 
-  // Sports replays: FullMatchShows + LiveXTV + StreamCorner NBA VODs.
+  // Sports replays: Hoofoot + FootballOrgin league highlights + FullMatchShows +
+  // LiveXTV + StreamCorner NBA VODs. Refresh every 15 minutes.
+  // Apply each source as it lands so a slow/dead LiveXTV does not block the
+  // Replay tab the way Live sports already populate independently.
   useEffect(() => {
-    if (!ready || kidsMode) return
+    if (!ready || kidsMode) {
+      if (kidsMode) setSportsReplaysLoading(false)
+      return
+    }
     let cancelled = false
     let failStreak = 0
     let retryTimer: number | undefined
+    const buckets = {
+      livextv: [] as StreamItem[],
+      fms: [] as StreamItem[],
+      corner: [] as StreamItem[],
+      hoofoot: [] as StreamItem[],
+      footballOrgin: [] as StreamItem[],
+    }
+    const publish = () => {
+      if (cancelled) return
+      startTransition(() => {
+        setLivextvReplayItems(
+          mergeSportsReplayShelfItems(
+            buckets.livextv,
+            buckets.fms,
+            buckets.corner,
+            buckets.hoofoot,
+            buckets.footballOrgin,
+          ),
+        )
+      })
+    }
     const refresh = async () => {
-      const [livextv, fms, corner] = await Promise.all([
-        fetchLivextvReplayCatalog(),
-        fetchFullmatchShowsReplayCatalog(),
-        fetchStreamCornerReplayCatalog(),
+      setSportsReplaysLoading(true)
+      type ReplayFetch = { ok: boolean; items: StreamItem[]; error?: string }
+      const assign = (key: keyof typeof buckets, result: ReplayFetch) => {
+        if (cancelled) return result
+        if (result.ok) {
+          buckets[key] = result.items
+          publish()
+        }
+        return result
+      }
+      const [livextv, fms, corner, hoofoot, footballOrgin] = await Promise.all([
+        fetchLivextvReplayCatalog().then((r) => assign('livextv', r)),
+        fetchFullmatchShowsReplayCatalog().then((r) => assign('fms', r)),
+        fetchStreamCornerReplayCatalog().then((r) => assign('corner', r)),
+        fetchHoofootReplayCatalog().then((r) => assign('hoofoot', r)),
+        fetchFootballOrginReplayCatalog().then((r) => assign('footballOrgin', r)),
       ])
       if (cancelled) return
-      if (!livextv.ok && !fms.ok && !corner.ok) {
+      setSportsReplaysLoading(false)
+      if (!livextv.ok && !fms.ok && !corner.ok && !hoofoot.ok && !footballOrgin.ok) {
         console.warn(
           'Sports replays unavailable:',
-          livextv.error || fms.error || corner.error,
+          livextv.error ||
+            fms.error ||
+            corner.error ||
+            hoofoot.error ||
+            footballOrgin.error,
         )
         failStreak += 1
         const delay = Math.min(45_000, 3_000 * failStreak)
@@ -1103,15 +1325,8 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
         return
       }
       failStreak = 0
-      startTransition(() => {
-        setLivextvReplayItems(
-          mergeSportsReplayShelfItems(
-            livextv.ok ? livextv.items : [],
-            fms.ok ? fms.items : [],
-            corner.ok ? corner.items : [],
-          ),
-        )
-      })
+      // Keep last good buckets for sources that failed this round.
+      publish()
     }
     void refresh()
     const timer = window.setInterval(() => {
@@ -1147,6 +1362,7 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
       syncTorrentWebsite,
       syncAllTorrentWebsites,
       streamedSports,
+      sportsReplaysLoading,
     }),
     [
       ready,
@@ -1170,6 +1386,7 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
       syncTorrentWebsite,
       syncAllTorrentWebsites,
       streamedSports,
+      sportsReplaysLoading,
     ],
   )
 

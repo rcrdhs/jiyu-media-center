@@ -41,7 +41,9 @@ function prefersAndroidWebView(url: string): boolean {
       host.endsWith('.freemovies.lol') ||
       host === 'eztv.re' ||
       host === 'eztvx.to' ||
-      host.endsWith('.eztv.re')
+      host.endsWith('.eztv.re') ||
+      host === 'footballorgin.com' ||
+      host.endsWith('.footballorgin.com')
     )
   } catch {
     return false

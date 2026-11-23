@@ -377,46 +377,85 @@ function syncPointerRect() {
 
 // ---------------------------------------------------------------- text fields
 
-// Focusing a text field on Android TV pops the on-screen keyboard at once, so a
-// D-pad pass over the search box would trap the user in the IME. Fields get
-// inputmode="none" while the remote is just passing through; OK opens the IME.
+// Focusing a text field on Android TV can pop the on-screen keyboard at once, so a
+// D-pad pass over search would trap the user in the IME. Inputs are locked with
+// readOnly while the remote is just passing through; OK clears it and opens the IME.
+// (inputmode="none" often blocks the TV keyboard for the rest of that focus session.)
 const IME_LOCK_ATTR = 'data-tv-ime-lock'
 const IME_ORIG_ATTR = 'data-tv-im-orig'
+const IME_RO_ORIG_ATTR = 'data-tv-ro-orig'
 
 function lockIme(el: HTMLElement) {
-  if (el.getAttribute(IME_LOCK_ATTR) === '1') return
+  if (el.getAttribute(IME_LOCK_ATTR) === '1' || el.getAttribute(IME_LOCK_ATTR) === 'open') return
+  el.setAttribute(IME_LOCK_ATTR, '1')
+  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+    el.setAttribute(IME_RO_ORIG_ATTR, el.readOnly ? '1' : '0')
+    el.readOnly = true
+    return
+  }
   const orig = el.getAttribute('inputmode')
   el.setAttribute(IME_ORIG_ATTR, orig ?? '')
-  el.setAttribute(IME_LOCK_ATTR, '1')
   el.setAttribute('inputmode', 'none')
 }
 
-function restoreInputMode(el: HTMLElement) {
+function restoreImeLock(el: HTMLElement) {
+  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+    const wasRo = el.getAttribute(IME_RO_ORIG_ATTR) === '1'
+    el.removeAttribute(IME_RO_ORIG_ATTR)
+    el.readOnly = wasRo
+    if (!wasRo) el.removeAttribute('readonly')
+  }
   const orig = el.getAttribute(IME_ORIG_ATTR)
-  if (orig) el.setAttribute('inputmode', orig)
-  else el.removeAttribute('inputmode')
-  el.removeAttribute(IME_ORIG_ATTR)
+  if (orig != null) {
+    if (orig) el.setAttribute('inputmode', orig)
+    else el.removeAttribute('inputmode')
+    el.removeAttribute(IME_ORIG_ATTR)
+  }
 }
 
-/** OK on a locked field: restore its input mode and ask Android TV for the keyboard.
+/** OK on a locked field: make it editable and ask Android TV for the keyboard.
  * Blur-then-focus does not open the Fire TV IME, and it drops the OK key. */
 function openIme(el: HTMLElement) {
   el.setAttribute(IME_LOCK_ATTR, 'open')
-  restoreInputMode(el)
-  // Fire TV has no password keyboard. Keep the field masked (type=password)
-  // but ask for the text keyboard.
-  if (el instanceof HTMLInputElement && (el.type || '').toLowerCase() === 'password') {
-    el.setAttribute('inputmode', 'text')
+  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+    el.readOnly = false
+    el.removeAttribute('readonly')
+    el.removeAttribute(IME_RO_ORIG_ATTR)
+    // Fire TV has no password keyboard. Keep the field masked (type=password)
+    // but ask for the text keyboard.
+    if ((el.type || '').toLowerCase() === 'password') {
+      el.setAttribute('inputmode', 'text')
+    } else if ((el.type || '').toLowerCase() === 'search') {
+      el.setAttribute('inputmode', 'search')
+    } else if (!el.getAttribute('inputmode')) {
+      el.setAttribute('inputmode', 'text')
+    }
+  } else {
+    const orig = el.getAttribute(IME_ORIG_ATTR)
+    if (orig) el.setAttribute('inputmode', orig)
+    else el.removeAttribute('inputmode')
+    el.removeAttribute(IME_ORIG_ATTR)
   }
   try {
     el.focus({ preventScroll: true })
   } catch {
     el.focus()
   }
+  try {
+    el.click()
+  } catch {
+    /* ignore */
+  }
   showTvSoftKeyboard()
   window.setTimeout(() => {
     if (document.activeElement === el) showTvSoftKeyboard()
   }, 80)
+  window.setTimeout(() => {
+    if (document.activeElement === el) showTvSoftKeyboard()
+  }, 220)
+  window.setTimeout(() => {
+    if (document.activeElement === el) showTvSoftKeyboard()
+  }, 480)
   if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
     try {
       const end = el.value.length
@@ -430,18 +469,18 @@ function openIme(el: HTMLElement) {
 function onFocusOut(e: FocusEvent) {
   const el = e.target instanceof HTMLElement ? e.target : null
   if (!el || !el.hasAttribute(IME_LOCK_ATTR)) return
-  // openIme() blurs and re-focuses — keep the "open" state across that hop.
+  // openIme() may briefly shuffle focus — keep the "open" state across that hop.
   if (el.getAttribute(IME_LOCK_ATTR) === 'open' && e.relatedTarget == null) {
     window.setTimeout(() => {
       if (document.activeElement !== el) {
         el.removeAttribute(IME_LOCK_ATTR)
-        restoreInputMode(el)
+        restoreImeLock(el)
       }
     }, 0)
     return
   }
   el.removeAttribute(IME_LOCK_ATTR)
-  restoreInputMode(el)
+  restoreImeLock(el)
 }
 
 /** Pointer / touch on a locked field means "type here". */
@@ -700,7 +739,7 @@ export function startTvNav(): () => void {
     document.removeEventListener('pointerdown', onPointerDown, true)
     document.querySelectorAll<HTMLElement>(`[${IME_LOCK_ATTR}]`).forEach((el) => {
       el.removeAttribute(IME_LOCK_ATTR)
-      restoreInputMode(el)
+      restoreImeLock(el)
     })
     window.removeEventListener('hashchange', onRoute)
     offMedia()

@@ -44,13 +44,12 @@ final class GeckoOverlayController {
   private static final String BRIDGE_RESOURCE = "resource://android/assets/jiyu-gecko-bridge/";
 
   /** Mirror MultiWebHost STREAMCORNER_BOOT_JS — pick a source and hide chat. */
-  private static final String STREAMCORNER_BOOT_JS =
+  static final String STREAMCORNER_BOOT_JS =
     "(function(){try{"
       + "var host=String(location.hostname||'').replace(/^www\\./i,'').toLowerCase();"
-      + "if(!/(^|\\.)streamcorner\\.(st|foo|cloud|fun)$/i.test(host)"
-      + "&&!/(^|\\.)streamninja\\.(st|foo|cloud|fun)$/i.test(host))return 'skip';"
+      + "if(!/(^|\\.)(streamcorner|strmcrnr|streamninja)\\.(st|foo|cloud|fun|top)$/i.test(host))return 'skip';"
       + "if(window!==window.top)return 'skip-frame';"
-      + "if(window.__jiyuCornerBoot)return 'bound';window.__jiyuCornerBoot=1;"
+      + "if(typeof window.__jiyuCornerSrcIdx!=='number')window.__jiyuCornerSrcIdx=0;"
       + "function clearBlockers(){try{"
       + "var style=document.getElementById('jiyu-corner-clear-blockers');"
       + "if(!style){style=document.createElement('style');style.id='jiyu-corner-clear-blockers';"
@@ -62,17 +61,36 @@ final class GeckoOverlayController {
       + "function hideChat(){try{"
       + "var btns=document.querySelectorAll('button,a,[role=button]');"
       + "for(var i=0;i<btns.length;i++){"
-      + "var t=String(btns[i].innerText||btns[i].textContent||'');"
-      + "if(/^\\s*Hide Chat\\s*$/i.test(t)){btns[i].click();break;}}"
+      + "var t=String(btns[i].innerText||btns[i].textContent||'').replace(/\\s+/g,' ').trim();"
+      + "if(/^Hide Chat$/i.test(t)){btns[i].click();break;}}"
       + "var style=document.getElementById('jiyu-corner-hide-chat');"
       + "if(!style){style=document.createElement('style');style.id='jiyu-corner-hide-chat';"
-      + "style.textContent='#player-chat,#player-chat-content{display:none!important;width:0!important;height:0!important;overflow:hidden!important;opacity:0!important;pointer-events:none!important;}';"
+      + "style.textContent='#player-chat,#player-chat-content,iframe[src*=\"streamcorner-chat\"],iframe[src*=\"chatroom=\"]"
+      + ",[id*=\"chat-room\"],[class*=\"chat-room\"],[class*=\"streamcorner-chat\"]"
+      + "{display:none!important;width:0!important;max-width:0!important;height:0!important;max-height:0!important;"
+      + "overflow:hidden!important;opacity:0!important;pointer-events:none!important;}"
       + "(document.documentElement||document.head||document.body).appendChild(style);}"
+      + "var chat=document.getElementById('player-chat');"
+      + "if(chat){chat.style.setProperty('display','none','important');}"
+      + "var frames=document.querySelectorAll('iframe');"
+      + "for(var f=0;f<frames.length;f++){"
+      + "var src=String(frames[f].src||frames[f].getAttribute('src')||'');"
+      + "if(/streamcorner-chat|chatroom=/i.test(src)){"
+      + "frames[f].style.setProperty('display','none','important');"
+      + "frames[f].setAttribute('data-jiyu-hide-chat','1');}}"
       + "}catch(e){}}"
-      + "function findPlayer(){try{var fs=document.querySelectorAll('iframe');"
-      + "for(var i=0;i<fs.length;i++){var src=String(fs[i].src||'');"
-      + "if(!src||/^(javascript:|about:)/i.test(src)||/streamcorner-chat|chatroom=/i.test(src))continue;"
-      + "var r=fs[i].getBoundingClientRect();if(r.width>120&&r.height>80)return fs[i];}return null;}catch(e){return null;}}"
+      + "function findPlayer(){try{"
+      + "var fs=document.querySelectorAll('iframe');"
+      + "for(var i=0;i<fs.length;i++){var src=String(fs[i].src||fs[i].getAttribute('src')||'');"
+      + "if(!/^https?:\\/\\//i.test(src)||/streamcorner-chat|chatroom=/i.test(src))continue;"
+      + "var r=fs[i].getBoundingClientRect();if(r.width>120&&r.height>80)return fs[i];}"
+      + "var bm=document.querySelector('[id*=\"bitmovin\"],[class*=\"bitmovin\"],.bmpui-container,[class*=\"bmpui-\"]');"
+      + "if(bm){var shell=bm.closest('[id*=\"player\"],[class*=\"player\"]')||bm;"
+      + "var br=shell.getBoundingClientRect();if(br.width>80&&br.height>60)return shell;}"
+      + "var vids=document.querySelectorAll('video');"
+      + "for(var v=0;v<vids.length;v++){var vr=vids[v].getBoundingClientRect();"
+      + "if(vr.width>80&&vr.height>60)return vids[v].closest('[id*=\"player\"],[class*=\"player\"]')||vids[v];}"
+      + "return null;}catch(e){return null;}}"
       + "function focusPlayer(){try{var player=findPlayer();if(!player)return false;"
       + "var tbs=document.querySelectorAll('button,a,[role=button]');"
       + "for(var i=0;i<tbs.length;i++){if(/^\\s*Theater Mode\\s*$/i.test(String(tbs[i].innerText||''))){tbs[i].click();break;}}"
@@ -81,8 +99,9 @@ final class GeckoOverlayController {
       + "style.textContent='html.jiyu-corner-only,html.jiyu-corner-only body{margin:0!important;padding:0!important;overflow:hidden!important;background:#000!important;width:100%!important;height:100%!important;}"
       + "html.jiyu-corner-only .stream-navbar,html.jiyu-corner-only header,html.jiyu-corner-only nav,html.jiyu-corner-only footer,"
       + "html.jiyu-corner-only #player-chat,html.jiyu-corner-only #player-chat-content,html.jiyu-corner-only .night-page-backdrop,"
-      + "html.jiyu-corner-only [class*=\"reminder\"],html.jiyu-corner-only aside{display:none!important;}"
-      + "html.jiyu-corner-only iframe.jiyu-corner-player{position:fixed!important;inset:0!important;width:100vw!important;height:100vh!important;"
+      + "html.jiyu-corner-only [class*=\"reminder\"],html.jiyu-corner-only aside,"
+      + "html.jiyu-corner-only iframe[src*=\"streamcorner-chat\"],html.jiyu-corner-only iframe[src*=\"chatroom=\"]{display:none!important;}"
+      + "html.jiyu-corner-only .jiyu-corner-player{position:fixed!important;inset:0!important;width:100vw!important;height:100vh!important;"
       + "max-width:none!important;max-height:none!important;border:0!important;z-index:2147483000!important;background:#000!important;}';"
       + "(document.documentElement||document.head||document.body).appendChild(style);}"
       + "document.documentElement.classList.add('jiyu-corner-only');"
@@ -103,20 +122,249 @@ final class GeckoOverlayController {
       + "if(sib.id&&/^jiyu-corner-/i.test(sib.id))continue;"
       + "sib.style.setProperty('display','none','important');}}"
       + "node=node.parentElement;}return true;}catch(e){return false;}}"
-      + "function pick(){try{clearBlockers();if(findPlayer()){focusPlayer();return 'has-player';}"
-      + "var sources=document.querySelectorAll('button.stream-source-btn');"
-      + "if(sources.length){sources[0].click();"
+      + "function reactClick(el){try{if(!el)return false;var keys=Object.keys(el);"
+      + "for(var i=0;i<keys.length;i++){"
+      + "if(keys[i].indexOf('__reactProps')!==0&&keys[i].indexOf('__reactEventHandlers')!==0)continue;"
+      + "var p=el[keys[i]];if(!p)continue;"
+      + "var fn=p.onClick||(p.onPointerUp)||(p.onMouseDown);"
+      + "if(typeof fn==='function'){fn.call(el,{bubbles:true,cancelable:true,target:el,currentTarget:el,"
+      + "preventDefault:function(){},stopPropagation:function(){},nativeEvent:{}});return true;}}"
+      + "return false;}catch(e){return false;}}"
+      + "function hardClick(el){try{if(!el)return false;"
+      + "try{el.scrollIntoView({block:'center',inline:'nearest'});}catch(e){}"
+      + "reactClick(el);"
+      + "var r=el.getBoundingClientRect();"
+      + "var x=Math.max(2,Math.min((r.left+r.width/2)||1,window.innerWidth-2));"
+      + "var y=Math.max(2,Math.min((r.top+r.height/2)||1,window.innerHeight-2));"
+      + "var t=document.elementFromPoint(x,y)||el;"
+      + "reactClick(t);"
+      + "var opts={bubbles:true,cancelable:true,view:window,clientX:x,clientY:y,buttons:1};"
+      + "['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(type){"
+      + "try{var Ev=type.indexOf('pointer')===0?PointerEvent:MouseEvent;t.dispatchEvent(new Ev(type,opts));}catch(e){}});"
+      + "try{t.click();}catch(e){}try{el.click();}catch(e){}return true;}catch(e){return false;}}"
+      + "function listSources(){try{var out=[],seen=new Set();"
+      + "function add(el){if(!el)return;var card=el;"
+      + "for(var u=0;u<8&&card;u++){"
+      + "var rr=card.getBoundingClientRect();"
+      + "var t=String(card.innerText||'').replace(/\\s+/g,' ').trim();"
+      + "if(rr.width>140&&rr.height>40&&rr.height<220&&t.length>2&&t.length<180"
+      + "&&!/AVAILABLE SOURCES|CONTROLS|Hide Chat|Float Chat|Reload|BITMOVIN|STREAMCORNER CHAT/i.test(t))break;"
+      + "card=card.parentElement;}"
+      + "if(!card||seen.has(card))return;seen.add(card);out.push(card);}"
+      + "var root=document.body;var hs=document.querySelectorAll('h1,h2,h3,h4,div,span,p,section');"
+      + "for(var h=0;h<hs.length;h++){"
+      + "if(/^AVAILABLE SOURCES$/i.test(String(hs[h].textContent||'').replace(/\\s+/g,' ').trim())){"
+      + "root=hs[h].parentElement||hs[h];break;}}"
+      + "var nodes=root.querySelectorAll('button,a,[role=button],div,li,label');"
+      + "for(var j=0;j<nodes.length;j++){"
+      + "var t=String(nodes[j].innerText||'').replace(/\\s+/g,' ').trim();"
+      + "if(t.length<3||t.length>160)continue;"
+      + "if(/AVAILABLE SOURCES|CONTROLS|Hide Chat|Float Chat|Reload Player|BITMOVIN|Loading up|SELECT A SOURCE|STREAMCORNER CHAT|Keep it friendly/i.test(t))continue;"
+      + "if(/^(HD|SD|FHD|UHD|4K)\\b/i.test(t)||/\\b(BEIN|ESPN|DAZN|SKY|SPORTS?|LIGUE|PREMIER|ESPA.?OL)\\b/i.test(t))"
+      + "add(nodes[j]);}"
+      + "var btns=document.querySelectorAll('button.stream-source-btn,[class*=\"stream-source\"],[class*=\"source-card\"]');"
+      + "for(var i=0;i<btns.length;i++)add(btns[i]);"
+      + "return out;}catch(e){return[];}}"
+      + "function clickPlay(){try{"
+      + "var bs=document.querySelectorAll('button,a,[role=button],div');"
+      + "for(var i=0;i<bs.length;i++){"
+      + "var el=bs[i];var t=String(el.innerText||el.textContent||'').replace(/\\s+/g,' ').trim();"
+      + "var al=String(el.getAttribute('aria-label')||el.title||'');"
+      + "if(/^PLAY$/i.test(t)||/^play$/i.test(al)){hardClick(el);return true;}}"
+      + "var nodes=document.querySelectorAll('div,section,button,a');"
+      + "for(var k=0;k<nodes.length;k++){"
+      + "var nt=String(nodes[k].innerText||'').replace(/\\s+/g,' ').trim();"
+      + "if(!/SELECT A SOURCE TO START PLAYBACK/i.test(nt)||nt.length>180)continue;"
+      + "hardClick(nodes[k].querySelector('button,a,[role=button]')||nodes[k]);return true;}"
+      + "var vids=document.querySelectorAll('video');"
+      + "for(var v=0;v<vids.length;v++){try{vids[v].muted=true;var p=vids[v].play();if(p&&p.catch)p.catch(function(){});}catch(e){}}"
+      + "return false;}catch(e){return false;}}"
+      + "function needsSource(){try{"
+      + "return /SELECT A SOURCE TO START PLAYBACK/i.test(String((document.body&&document.body.innerText)||''));"
+      + "}catch(e){return false;}}"
+      + "function hasPlayingVideo(){try{"
+      + "var vids=document.querySelectorAll('video');"
+      + "for(var i=0;i<vids.length;i++){var v=vids[i];if((v.currentSrc||v.src)&&!v.paused&&v.readyState>=2)return true;}"
+      + "return false;}catch(e){return false;}}"
+      + "function kick(){try{hideChat();"
+      + "var sources=listSources();"
+      + "if(sources.length){hardClick(sources[(window.__jiyuCornerSrcIdx||0)%sources.length]);}"
+      + "clickPlay();"
       + "var bs=document.querySelectorAll('button,a,[role=button]');"
-      + "for(var j=0;j<bs.length;j++){if(/^\\s*PLAY\\s*$/i.test(String(bs[j].innerText||''))){bs[j].click();break;}}"
-      + "return 'source';}"
-      + "var bs=document.querySelectorAll('button,a,[role=button]');"
-      + "for(var i=0;i<bs.length;i++){if(/^\\s*PLAY\\s*$/i.test(String(bs[i].innerText||''))){bs[i].click();return 'play';}}"
-      + "return 'wait';}catch(e){return 'error';}}"
-      + "clearBlockers();hideChat();pick();var n=0;"
-      + "var tick=setInterval(function(){n++;clearBlockers();hideChat();var st=pick();"
-      + "if(st==='has-player'){focusPlayer();if(n>=16)clearInterval(tick);return;}"
-      + "if(n>=30)clearInterval(tick);},900);"
+      + "for(var i=0;i<bs.length;i++){"
+      + "if(/^Reload Player$/i.test(String(bs[i].innerText||'').replace(/\\s+/g,' ').trim()))hardClick(bs[i]);}"
+      + "var vids=document.querySelectorAll('video');"
+      + "for(var v=0;v<vids.length;v++){try{vids[v].muted=true;var p=vids[v].play();if(p&&p.catch)p.catch(function(){});}catch(e){}}"
+      + "if(hasPlayingVideo()){focusPlayer();return 'has-player';}"
+      + "if(needsSource())return 'need-source';"
+      + "return sources.length?'source':'wait';}catch(e){return 'error';}}"
+      + "if(window.__jiyuCornerBoot){clearBlockers();return kick();}"
+      + "window.__jiyuCornerBoot=1;clearBlockers();hideChat();kick();var n=0;"
+      + "var tick=setInterval(function(){n++;clearBlockers();var st=kick();"
+      + "if(st==='has-player'){if(n>=20)clearInterval(tick);return;}"
+      + "if(n%3===0)window.__jiyuCornerSrcIdx=(window.__jiyuCornerSrcIdx||0)+1;"
+      + "if(n>=70)clearInterval(tick);},600);"
       + "return 'ok';}catch(e){return 'error'}})();";
+
+  /**
+   * Return CSS-pixel center of the StreamCorner source card or PLAY control.
+   * Used with MotionEvent taps — React ignores synthetic clicks alone.
+   */
+  static final String STREAMCORNER_TAP_RECT_JS =
+    "(function(){try{"
+      + "if(window!==window.top)return JSON.stringify({ok:false,skip:1});"
+      + "var host=String(location.hostname||'').replace(/^www\\./i,'').toLowerCase();"
+      + "if(!/(^|\\.)(streamcorner|strmcrnr|streamninja)\\.(st|foo|cloud|fun|top)$/i.test(host))"
+      + "return JSON.stringify({ok:false,skip:1});"
+      + "var vv=window.visualViewport;var vw=(vv&&vv.width)||window.innerWidth||0;"
+      + "var vh=(vv&&vv.height)||window.innerHeight||0;var offX=vv?vv.offsetLeft:0;var offY=vv?vv.offsetTop:0;"
+      + "function box(el,kind){if(!el)return null;try{el.scrollIntoView({block:'center',inline:'nearest'});}catch(e){}"
+      + "var r=el.getBoundingClientRect();if(!r||r.width<24||r.height<18)return null;"
+      + "return {ok:true,kind:kind,cx:r.left+r.width/2-offX,cy:r.top+r.height/2-offY,vw:vw,vh:vh};}"
+      + "function reactClick(el){try{if(!el)return;var keys=Object.keys(el);"
+      + "for(var i=0;i<keys.length;i++){"
+      + "if(keys[i].indexOf('__reactProps')!==0&&keys[i].indexOf('__reactEventHandlers')!==0)continue;"
+      + "var p=el[keys[i]];var fn=p&&(p.onClick||p.onPointerUp||p.onMouseDown);"
+      + "if(typeof fn==='function'){fn.call(el,{bubbles:true,cancelable:true,target:el,currentTarget:el,"
+      + "preventDefault:function(){},stopPropagation:function(){},nativeEvent:{}});return;}}}catch(e){}}"
+      + "var vids=document.querySelectorAll('video');"
+      + "for(var v=0;v<vids.length;v++){"
+      + "var vid=vids[v];if((vid.currentSrc||vid.src)&&!vid.paused&&vid.readyState>=2)"
+      + "return JSON.stringify({ok:true,playing:true});}"
+      + "var bodyText='';try{bodyText=String((document.body&&document.body.innerText)||'');}catch(e){}"
+      + "var need=/SELECT A SOURCE TO START PLAYBACK/i.test(bodyText);"
+      + "function pickSource(){var root=document.body;var hs=document.querySelectorAll('h1,h2,h3,h4,div,span,p,section');"
+      + "for(var h=0;h<hs.length;h++){"
+      + "if(/^AVAILABLE SOURCES$/i.test(String(hs[h].textContent||'').replace(/\\s+/g,' ').trim())){"
+      + "root=hs[h].parentElement||hs[h];break;}}"
+      + "var nodes=(root||document).querySelectorAll('button,a,[role=button],div,li,label');"
+      + "var best=null,bestA=0;"
+      + "for(var j=0;j<nodes.length;j++){"
+      + "var t=String(nodes[j].innerText||'').replace(/\\s+/g,' ').trim();"
+      + "if(t.length<3||t.length>160)continue;"
+      + "if(/AVAILABLE SOURCES|CONTROLS|Hide Chat|Float Chat|Reload Player|BITMOVIN|Loading up|"
+      + "SELECT A SOURCE|STREAMCORNER CHAT|Keep it friendly|^PLAY$/i.test(t))continue;"
+      + "if(!/^(HD|SD|FHD|UHD|4K)\\b/i.test(t)&&!/\\b(BEIN|ESPN|DAZN|SKY|SPORTS?|LIGUE|PREMIER|ESPA.?OL|FOX|TNT|NBC|CBS|ABC)\\b/i.test(t))continue;"
+      + "var rr=nodes[j].getBoundingClientRect();if(!rr||rr.width<80||rr.height<28||rr.height>220)continue;"
+      + "var a=rr.width*rr.height;if(a>bestA){best=nodes[j];bestA=a;}}"
+      + "return best;}"
+      + "function pickPlay(){var nodes=document.querySelectorAll('button,a,[role=button],div');"
+      + "var best=null,bestA=0;"
+      + "for(var i=0;i<nodes.length;i++){"
+      + "var el=nodes[i];var t=String(el.innerText||el.textContent||'').replace(/\\s+/g,' ').trim();"
+      + "var al=String(el.getAttribute('aria-label')||el.title||'');"
+      + "if(!/^PLAY$/i.test(t)&&!/^play$/i.test(al))continue;"
+      + "var r=el.getBoundingClientRect();if(!r||r.width<40||r.height<24)continue;"
+      + "var a=r.width*r.height;if(a>bestA){best=el;bestA=a;}}return best;}"
+      + "var src=pickSource();"
+      + "if(need&&src){reactClick(src);var b=box(src,'source');if(b)return JSON.stringify(b);}"
+      + "var play=pickPlay();"
+      + "if(play){reactClick(play);var pb=box(play,'play');if(pb)return JSON.stringify(pb);}"
+      + "if(src){reactClick(src);var sb=box(src,'source');if(sb)return JSON.stringify(sb);}"
+      + "return JSON.stringify({ok:false});"
+      + "}catch(e){return JSON.stringify({ok:false});}})()";
+
+  /**
+   * Soft Google "viral trick" notification tiles on any sports/replay embed.
+   * Soft-allow still loads ad scripts so the player mounts; this only strips the overlay DOM.
+   */
+  private static final String REPLAY_VIRAL_SCRUB_JS =
+    "(function(){try{"
+      + "if(window.__jiyuViralScrub)return 'viral-bound';window.__jiyuViralScrub=1;"
+      + "function looks(t){if(!t)return false;"
+      + "if(/going viral|simple trick|thousands of people|why thousands|is going viral/i.test(t)&&t.length<280)return true;"
+      + "if(/You received a message!?/i.test(t))return true;"
+      + "if(/You have (?:a |received a )?message!?/i.test(t))return true;"
+      + "if(/A Surprise Is Waiting/i.test(t)&&/OPEN\\\\s*NOW/i.test(t))return true;"
+      + "return false;}"
+      + "function hide(){try{"
+      + "var nodes=document.querySelectorAll('div,section,aside,article');"
+      + "for(var i=0;i<nodes.length;i++){var el=nodes[i];"
+      + "if(!el||el.getAttribute('data-jiyu-ad-hide')==='1')continue;"
+      + "if(el.querySelector&&el.querySelector('video'))continue;"
+      + "var text='';try{text=String(el.innerText||el.textContent||'');}catch(e){continue;}"
+      + "text=text.replace(/\\\\s+/g,' ').trim();"
+      + "if(!text||text.length>360||!looks(text))continue;"
+      + "var target=el;"
+      + "for(var d=0;d<6&&target.parentElement;d++){"
+      + "var p=target.parentElement;"
+      + "if(!p||p===document.body||p===document.documentElement)break;"
+      + "var st=window.getComputedStyle(p);var pos=st?String(st.position||''):'';"
+      + "if(pos==='fixed'||pos==='absolute'||pos==='sticky'){target=p;break;}"
+      + "var pt='';try{pt=String(p.innerText||'').replace(/\\\\s+/g,' ').trim();}catch(e){}"
+      + "if(pt&&pt.length<=text.length+64&&looks(pt)){target=p;continue;}break;}"
+      + "if(target.querySelector&&target.querySelector('video'))continue;"
+      + "try{target.setAttribute('data-jiyu-ad-hide','1');"
+      + "target.style.setProperty('display','none','important');"
+      + "target.style.setProperty('visibility','hidden','important');"
+      + "target.style.setProperty('pointer-events','none','important');"
+      + "target.style.setProperty('opacity','0','important');"
+      + "try{target.remove();}catch(e){}}catch(e){}}}"
+      + "}catch(e){}}hide();"
+      + "try{new MutationObserver(function(){hide();})"
+      + ".observe(document.documentElement,{childList:true,subtree:true});"
+      + "setInterval(hide,1500);}catch(e){}"
+      + "return 'viral-ok';}catch(e){return 'viral-err'}})();";
+
+  /**
+   * Playmogo / DoodStream: soft-allow Google ads so the player mounts, then scrub
+   * visual creatives (anime interstitial, viral banners, network-error card) and kick play.
+   * Mirrors electron scheduleBrowserAdShield playmogo scrub + PLAYMOGO_CLEANUP_SCRIPT.
+   */
+  private static final String PLAYMOGO_BOOT_JS =
+    "(function(){try{"
+      + "var h=String(location.hostname||'').replace(/^www\\./i,'').toLowerCase();"
+      + "var path=String(location.pathname||'');"
+      + "var on=h==='playmogo.com'||h.indexOf('.playmogo.com')>=0"
+      + "||(/^\\/e\\/[a-z0-9]{6,}/i.test(path)&&/(playmogo|dood)/i.test(h));"
+      + "if(!on)return 'pm-none';"
+      + "if(window.__jiyuPmClean)return 'pm-bound';window.__jiyuPmClean=1;"
+      + "function hide(el){try{if(!el||el.getAttribute('data-jiyu-pm')==='1')return;"
+      + "el.setAttribute('data-jiyu-pm','1');"
+      + "el.style.setProperty('display','none','important');"
+      + "el.style.setProperty('visibility','hidden','important');"
+      + "el.style.setProperty('pointer-events','none','important');"
+      + "el.style.setProperty('opacity','0','important');"
+      + "try{el.remove();}catch(e){}}catch(e){}}"
+      + "function looks(el){try{"
+      + "var st=window.getComputedStyle(el);if(!st)return false;"
+      + "var pos=String(st.position||'');if(pos!=='fixed'&&pos!=='absolute'&&pos!=='sticky')return false;"
+      + "var r=el.getBoundingClientRect();if(r.width<100||r.height<80)return false;"
+      + "if(el.querySelector&&el.querySelector('video'))return false;"
+      + "var t=String(el.innerText||el.textContent||'').replace(/\\s+/g,' ').trim();"
+      + "var hasPlay=/^\\s*play\\s*$/i.test(t)||(/\\bplay\\b/i.test(t)&&t.length<48);"
+      + "var hasImg=!!(el.querySelector&&el.querySelector('img,canvas,picture'));"
+      + "if(hasPlay&&hasImg)return true;"
+      + "if(/get\\s*link|continue|click\\s*here|download\\s*now/i.test(t)&&r.width>Math.min(280,window.innerWidth*0.35))return true;"
+      + "if(/getlink|get-link|dlbutton|downloadn/i.test(String(el.id||'')+' '+String(el.className||'')))return true;"
+      + "if(/going viral|simple trick|thousands of people|why thousands|is going viral/i.test(t)&&r.width>140)return true;"
+      + "if(hasImg&&r.width>=Math.min(180,window.innerWidth*0.42)&&r.height>=Math.min(160,window.innerHeight*0.28)"
+      + "&&r.left<window.innerWidth*0.75&&r.top<window.innerHeight*0.85&&t.length<80)return true;"
+      + "return false;}catch(e){return false;}}"
+      + "function scrub(){try{"
+      + "if(!document.getElementById('jiyu-pm-hide')){var css=document.createElement('style');css.id='jiyu-pm-hide';"
+      + "css.textContent='iframe[src*=\"googlesyndication\"],iframe[src*=\"doubleclick\"],iframe[src*=\"googleadservices\"],"
+      + "iframe[id*=\"google_ads\"],ins.adsbygoogle,[id*=\"google_ads_iframe\"],[class*=\"adsbygoogle\"]{"
+      + "display:none!important;visibility:hidden!important;pointer-events:none!important;width:0!important;height:0!important;opacity:0!important;}';"
+      + "(document.head||document.documentElement).appendChild(css);}"
+      + "var nodes=document.querySelectorAll('div,section,aside,a,button,ins,iframe');"
+      + "for(var i=0;i<nodes.length;i++){var el=nodes[i];if(!el||el.getAttribute('data-jiyu-pm')==='1')continue;"
+      + "var idc=(String(el.id||'')+' '+String(el.className||'')).toLowerCase();"
+      + "if(/getlink|get-link|dlbutton|downloadn|pop-under|popunder|ol-ads|adsbygoogle|google_ads/.test(idc)){hide(el);continue;}"
+      + "try{var src=String(el.getAttribute&&el.getAttribute('src')||el.src||'');"
+      + "if(/googlesyndication|doubleclick|googleadservices|pagead\\/html/i.test(src)){hide(el);continue;}}catch(e){}"
+      + "var txt=String(el.innerText||'').replace(/\\s+/g,' ').trim();"
+      + "if(/Network error!?\\s*Please reload/i.test(txt)&&txt.length<220){hide(el);continue;}"
+      + "if(looks(el))hide(el);}"
+      + "var vids=document.querySelectorAll('video');"
+      + "for(var v=0;v<vids.length;v++){var video=vids[v];if(!video)continue;"
+      + "if(video.error||video.networkState===3){try{video.load();}catch(e){}}"
+      + "if(video.paused){try{var p=video.play();if(p&&p.catch)p.catch(function(){});}catch(e){}}}"
+      + "}catch(e){}}"
+      + "scrub();"
+      + "try{new MutationObserver(function(){scrub();}).observe(document.documentElement,{childList:true,subtree:true});}catch(e){}"
+      + "setInterval(scrub,1500);"
+      + "return 'pm-ok';}catch(e){return 'pm-err'}})();";
 
   private static GeckoRuntime sRuntime;
   private static WebExtension sBridgeExtension;
@@ -157,10 +405,55 @@ final class GeckoOverlayController {
   @Nullable private Runnable pageStopListener;
   /** Active embed→media URL probe (Media3 path). */
   @Nullable private MediaResolveProbe mediaProbe;
+  /** Last sniffable playlist/segment seen while a sports page is open (late Media3 promote). */
+  @Nullable private String lastLiveMediaUrl = "";
+  @Nullable private String lastLiveMediaPage = "";
 
   interface MediaResolveCallback {
     void onResult(@Nullable String mediaUrl, @Nullable String pageUrl, @Nullable String error);
   }
+
+  /** Shared scrape used by Media3 unwrap polls and sniffCurrentMedia. */
+  static final String MEDIA_SNIFF_JS =
+    "(() => {try{"
+      + "if(!window.__jiyuMediaHook){"
+      + "window.__jiyuMediaHook=1;window.__jiyuMediaHits=[];"
+      + "const push=u=>{try{const s=String(u||'');"
+      + "if(/m3u8|\\.mpd|format=m3u8|\\/hls\\/|\\.m4s|mime=video/i.test(s))"
+      + "window.__jiyuMediaHits.push(s);}catch(e){}};"
+      + "const of=window.fetch;if(typeof of==='function'){"
+      + "window.fetch=function(i,n){try{push(i&&i.url?i.url:i);}catch(e){}"
+      + "return of.apply(this,arguments);};}"
+      + "const xo=XMLHttpRequest.prototype.open;"
+      + "XMLHttpRequest.prototype.open=function(m,u){try{push(u);}catch(e){}"
+      + "return xo.apply(this,arguments);};"
+      + "try{const po=new PerformanceObserver(function(list){"
+      + "list.getEntries().forEach(function(e){push(e&&e.name);});});"
+      + "po.observe({type:'resource',buffered:true});}catch(e){}"
+      + "}"
+      + "const urls=[...(window.__jiyuMediaHits||[])];"
+      + "window.__jiyuMediaHits=[];"
+      + "document.querySelectorAll('video').forEach(v=>{"
+      + "if(v.currentSrc)urls.push(v.currentSrc);if(v.src)urls.push(v.src);"
+      + "v.querySelectorAll('source').forEach(s=>{if(s.src)urls.push(s.src);});"
+      + "});"
+      + "try{performance.getEntriesByType('resource').forEach(function(e){"
+      + "if(e&&e.name)urls.push(e.name);});}catch(e){}"
+      + "try{const html=String(document.documentElement&&document.documentElement.innerHTML||'');"
+      + "const re=/https?:\\\\/\\\\/[^\\\\s\"'<>]+\\\\.m3u8[^\\\\s\"'<>]*/gi;let m;"
+      + "while((m=re.exec(html)))urls.push(m[0]);}catch(e){}"
+      // Bitmovin Player API (StreamCorner) — getSource().hls after playback starts.
+      + "try{if(window.bitmovin&&window.bitmovin.player){"
+      + "document.querySelectorAll('[id]').forEach(function(el){"
+      + "try{const p=window.bitmovin.player(el.id);if(!p||typeof p.getSource!=='function')return;"
+      + "const s=p.getSource();if(!s)return;"
+      + "if(s.hls)urls.push(String(s.hls));if(s.dash)urls.push(String(s.dash));"
+      + "const pr=s.progressive;const list=Array.isArray(pr)?pr:(pr?[pr]:[]);"
+      + "list.forEach(function(x){if(x&&x.url)urls.push(String(x.url));});"
+      + "}catch(e){}});}}catch(e){}"
+      + "return urls.filter(Boolean).slice(0,24).join('\\n');"
+      + "}catch(e){return '';}})()";
+
 
   private static final class MediaResolveProbe {
     final String pageUrl;
@@ -279,6 +572,7 @@ final class GeckoOverlayController {
     playTapCount = 0;
     playBlindTaps = 0;
     playWatchGen = 0;
+    cornerKickGen++;
   }
 
   void tapTwice(float normX, float normY) {
@@ -526,9 +820,33 @@ final class GeckoOverlayController {
           streamRefererBounces = 0;
           showLoadCover(false);
           emitNav();
-          if (live.contains("streamcorner") || live.contains("streamninja")) {
-            main.post(() -> evaluateJavascript(STREAMCORNER_BOOT_JS, null));
-            main.postDelayed(() -> evaluateJavascript(STREAMCORNER_BOOT_JS, null), 1200);
+          if (live.contains("streamcorner") || live.contains("strmcrnr") || live.contains("streamninja")) {
+            // SPA mounts sources late; keep boot + native source/PLAY taps alive.
+            // Install media hooks early so Bitmovin HLS URLs are caught for Media3 promote.
+            main.post(() -> {
+              evaluateJavascript(MEDIA_SNIFF_JS, null);
+              evaluateJavascript(STREAMCORNER_BOOT_JS, null);
+              kickStreamCornerPlayback();
+            });
+            main.postDelayed(() -> evaluateJavascript(STREAMCORNER_BOOT_JS, null), 800);
+            main.postDelayed(() -> {
+              evaluateJavascript(MEDIA_SNIFF_JS, null);
+              evaluateJavascript(STREAMCORNER_BOOT_JS, null);
+            }, 2000);
+            main.postDelayed(() -> evaluateJavascript(STREAMCORNER_BOOT_JS, null), 4500);
+          }
+          if (
+            BrowserAdBlock.isPlayerEmbedHost(live)
+              || BrowserAdBlock.isReplayAdSensitiveUrl(live)
+          ) {
+            main.post(() -> evaluateJavascript(REPLAY_VIRAL_SCRUB_JS, null));
+            main.postDelayed(() -> evaluateJavascript(REPLAY_VIRAL_SCRUB_JS, null), 900);
+            main.postDelayed(() -> evaluateJavascript(REPLAY_VIRAL_SCRUB_JS, null), 2500);
+          }
+          if (isPlaymogoUrl(live)) {
+            main.post(() -> evaluateJavascript(PLAYMOGO_BOOT_JS, null));
+            main.postDelayed(() -> evaluateJavascript(PLAYMOGO_BOOT_JS, null), 800);
+            main.postDelayed(() -> evaluateJavascript(PLAYMOGO_BOOT_JS, null), 2200);
           }
           if (pageStopListener != null) {
             Runnable listener = pageStopListener;
@@ -562,7 +880,14 @@ final class GeckoOverlayController {
             restorePlayerEmbedIfNeeded("external-scheme");
             return GeckoResult.fromValue(AllowOrDeny.DENY);
           }
-          if (BrowserAdBlock.shouldBlockNavigation(uri)) {
+          String softPage =
+            BrowserAdBlock.isReplayAdSensitiveUrl(currentUrl)
+              ? currentUrl
+              : lastPlayerEmbedUrl;
+          if (
+            BrowserAdBlock.shouldBlockNavigation(uri)
+              && !BrowserAdBlock.softAllowAdOnReplayPage(softPage, uri)
+          ) {
             android.util.Log.w("JiyuGecko", "denied ad/hijack nav " + safeUrl(uri));
             restorePlayerEmbedIfNeeded("blocked-nav");
             return GeckoResult.fromValue(AllowOrDeny.DENY);
@@ -578,7 +903,8 @@ final class GeckoOverlayController {
               : lastPlayerEmbedUrl;
           if (topLevel
             && BrowserAdBlock.isPlayerEmbedHost(lockedFrom)
-            && !BrowserAdBlock.isAllowedPlayerNav(lockedFrom, uri)) {
+            && !BrowserAdBlock.isAllowedPlayerNav(lockedFrom, uri)
+            && !BrowserAdBlock.softAllowAdOnReplayPage(lockedFrom, uri)) {
             android.util.Log.w("JiyuGecko", "denied embed hijack " + safeUrl(uri));
             restorePlayerEmbedIfNeeded("embed-hijack");
             return GeckoResult.fromValue(AllowOrDeny.DENY);
@@ -597,7 +923,14 @@ final class GeckoOverlayController {
               android.util.Log.w("JiyuGecko", "denied subframe external scheme " + safeUrl(request.uri));
               return GeckoResult.fromValue(AllowOrDeny.DENY);
             }
-            if (BrowserAdBlock.shouldBlockNavigation(request.uri)) {
+            String softPage =
+              BrowserAdBlock.isReplayAdSensitiveUrl(currentUrl)
+                ? currentUrl
+                : lastPlayerEmbedUrl;
+            if (
+              BrowserAdBlock.shouldBlockNavigation(request.uri)
+                && !BrowserAdBlock.softAllowAdOnReplayPage(softPage, request.uri)
+            ) {
             android.util.Log.w("JiyuGecko", "denied subframe ad " + safeUrl(request.uri));
             return GeckoResult.fromValue(AllowOrDeny.DENY);
             }
@@ -620,6 +953,8 @@ final class GeckoOverlayController {
           Boolean hasUserGesture
         ) {
           if (url != null && !url.isEmpty()) {
+            // Top-level hijacks onto ad domains always restore — soft Google-ads
+            // allow is only for subframe/script loads while staying on the player.
             if (BrowserAdBlock.shouldBlockNavigation(url)) {
               android.util.Log.w("JiyuGecko", "restore after location hijack " + safeUrl(url));
               showLoadCover(true);
@@ -748,12 +1083,18 @@ final class GeckoOverlayController {
           GeckoSession s,
           GeckoSession.NavigationDelegate.LoadRequest request
         ) {
-          if (request != null && BrowserAdBlock.shouldBlockNavigation(request.uri)) {
-            android.util.Log.w("JiyuGecko", "denied tile stream-referer " + safeUrl(request.uri));
-            return GeckoResult.fromValue(AllowOrDeny.DENY);
-          }
-          if (request != null && BrowserAdBlock.isExternalAppScheme(request.uri)) {
-            return GeckoResult.fromValue(AllowOrDeny.DENY);
+          if (request != null) {
+            String page = currentUrl != null && !currentUrl.isEmpty() ? currentUrl : lastPlayerEmbedUrl;
+            if (
+              BrowserAdBlock.shouldBlockNavigation(request.uri)
+                && !BrowserAdBlock.softAllowAdOnReplayPage(page, request.uri)
+            ) {
+              android.util.Log.w("JiyuGecko", "denied tile stream-referer " + safeUrl(request.uri));
+              return GeckoResult.fromValue(AllowOrDeny.DENY);
+            }
+            if (BrowserAdBlock.isExternalAppScheme(request.uri)) {
+              return GeckoResult.fromValue(AllowOrDeny.DENY);
+            }
           }
           return GeckoResult.fromValue(AllowOrDeny.ALLOW);
         }
@@ -763,11 +1104,17 @@ final class GeckoOverlayController {
           GeckoSession s,
           GeckoSession.NavigationDelegate.LoadRequest request
         ) {
-          if (request != null && (
-            BrowserAdBlock.shouldBlockNavigation(request.uri)
-              || BrowserAdBlock.isExternalAppScheme(request.uri)
-          )) {
-            return GeckoResult.fromValue(AllowOrDeny.DENY);
+          if (request != null) {
+            if (BrowserAdBlock.isExternalAppScheme(request.uri)) {
+              return GeckoResult.fromValue(AllowOrDeny.DENY);
+            }
+            String page = currentUrl != null && !currentUrl.isEmpty() ? currentUrl : lastPlayerEmbedUrl;
+            if (
+              BrowserAdBlock.shouldBlockNavigation(request.uri)
+                && !BrowserAdBlock.softAllowAdOnReplayPage(page, request.uri)
+            ) {
+              return GeckoResult.fromValue(AllowOrDeny.DENY);
+            }
           }
           return GeckoResult.fromValue(AllowOrDeny.ALLOW);
         }
@@ -973,6 +1320,95 @@ final class GeckoOverlayController {
     } catch (Throwable ignored) {}
   }
 
+  private int cornerKickGen;
+  private static final int CORNER_KICK_MAX = 36;
+  private static final int CORNER_KICK_INTERVAL_MS = 550;
+
+  /**
+   * StreamCorner: repeatedly find AVAILABLE SOURCES / PLAY via page JS, then
+   * MotionEvent-tap those CSS coords. Synthetic clicks alone leave SELECT A SOURCE idle.
+   */
+  void kickStreamCornerPlayback() {
+    int gen = ++cornerKickGen;
+    runStreamCornerKick(gen, 0);
+  }
+
+  private void runStreamCornerKick(int gen, int attempt) {
+    if (gen != cornerKickGen) return;
+    if (attempt >= CORNER_KICK_MAX) return;
+    String live = currentUrl == null ? "" : currentUrl;
+    if (
+      !live.contains("streamcorner")
+        && !live.contains("strmcrnr")
+        && !live.contains("streamninja")
+    ) {
+      return;
+    }
+    if (view == null || session == null || view.getVisibility() != View.VISIBLE) {
+      main.postDelayed(() -> runStreamCornerKick(gen, attempt + 1), CORNER_KICK_INTERVAL_MS);
+      return;
+    }
+    if (loading) {
+      main.postDelayed(() -> runStreamCornerKick(gen, attempt + 1), CORNER_KICK_INTERVAL_MS);
+      return;
+    }
+    evaluateJavascript(STREAMCORNER_BOOT_JS, null);
+    evaluateJavascript(
+      STREAMCORNER_TAP_RECT_JS,
+      raw -> {
+        if (gen != cornerKickGen) return;
+        JSONObject o = parseCornerTapResult(raw);
+        if (o != null && o.optBoolean("playing")) {
+          android.util.Log.i("JiyuGecko", "streamcorner kick: playing");
+          return;
+        }
+        boolean tapped = false;
+        if (o != null && o.optBoolean("ok")) {
+          float cx = (float) o.optDouble("cx", 0);
+          float cy = (float) o.optDouble("cy", 0);
+          float vw = (float) o.optDouble("vw", 0);
+          float vh = (float) o.optDouble("vh", 0);
+          if (vw >= 1f && vh >= 1f && view != null) {
+            String kind = o.optString("kind", "");
+            android.util.Log.i(
+              "JiyuGecko",
+              "streamcorner kick tap kind=" + kind + " attempt=" + attempt
+            );
+            dispatchTap(view, session, cx / vw, cy / vh);
+            tapped = true;
+            // Source then PLAY: give React a beat after selecting the card.
+            int delay = "source".equals(kind) ? 900 : CORNER_KICK_INTERVAL_MS;
+            main.postDelayed(() -> runStreamCornerKick(gen, attempt + 1), delay);
+            return;
+          }
+        }
+        if (!tapped && attempt == 8) {
+          // Rough fallback: mid-player PLAY pill, then lower source row.
+          dispatchTap(view, session, 0.5f, 0.32f);
+          main.postDelayed(() -> dispatchTap(view, session, 0.5f, 0.78f), 700);
+        }
+        main.postDelayed(() -> runStreamCornerKick(gen, attempt + 1), CORNER_KICK_INTERVAL_MS);
+      }
+    );
+  }
+
+  @Nullable
+  private static JSONObject parseCornerTapResult(@Nullable String raw) {
+    if (raw == null || raw.isEmpty() || "null".equals(raw)) return null;
+    String s = raw.trim();
+    try {
+      if (s.startsWith("\"") && s.endsWith("\"")) {
+        s = new JSONObject("{\"v\":" + s + "}").optString("v", s);
+      }
+      int start = s.indexOf('{');
+      int end = s.lastIndexOf('}');
+      if (start >= 0 && end > start) s = s.substring(start, end + 1);
+      return new JSONObject(s);
+    } catch (Throwable ignored) {
+      return null;
+    }
+  }
+
   /**
    * Keep measuring until the paused play control is on screen, then tap it.
    * A missing button is not a skip — the player often mounts after the document loads.
@@ -1025,8 +1461,11 @@ final class GeckoOverlayController {
   private static final int PLAY_BLIND_NO_BRIDGE_AT = 8;
   /** Re-check this long after a tap; tap again only if the frame still reports paused. */
   private static final int PLAY_RETAP_DELAY_MS = 800;
-  /** Taps per page URL (button taps + blind taps). */
-  private static final int PLAY_TAP_MAX = 4;
+  /**
+   * Taps per page URL (button taps + blind taps). StreamCorner needs source +
+   * PLAY (+ retries); keep headroom beyond typical single-button embeds.
+   */
+  private static final int PLAY_TAP_MAX = 8;
 
   private void endPlayWatch(int gen, @Nullable Runnable done) {
     if (gen == playWatchGen) playWatchGen = 0;
@@ -1510,7 +1949,22 @@ final class GeckoOverlayController {
     }
   }
 
+  private void rememberLiveMedia(@Nullable String uri) {
+    if (uri == null || uri.isEmpty()) return;
+    if (!isSniffableMediaUrl(uri)) return;
+    if (BrowserAdBlock.isAdHijackUrl(uri) || BrowserAdBlock.shouldBlockNavigation(uri)) return;
+    int score = mediaUrlScore(uri);
+    int prev =
+      lastLiveMediaUrl == null || lastLiveMediaUrl.isEmpty() ? -1 : mediaUrlScore(lastLiveMediaUrl);
+    if (score >= prev) {
+      lastLiveMediaUrl = uri;
+      lastLiveMediaPage = currentUrl == null ? "" : currentUrl;
+      android.util.Log.i("JiyuGecko", "live media score=" + score + " " + safeUrl(uri));
+    }
+  }
+
   private void noteMediaCandidate(@Nullable String uri) {
+    rememberLiveMedia(uri);
     MediaResolveProbe probe = mediaProbe;
     if (probe == null || probe.finished || uri == null || uri.isEmpty()) return;
     if (!isSniffableMediaUrl(uri)) return;
@@ -1523,6 +1977,49 @@ final class GeckoOverlayController {
       android.util.Log.i("JiyuGecko", "media candidate score=" + score + " " + safeUrl(uri));
       if (score >= 50) finishMediaProbe(probe, uri);
     }
+  }
+
+  /**
+   * Return the best media URL already seen for the current page (network + page scrape).
+   * Used to promote StreamCorner Bitmovin → Media3 after playback starts in Gecko.
+   */
+  void sniffCurrentMedia(MediaResolveCallback callback) {
+    if (callback == null) return;
+    final String page = currentUrl == null ? "" : currentUrl;
+    final String cached = lastLiveMediaUrl == null ? "" : lastLiveMediaUrl;
+    if (!cached.isEmpty() && mediaUrlScore(cached) >= 50) {
+      main.post(() -> callback.onResult(cached, page, null));
+      return;
+    }
+    evaluateJavascript(
+      MEDIA_SNIFF_JS,
+      (json) -> {
+        String raw = json == null ? "" : String.valueOf(json);
+        if (raw.startsWith("\"") && raw.endsWith("\"")) {
+          raw = raw.substring(1, raw.length() - 1).replace("\\n", "\n").replace("\\\"", "\"");
+        }
+        String best = cached;
+        int bestScore = best.isEmpty() ? -1 : mediaUrlScore(best);
+        for (String line : raw.split("\n")) {
+          String u = line.trim();
+          if (u.isEmpty() || u.startsWith("iframe:")) continue;
+          if (!isSniffableMediaUrl(u)) continue;
+          if (BrowserAdBlock.isAdHijackUrl(u) || BrowserAdBlock.shouldBlockNavigation(u)) continue;
+          int score = mediaUrlScore(u);
+          if (score >= bestScore) {
+            best = u;
+            bestScore = score;
+          }
+        }
+        if (!best.isEmpty()) {
+          lastLiveMediaUrl = best;
+          lastLiveMediaPage = page;
+          callback.onResult(best, page, null);
+        } else {
+          callback.onResult(null, page, "No media URL found");
+        }
+      }
+    );
   }
 
   private void scheduleMediaProbePoll(int attempt) {
@@ -1540,29 +2037,15 @@ final class GeckoOverlayController {
       }
       return;
     }
-    // Ask the page for <video> src / HLS hints + install fetch/XHR hooks once.
+    // StreamCorner Bitmovin needs source-pick / Hide Chat before it fetches HLS.
+    if (probe.pageUrl != null
+      && (probe.pageUrl.contains("streamcorner")
+        || probe.pageUrl.contains("strmcrnr")
+        || probe.pageUrl.contains("streamninja"))) {
+      evaluateJavascript(STREAMCORNER_BOOT_JS, null);
+    }
     evaluateJavascript(
-      "(() => {try{"
-        + "if(!window.__jiyuMediaHook){"
-        + "window.__jiyuMediaHook=1;window.__jiyuMediaHits=[];"
-        + "const push=u=>{try{const s=String(u||'');"
-        + "if(/m3u8|\\.mpd|format=m3u8|\\/hls\\/|\\.m4s|mime=video/i.test(s))"
-        + "window.__jiyuMediaHits.push(s);}catch(e){}};"
-        + "const of=window.fetch;if(typeof of==='function'){"
-        + "window.fetch=function(i,n){try{push(i&&i.url?i.url:i);}catch(e){}"
-        + "return of.apply(this,arguments);};}"
-        + "const xo=XMLHttpRequest.prototype.open;"
-        + "XMLHttpRequest.prototype.open=function(m,u){try{push(u);}catch(e){}"
-        + "return xo.apply(this,arguments);};"
-        + "}"
-        + "const urls=[...(window.__jiyuMediaHits||[])];"
-        + "window.__jiyuMediaHits=[];"
-        + "document.querySelectorAll('video').forEach(v=>{"
-        + "if(v.currentSrc)urls.push(v.currentSrc);if(v.src)urls.push(v.src);"
-        + "v.querySelectorAll('source').forEach(s=>{if(s.src)urls.push(s.src);});"
-        + "});"
-        + "return urls.filter(Boolean).slice(0,16).join('\\n');"
-        + "}catch(e){return '';}})()",
+      MEDIA_SNIFF_JS,
       (json) -> {
         MediaResolveProbe p = mediaProbe;
         if (p == null || p.finished) return;
@@ -1685,6 +2168,8 @@ final class GeckoOverlayController {
     } catch (Throwable ignored) {}
     loading = true;
     currentUrl = url;
+    lastLiveMediaUrl = "";
+    lastLiveMediaPage = "";
     if (BrowserAdBlock.isPlayerEmbedHost(url)) {
       lastPlayerEmbedUrl = url;
     }
@@ -1785,6 +2270,18 @@ final class GeckoOverlayController {
       return "https://jiyu.app/";
     }
     return null;
+  }
+
+  private static boolean isPlaymogoUrl(String url) {
+    String host = hostOf(url);
+    if (host.equals("playmogo.com") || host.endsWith(".playmogo.com")) return true;
+    try {
+      String path = new java.net.URI(url).getPath();
+      if (path != null && path.matches("(?i)^/e/[a-z0-9]{6,}.*") && host.matches("(?i).*(playmogo|dood).*")) {
+        return true;
+      }
+    } catch (Throwable ignored) {}
+    return false;
   }
 
   private static String hostOf(String url) {

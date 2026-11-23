@@ -132,6 +132,10 @@ export function isHlsUrl(url: string): boolean {
     // Bilibili DASH → HLS playlists built in-app (src/lib/biliDashHls.ts).
     /^blob:[^#]*#jiyu\.m3u8$/i.test(url) ||
     /[?&]output=hls\b/i.test(url) ||
-    /totallyacdn\.|cdn\.hls\.lol|stream\.hls\.lol|transcode\.cfd/i.test(url)
+    /totallyacdn\.|cdn\.hls\.lol|stream\.hls\.lol|transcode\.cfd/i.test(url) ||
+    // Nationwide Worker short paths (/nnn) redirect to live.m3u8 — still HLS.
+    /jiyu(?:-nnn)?\.free-river\.workers\.dev\/(?:nnn|nationwide|live\.m3u8)(?:\?|$)/i.test(
+      url,
+    )
   )
 }

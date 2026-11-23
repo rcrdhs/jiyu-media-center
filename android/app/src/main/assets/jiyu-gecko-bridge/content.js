@@ -1,4 +1,32 @@
 /* Eval bridge — all frames connect so autoplay can reach cross-origin embed players. */
+
+/* StreamCorner ships disable-devtool (redirects to google.com) which blanks GeckoView.
+   Neuter it in both worlds before the page module runs. */
+(function () {
+  try {
+    var host = String(location.hostname || "")
+      .replace(/^www\./i, "")
+      .toLowerCase()
+    if (!/(^|\.)(streamcorner|strmcrnr|streamninja)\.(st|foo|cloud|fun|top)$/i.test(host)) return
+    var stub =
+      "(function(){try{" +
+      "var fake={isRunning:function(){return false},md5:'',ondevtoolopen:function(){},ondevtoolclose:function(){},setOptions:function(){}};" +
+      "try{Object.defineProperty(window,'DisableDevtool',{configurable:true,enumerable:false,get:function(){return fake},set:function(){}});}catch(e){window.DisableDevtool=fake;}" +
+      "try{Object.defineProperty(navigator,'webdriver',{configurable:true,get:function(){return undefined}});}catch(e){}" +
+      "}catch(e){}})();"
+    try {
+      ;(0, eval)(stub)
+    } catch (_) {}
+    try {
+      var root = document.documentElement || document.head || document
+      var el = document.createElement("script")
+      el.textContent = stub
+      root.appendChild(el)
+      el.remove()
+    } catch (_) {}
+  } catch (_) {}
+})()
+
 /* Live rewind guard (electron/live-rewind-guard.js): page-world prototype patch so
    hls.js live-edge sync does not undo a viewer's rewind on live embeds. */
 (function () {
@@ -544,6 +572,118 @@
     return live;
   }
 
+  function isStreamCornerPage() {
+    try {
+      var host = String(location.hostname || "")
+        .replace(/^www\./i, "")
+        .toLowerCase();
+      return /(^|\.)(streamcorner|strmcrnr|streamninja)\.(st|foo|cloud|fun|top)$/i.test(
+        host,
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /** React source cards ignore synthetic clicks — return a real box for MotionEvent. */
+  function streamCornerSourceRect() {
+    if (window !== window.top || !isStreamCornerPage()) return null;
+    var root = document.body;
+    try {
+      var hs = document.querySelectorAll("h1,h2,h3,h4,div,span,p,section");
+      for (var h = 0; h < hs.length; h++) {
+        if (
+          /^AVAILABLE SOURCES$/i.test(
+            String(hs[h].textContent || "")
+              .replace(/\s+/g, " ")
+              .trim(),
+          )
+        ) {
+          root = hs[h].parentElement || hs[h];
+          break;
+        }
+      }
+    } catch (_) {}
+    var best = null;
+    var bestArea = 0;
+    var nodes = [];
+    try {
+      nodes = (root || document).querySelectorAll(
+        "button,a,[role=button],div,li,label",
+      );
+    } catch (_) {
+      return null;
+    }
+    for (var j = 0; j < nodes.length; j++) {
+      var t = String(nodes[j].innerText || "")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (t.length < 3 || t.length > 200) continue;
+      if (
+        /^(AVAILABLE SOURCES|CONTROLS|Hide Chat|Float Chat|Reload Player|BITMOVIN)$/i.test(t) ||
+        /^SELECT A SOURCE|^STREAMCORNER CHAT|^Keep it friendly$|^PLAY$/i.test(
+          t,
+        )
+      )
+        continue;
+      if (
+        !/^(HD|SD|FHD|UHD|4K)\b/i.test(t) &&
+        !/\b(BEIN|ESPN|DAZN|SKY|SPORTS?|LIGUE|PREMIER|ESPA.?OL|FOX|TNT|NBC|CBS|ABC)\b/i.test(
+          t,
+        )
+      )
+        continue;
+      var r;
+      try {
+        r = nodes[j].getBoundingClientRect();
+      } catch (_) {
+        continue;
+      }
+      if (!r || r.width < 48 || r.height < 14 || r.height > 280) continue;
+      if (r.bottom < 0 || r.right < 0) continue;
+      var area = r.width * r.height;
+      if (area > bestArea) {
+        best = r;
+        bestArea = area;
+      }
+    }
+    return best ? rectPayload(best) : null;
+  }
+
+  function streamCornerPlayRect() {
+    if (window !== window.top || !isStreamCornerPage()) return null;
+    var best = null;
+    var bestArea = 0;
+    var nodes = [];
+    try {
+      nodes = document.querySelectorAll("button,a,[role=button],div");
+    } catch (_) {
+      return null;
+    }
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      var t = String(el.innerText || el.textContent || "")
+        .replace(/\s+/g, " ")
+        .trim();
+      var al = String(el.getAttribute("aria-label") || el.title || "");
+      if (!/^PLAY$/i.test(t) && !/^play$/i.test(al)) continue;
+      var r;
+      try {
+        r = el.getBoundingClientRect();
+      } catch (_) {
+        continue;
+      }
+      if (!r || r.width < 40 || r.height < 24) continue;
+      if (r.bottom < 0 || r.right < 0) continue;
+      var area = r.width * r.height;
+      if (area > bestArea) {
+        best = r;
+        bestArea = area;
+      }
+    }
+    return best ? rectPayload(best) : null;
+  }
+
   function measurePlayButtonRect(attempt) {
     // Playing beats everything: JW / video.js keep a play/pause toggle in the DOM
     // while playing, and tapping it (or the middle) pauses the stream.
@@ -554,6 +694,25 @@
         playing: true,
         frame: window === window.top ? "top" : "child",
       };
+    }
+    // StreamCorner: pick a source first (SELECT A SOURCE), then the PLAY pill.
+    // Synthetic JS clicks do not drive their React cards — MotionEvent taps do.
+    if (window === window.top && isStreamCornerPage()) {
+      var bodyText = "";
+      try {
+        bodyText = String((document.body && document.body.innerText) || "");
+      } catch (_) {}
+      if (/SELECT A SOURCE TO START PLAYBACK/i.test(bodyText)) {
+        var srcRect = streamCornerSourceRect();
+        if (srcRect) return srcRect;
+      }
+      var cornerPlay = streamCornerPlayRect();
+      if (cornerPlay) return cornerPlay;
+      // Sources listed but idle banner already dismissed — still tap a card.
+      if ((attempt || 0) >= 2) {
+        var lateSrc = streamCornerSourceRect();
+        if (lateSrc) return lateSrc;
+      }
     }
     if (window === window.top) {
       var mapped = mappedTopRect();

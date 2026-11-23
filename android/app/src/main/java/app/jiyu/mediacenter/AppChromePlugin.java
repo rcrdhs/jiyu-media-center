@@ -97,9 +97,8 @@ public class AppChromePlugin extends Plugin {
   }
 
   /**
-   * Fire TV / Android TV will not open the keyboard for a WebView field that was
-   * focused with inputmode=none, or for a password field after a script focus.
-   * OK on a text field calls this while that field is already focused.
+   * Fire TV / Android TV often skip the IME for WebView fields after a D-pad
+   * focus or a script focus. OK on a text field calls this while focused.
    */
   @PluginMethod
   public void showSoftInput(PluginCall call) {
@@ -111,22 +110,69 @@ public class AppChromePlugin extends Plugin {
     activity.runOnUiThread(() -> {
       JSObject out = new JSObject();
       try {
-        View web = getBridge() != null ? getBridge().getWebView() : null;
-        if (web != null) {
-          web.requestFocus();
-          android.view.inputmethod.InputMethodManager imm =
-            (android.view.inputmethod.InputMethodManager)
-              activity.getSystemService(android.content.Context.INPUT_METHOD_SERVICE);
-          if (imm != null) {
-            imm.showSoftInput(web, android.view.inputmethod.InputMethodManager.SHOW_FORCED);
-          }
-        }
+        forceSoftInput(activity);
         out.put("ok", true);
         call.resolve(out);
       } catch (Throwable t) {
         call.reject(t.getMessage() != null ? t.getMessage() : "Keyboard failed");
       }
     });
+  }
+
+  /** Wake the system keyboard for the Capacitor WebView (TV remotes / Fire TV). */
+  private void forceSoftInput(Activity activity) {
+    Window window = activity.getWindow();
+    if (window != null) {
+      // STATE_HIDDEN (default on many TV builds) refuses showSoftInput.
+      window.setSoftInputMode(
+        WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE
+          | WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+      );
+      // Immersive fullscreen blocks the IME on several Google TV / Fire TV builds.
+      window.clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
+    }
+    View web = getBridge() != null ? getBridge().getWebView() : null;
+    if (web == null) return;
+    web.setFocusable(true);
+    web.setFocusableInTouchMode(true);
+    web.requestFocus();
+    android.view.inputmethod.InputMethodManager imm =
+      (android.view.inputmethod.InputMethodManager)
+        activity.getSystemService(android.content.Context.INPUT_METHOD_SERVICE);
+    if (imm == null) return;
+    try {
+      imm.restartInput(web);
+    } catch (Throwable ignored) {}
+    boolean shown = false;
+    try {
+      shown = imm.showSoftInput(web, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT);
+    } catch (Throwable ignored) {}
+    if (!shown) {
+      try {
+        shown = imm.showSoftInput(web, android.view.inputmethod.InputMethodManager.SHOW_FORCED);
+      } catch (Throwable ignored) {}
+    }
+    if (!shown) {
+      try {
+        imm.toggleSoftInput(
+          android.view.inputmethod.InputMethodManager.SHOW_FORCED,
+          android.view.inputmethod.InputMethodManager.HIDE_IMPLICIT_ONLY
+        );
+      } catch (Throwable ignored) {}
+    }
+    // Chromium often accepts the IME only on a later frame after readOnly/inputmode flips.
+    web.postDelayed(() -> {
+      try {
+        web.requestFocus();
+        imm.restartInput(web);
+        imm.showSoftInput(web, android.view.inputmethod.InputMethodManager.SHOW_FORCED);
+      } catch (Throwable ignored) {}
+    }, 120);
+    web.postDelayed(() -> {
+      try {
+        imm.showSoftInput(web, android.view.inputmethod.InputMethodManager.SHOW_FORCED);
+      } catch (Throwable ignored) {}
+    }, 350);
   }
 
   /** TV remote media keys (play/pause, ffwd, rewind, …) → JS `mediaKey` event. */

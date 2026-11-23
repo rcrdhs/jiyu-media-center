@@ -11,6 +11,23 @@ import {
   claimLocalChannelAudio,
   subscribeLocalChannelAudio,
 } from '../lib/localChannelAudio'
+import {
+  cvmYoutubeFallbackUrl,
+  isCvmChannelId,
+  isCvmVimeoUrl,
+} from '../lib/cvmLive'
+import {
+  isNationwideChannelId,
+  isNationwideHlsUrl,
+  NATIONWIDE_HLS_URL,
+  nationwideYoutubeFallbackUrl,
+  probeNationwideHls,
+} from '../lib/nationwideLive'
+import {
+  isTvjChannelId,
+  isTvjHlsUrl,
+  tvjYoutubeFallbackUrl,
+} from '../lib/tvjLive'
 
 interface LocalChannelLiveProps {
   item: StreamItem
@@ -98,15 +115,28 @@ export function LocalChannelLive({ item, playingElsewhere = false }: LocalChanne
   const [youtubePreview, setYoutubePreview] = useState('')
   const [youtubePoster, setYoutubePoster] = useState('')
   const [youtubeEmbedReady, setYoutubeEmbedReady] = useState(false)
+  /** Nationwide Worker (or YT fallback) on-air — independent of muted card preview. */
+  const [nationwideLive, setNationwideLive] = useState<boolean | null>(null)
+  /** CVM Vimeo (or YT fallback) on-air. */
+  const [cvmLive, setCvmLive] = useState<boolean | null>(null)
+  const [cvmViaYoutube, setCvmViaYoutube] = useState(false)
+  /** TVJ univtec (or YT fallback) on-air — independent of muted card preview. */
+  const [tvjLive, setTvjLive] = useState<boolean | null>(null)
+  const [tvjViaYoutube, setTvjViaYoutube] = useState(false)
   const [muted, setMuted] = useState(true)
   const youtube = isYouTubeUrl(item.url)
+  const nationwide = isNationwideChannelId(item.id) || isNationwideHlsUrl(item.url)
+  const cvm = isCvmChannelId(item.id) || isCvmVimeoUrl(item.url)
+  const tvj = isTvjChannelId(item.id) || isTvjHlsUrl(item.url)
 
   useEffect(() => {
-    if (!youtube) {
-      setYoutubeLive(null)
-      setYoutubePreview('')
-      setYoutubePoster('')
-      setYoutubeEmbedReady(false)
+    if (!youtube || nationwide || cvm || tvj) {
+      if (!nationwide && !cvm && !tvj) {
+        setYoutubeLive(null)
+        setYoutubePreview('')
+        setYoutubePoster('')
+        setYoutubeEmbedReady(false)
+      }
       return
     }
     let cancelled = false
@@ -135,7 +165,119 @@ export function LocalChannelLive({ item, playingElsewhere = false }: LocalChanne
     return () => {
       cancelled = true
     }
-  }, [item.url, youtube])
+  }, [item.url, youtube, nationwide, cvm, tvj])
+
+  // Nationwide: Live badge from Worker probe (preview can fail CORS while Watch still plays).
+  useEffect(() => {
+    if (!nationwide) {
+      setNationwideLive(null)
+      return
+    }
+    let cancelled = false
+    setNationwideLive(null)
+    void (async () => {
+      const hlsOk = await probeNationwideHls(NATIONWIDE_HLS_URL)
+      if (cancelled) return
+      if (hlsOk) {
+        setNationwideLive(true)
+        return
+      }
+      const yt = await resolveYouTubeLivePlay(nationwideYoutubeFallbackUrl(item.detailUrl))
+      if (cancelled) return
+      setNationwideLive(yt.ok)
+      if (yt.ok) {
+        setYoutubePoster(
+          yt.posterUrl ||
+            (yt.videoId ? `https://i.ytimg.com/vi/${yt.videoId}/hqdefault.jpg` : ''),
+        )
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [nationwide, item.detailUrl])
+
+  // CVM: Vimeo event HLS first; when the clip is gone, fall back to YouTube /live.
+  useEffect(() => {
+    if (!cvm) {
+      setCvmLive(null)
+      setCvmViaYoutube(false)
+      return
+    }
+    let cancelled = false
+    setCvmLive(null)
+    setCvmViaYoutube(false)
+    setYoutubePreview('')
+    setYoutubePoster('')
+    setYoutubeEmbedReady(false)
+    void (async () => {
+      const vimeo = await resolveVimeoLiveHls(item.url)
+      if (cancelled) return
+      if (vimeo.ok) {
+        setCvmViaYoutube(false)
+        setCvmLive(true)
+        return
+      }
+      const yt = await resolveYouTubeLivePlay(cvmYoutubeFallbackUrl(item.detailUrl))
+      if (cancelled) return
+      if (!yt.ok) {
+        setCvmViaYoutube(false)
+        setCvmLive(false)
+        return
+      }
+      setCvmViaYoutube(true)
+      setCvmLive(true)
+      setYoutubePreview(yt.previewUrl)
+      setYoutubePoster(
+        yt.posterUrl ||
+          (yt.videoId ? `https://i.ytimg.com/vi/${yt.videoId}/hqdefault.jpg` : ''),
+      )
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [cvm, item.url, item.detailUrl])
+
+  // TVJ: probe univtec HLS first (badge independent of muted preview); YT if down.
+  useEffect(() => {
+    if (!tvj) {
+      setTvjLive(null)
+      setTvjViaYoutube(false)
+      return
+    }
+    let cancelled = false
+    setTvjLive(null)
+    setTvjViaYoutube(false)
+    setYoutubePreview('')
+    setYoutubePoster('')
+    setYoutubeEmbedReady(false)
+    void (async () => {
+      const hlsOk = await probeNationwideHls(item.url)
+      if (cancelled) return
+      if (hlsOk) {
+        setTvjViaYoutube(false)
+        setTvjLive(true)
+        return
+      }
+      const yt = await resolveYouTubeLivePlay(tvjYoutubeFallbackUrl(item.detailUrl))
+      if (cancelled) return
+      if (!yt.ok) {
+        setTvjViaYoutube(false)
+        setTvjLive(false)
+        return
+      }
+      setTvjViaYoutube(true)
+      setTvjLive(true)
+      setYoutubePreview(yt.previewUrl)
+      setYoutubePoster(
+        yt.posterUrl ||
+          (yt.videoId ? `https://i.ytimg.com/vi/${yt.videoId}/hqdefault.jpg` : ''),
+      )
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [tvj, item.url, item.detailUrl])
 
   // Drop the YouTube preview while the channel plays in the corner / full player.
   useEffect(() => {
@@ -143,17 +285,43 @@ export function LocalChannelLive({ item, playingElsewhere = false }: LocalChanne
   }, [playingElsewhere])
 
   useEffect(() => {
-    if (youtube) return
+    if (youtube && !nationwide && !cvm && !tvj) return
+    if ((cvm && cvmViaYoutube) || (tvj && tvjViaYoutube)) {
+      setPlaying(false)
+      setFailed(false)
+      setConnecting(false)
+      return
+    }
     if (playingElsewhere) {
       setPlaying(false)
       setFailed(false)
       setConnecting(false)
       return
     }
+    // Wait for Nationwide / CVM / TVJ on-air probe — don't flash Offline while Checking.
+    if (nationwide && nationwideLive !== true) {
+      setPlaying(false)
+      setFailed(false)
+      setConnecting(nationwideLive === null)
+      return
+    }
+    if (cvm && cvmLive !== true) {
+      setPlaying(false)
+      setFailed(false)
+      setConnecting(cvmLive === null)
+      return
+    }
+    if (tvj && tvjLive !== true) {
+      setPlaying(false)
+      setFailed(false)
+      setConnecting(tvjLive === null)
+      return
+    }
     const video = videoRef.current
     if (!video) return
 
     let cancelled = false
+    let connectTimer: number | undefined
     setPlaying(false)
     setFailed(false)
     setConnecting(true)
@@ -161,15 +329,17 @@ export function LocalChannelLive({ item, playingElsewhere = false }: LocalChanne
     video.muted = true
 
     const fail = () => {
-      if (!cancelled) {
-        setFailed(true)
-        setPlaying(false)
-        setConnecting(false)
-      }
+      if (cancelled) return
+      if (connectTimer) window.clearTimeout(connectTimer)
+      // Nationwide / CVM / TVJ can still be live even when the muted card preview fails.
+      setFailed(!nationwide && !cvm && !tvj)
+      setPlaying(false)
+      setConnecting(false)
     }
 
     const onPlaying = () => {
       if (!cancelled) {
+        if (connectTimer) window.clearTimeout(connectTimer)
         setPlaying(true)
         setFailed(false)
         setConnecting(false)
@@ -177,6 +347,8 @@ export function LocalChannelLive({ item, playingElsewhere = false }: LocalChanne
     }
 
     video.addEventListener('playing', onPlaying)
+    // Android WebView can hang on univtec relative HLS without a fatal error.
+    connectTimer = window.setTimeout(fail, tvj || nationwide || cvm ? 12_000 : 20_000)
 
     const destroyHls = () => {
       hlsRef.current?.destroy()
@@ -197,10 +369,11 @@ export function LocalChannelLive({ item, playingElsewhere = false }: LocalChanne
           maxMaxBufferLength: Math.max(perf.liveHlsMaxBufferLength + 24, 72),
           liveSyncDurationCount: perf.liveHlsSyncSegments,
           liveMaxLatencyDurationCount: Math.max(perf.liveHlsSyncSegments + 4, 10),
-          fragLoadingTimeOut: 20_000,
-          fragLoadingMaxRetry: 8,
-          manifestLoadingMaxRetry: 6,
-          levelLoadingMaxRetry: 6,
+          fragLoadingTimeOut: 12_000,
+          fragLoadingMaxRetry: 4,
+          manifestLoadingTimeOut: 12_000,
+          manifestLoadingMaxRetry: 3,
+          levelLoadingMaxRetry: 3,
           xhrSetup(xhr) {
             xhr.withCredentials = false
           },
@@ -225,7 +398,9 @@ export function LocalChannelLive({ item, playingElsewhere = false }: LocalChanne
       fail()
     }
 
-    if (isVimeoLiveEventUrl(item.url)) {
+    if (nationwide) {
+      attach(NATIONWIDE_HLS_URL)
+    } else if (cvm || isVimeoLiveEventUrl(item.url)) {
       void resolveVimeoLiveHls(item.url).then((resolved) => {
         if (cancelled) return
         if (!resolved.ok) {
@@ -240,12 +415,26 @@ export function LocalChannelLive({ item, playingElsewhere = false }: LocalChanne
 
     return () => {
       cancelled = true
+      if (connectTimer) window.clearTimeout(connectTimer)
       video.removeEventListener('playing', onPlaying)
       destroyHls()
       video.removeAttribute('src')
       video.load()
     }
-  }, [item.url, youtube, playingElsewhere])
+  }, [
+    item.url,
+    item.detailUrl,
+    youtube,
+    nationwide,
+    nationwideLive,
+    cvm,
+    cvmLive,
+    cvmViaYoutube,
+    tvj,
+    tvjLive,
+    tvjViaYoutube,
+    playingElsewhere,
+  ])
 
   // Another local channel took audio — mute this one.
   useEffect(() => {
@@ -294,36 +483,89 @@ export function LocalChannelLive({ item, playingElsewhere = false }: LocalChanne
     setMuted(true)
   }
 
-  const offline = playingElsewhere ? false : youtube ? youtubeLive === false : failed
+  const offline = playingElsewhere
+    ? false
+    : cvm
+      ? cvmLive === false
+      : tvj
+        ? tvjLive === false
+        : nationwide
+          ? nationwideLive === false
+          : youtube
+            ? youtubeLive === false
+            : failed
+  const checking =
+    !playingElsewhere &&
+    ((cvm && cvmLive === null) ||
+      (tvj && tvjLive === null) ||
+      (nationwide && nationwideLive === null) ||
+      (youtube && !nationwide && !cvm && !tvj && youtubeLive === null) ||
+      (!youtube && !nationwide && !cvm && !tvj && connecting))
   const liveLabel = playingElsewhere
     ? 'Playing'
-    : youtube
-    ? youtubeLive === null
-      ? 'Checking…'
-      : offline
-        ? 'Offline'
-        : 'Live'
-    : connecting
-      ? 'Connecting…'
+    : checking
+      ? nationwide || youtube || cvm || tvj
+        ? 'Checking…'
+        : 'Connecting…'
       : offline
         ? 'Offline'
         : 'Live'
   const detail = playingElsewhere
     ? 'Playing in the player now — Watch opens it full screen.'
-    : youtube
-    ? offline
-      ? 'Not on-air on YouTube right now — open Watch when they go live.'
-      : 'Live on YouTube — Watch opens the full player (PiP on Back).'
-    : failed
-      ? 'Preview unavailable — open Watch to try the full player.'
-      : connecting
-        ? 'Connecting to live stream…'
-        : item.description
-  const showYoutubeEmbed = Boolean(youtube && youtubePreview && youtubeLive && !playingElsewhere)
-  const showYoutubeThumb = Boolean(
-    youtube && youtubeLive && youtubePoster && (!youtubeEmbedReady || playingElsewhere),
+    : cvm
+      ? offline
+        ? 'Not on air right now — open Watch when CVM goes live.'
+        : cvmViaYoutube
+          ? 'Live on YouTube — Watch opens the full player (PiP on Back).'
+          : playing
+            ? item.description
+            : 'Live now — Watch opens the full player (preview may stay still).'
+      : tvj
+        ? offline
+          ? 'Not on air right now — open Watch when TVJ goes live.'
+          : tvjViaYoutube
+            ? 'Live on YouTube — Watch opens the full player (PiP on Back).'
+            : playing
+              ? item.description
+              : 'Live now — Watch opens the full player (preview may stay still).'
+        : nationwide
+          ? offline
+            ? 'Not on air right now — open Watch when Nationwide goes live.'
+            : playing
+              ? item.description
+              : 'Live now — Watch opens the full player (preview may stay still).'
+          : youtube
+            ? offline
+              ? 'Not on-air on YouTube right now — open Watch when they go live.'
+              : 'Live on YouTube — Watch opens the full player (PiP on Back).'
+            : failed
+              ? 'Preview unavailable — open Watch to try the full player.'
+              : connecting
+                ? 'Connecting to live stream…'
+                : item.description
+  const showYoutubeEmbed = Boolean(
+    ((youtube && !nationwide && !cvm && !tvj) ||
+      (cvm && cvmViaYoutube) ||
+      (tvj && tvjViaYoutube)) &&
+      youtubePreview &&
+      (cvm ? cvmLive : tvj ? tvjLive : youtubeLive) &&
+      !playingElsewhere,
   )
-  const audioReady = (!youtube && playing) || (showYoutubeEmbed && youtubeEmbedReady)
+  const showYoutubeThumb = Boolean(
+    ((youtube && !nationwide && !cvm && !tvj && youtubeLive) ||
+      (nationwide && nationwideLive) ||
+      (cvm && cvmViaYoutube && cvmLive) ||
+      (tvj && tvjViaYoutube && tvjLive)) &&
+      youtubePoster &&
+      (!youtubeEmbedReady ||
+        playingElsewhere ||
+        nationwide ||
+        (cvm && !cvmViaYoutube) ||
+        (tvj && !tvjViaYoutube)),
+  )
+  const useHlsPreview = !youtube && !(cvm && cvmViaYoutube) && !(tvj && tvjViaYoutube)
+  const audioReady =
+    (useHlsPreview && playing) || (showYoutubeEmbed && youtubeEmbedReady)
 
   return (
     <div className="local-channel-live">
@@ -335,11 +577,12 @@ export function LocalChannelLive({ item, playingElsewhere = false }: LocalChanne
           title={`Watch ${item.title}`}
         >
           {(showYoutubeThumb ||
-            (!youtube && item.poster) ||
-            (youtube && !youtubeLive && item.poster)) && (
+            (useHlsPreview && item.poster) ||
+            (youtube && !youtubeLive && item.poster) ||
+            (cvm && cvmLive === false && item.poster)) && (
             <img
               className={`local-channel-live-poster ${
-                (playing && !youtube) || (showYoutubeEmbed && youtubeEmbedReady)
+                (playing && useHlsPreview) || (showYoutubeEmbed && youtubeEmbedReady)
                   ? 'is-hidden'
                   : ''
               }`}
@@ -348,7 +591,7 @@ export function LocalChannelLive({ item, playingElsewhere = false }: LocalChanne
               aria-hidden
             />
           )}
-          {!youtube && (
+          {useHlsPreview && (
             <video
               ref={videoRef}
               className={`local-channel-live-video ${playing ? 'is-visible' : ''}`}
@@ -376,7 +619,7 @@ export function LocalChannelLive({ item, playingElsewhere = false }: LocalChanne
           )}
         </Link>
         <span
-          className={`local-channel-live-badge ${offline ? 'is-offline' : ''} ${connecting && !youtube && !playingElsewhere ? 'is-connecting' : ''}`}
+          className={`local-channel-live-badge ${offline ? 'is-offline' : ''} ${connecting && useHlsPreview && !playingElsewhere ? 'is-connecting' : ''}`}
         >
           {liveLabel}
         </span>
