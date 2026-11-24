@@ -12,6 +12,11 @@ export const APP_VERSION_LABEL = `v${APP_VERSION}`
 /** Short milestone log — newest first — so progress is visible in-app. */
 export const APP_RELEASES: ReadonlyArray<{ version: string; summary: string }> = [
   {
+    version: '0.4.16',
+    summary:
+      'Anime and TV no longer stick on Buffering: Movy skips dead warmsquare CDNs, checks a real media segment before play, and prefers working goldenkite/oceangate sources',
+  },
+  {
     version: '0.4.15',
     summary:
       'Tim Streams (TS) joins Sports with SC labels; always-on channels sit in a 24/7 tab instead of Live; upcoming kickoffs stay in Upcoming; a dead stream shows Stream offline and hops when another source exists; StreamCorner desktop boots and hides chat with the ad docked in the bar',
