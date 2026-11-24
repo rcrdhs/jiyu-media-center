@@ -433,6 +433,20 @@ declare global {
         referer?: string,
       ) => Promise<PlaylistFetchResult>
       fetchJsonGet?: (url: string, referer?: string) => Promise<PlaylistFetchResult>
+      /** Binary GET with optional Range (HLS segment probes). Body as base64, capped. */
+      fetchBytes?: (options: {
+        url: string
+        referer?: string
+        range?: string
+        timeoutMs?: number
+        maxBytes?: number
+      }) => Promise<{
+        ok: boolean
+        status: number
+        base64: string
+        contentType: string
+        error: string
+      }>
       /** Subtitle-step diagnostics → <userData>/logs/subtitles.log (main, ~1 MB roll). */
       logSubtitleEvent?: (line: string) => void
       /** Donghua (Bilibili / iQIYI) lookup diagnostics → <userData>/logs/bilibili.log. */

@@ -87,6 +87,8 @@ contextBridge.exposeInMainWorld('signalDesktop', {
   fetchHtml: (url, opts) => ipcRenderer.invoke('page:fetchHtml', url, opts || {}),
   fetchJsonPost: (url, body, referer) => ipcRenderer.invoke('page:fetchJsonPost', url, body, referer),
   fetchJsonGet: (url, referer) => ipcRenderer.invoke('page:fetchJsonGet', url, referer),
+  /** Binary GET with optional Range — Movy HLS segment probes (base64 body, capped). */
+  fetchBytes: (options) => ipcRenderer.invoke('page:fetchBytes', options || {}),
   logSubtitleEvent: (line) => ipcRenderer.send('subs:log', String(line || '')),
   logBilibiliEvent: (line) => ipcRenderer.send('bili:log', String(line || '')),
   biliFetch: (options) => ipcRenderer.invoke('bili:fetch', options || {}),

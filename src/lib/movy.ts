@@ -826,21 +826,35 @@ async function fetchMovyProbeSegmentHead(
       }
     }
 
-    // Desktop main-process text fetch: Range still returns a short body; reject HTML stubs.
-    if (typeof window !== 'undefined' && window.signalDesktop?.fetchJsonGet) {
-      const r = await Promise.race([
-        window.signalDesktop.fetchJsonGet(url, referer),
-        new Promise<{ ok: false; status: number; content: string }>((resolve) =>
-          setTimeout(() => resolve({ ok: false, status: 0, content: '' }), timeoutMs),
-        ),
-      ])
+    // Desktop: main-process Range fetch (not fetchJsonGet text of the whole segment).
+    if (typeof window !== 'undefined' && window.signalDesktop?.fetchBytes) {
+      const r = await window.signalDesktop.fetchBytes({
+        url,
+        referer,
+        range: `bytes=0-${MOVY_SEG_PROBE_BYTES - 1}`,
+        timeoutMs,
+        maxBytes: MOVY_SEG_PROBE_BYTES,
+      })
       const status = Number(r.status) || 0
-      const content = String(r.content || '')
-      const bytes = new TextEncoder().encode(content.slice(0, MOVY_SEG_PROBE_BYTES))
-      if (status >= 400 || status === 0 || !content) {
-        return { ok: false, status, bytes, contentType: '' }
+      let bytes = new Uint8Array()
+      if (r.base64) {
+        try {
+          const bin = atob(r.base64)
+          bytes = new Uint8Array(bin.length)
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+        } catch {
+          bytes = new Uint8Array()
+        }
       }
-      return { ok: bytes.length > 0, status, bytes, contentType: '' }
+      if (status >= 400 || status === 0 || !bytes.length) {
+        return { ok: false, status, bytes, contentType: String(r.contentType || '') }
+      }
+      return {
+        ok: true,
+        status,
+        bytes: bytes.subarray(0, MOVY_SEG_PROBE_BYTES),
+        contentType: String(r.contentType || ''),
+      }
     }
 
     const res = await fetch(url, {
