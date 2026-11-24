@@ -792,18 +792,26 @@ async function fetchMovyProbeSegmentHead(
             readTimeout: timeoutMs,
           })
           const raw = res.data
-          let bytes = new Uint8Array()
-          if (raw instanceof ArrayBuffer) bytes = new Uint8Array(raw)
-          else if (ArrayBuffer.isView(raw)) {
-            bytes = new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength)
+          // Always allocate a fresh ArrayBuffer-backed Uint8Array (TS 5.7 generics).
+          const copyBytes = (src: ArrayLike<number>) => {
+            const out = new Uint8Array(src.length)
+            out.set(src as ArrayLike<number>)
+            return out
+          }
+          let bytes = new Uint8Array(0)
+          if (raw instanceof ArrayBuffer) {
+            bytes = copyBytes(new Uint8Array(raw))
+          } else if (ArrayBuffer.isView(raw)) {
+            bytes = copyBytes(
+              new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength),
+            )
           } else if (typeof raw === 'string' && raw) {
             // Some bridges base64-encode arraybuffer responses.
             try {
               const bin = atob(raw)
-              bytes = new Uint8Array(bin.length)
-              for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+              bytes = copyBytes(Array.from(bin, (c) => c.charCodeAt(0)))
             } catch {
-              bytes = new TextEncoder().encode(raw)
+              bytes = copyBytes(new TextEncoder().encode(raw))
             }
           }
           const status = Number(res.status) || 0
