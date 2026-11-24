@@ -474,11 +474,19 @@ let activePlaybackReferrer = ''
 function isMovyStylePlaybackUrl(url) {
   const u = String(url || '')
   if (!u) return false
-  if (/paleoak|zenoak|majorplay\.net|wecollege\.net/i.test(u)) return true
+  if (
+    /paleoak|zenoak|majorplay\.net|wecollege\.net|warmsquare\.top|goldenkite\.top|oceangate\.top|sun\d*\./i.test(
+      u,
+    )
+  ) {
+    return true
+  }
   if (/[?&]type=m3u8\b/i.test(u)) return true
   if (/workers\.dev\/video\.m3u8/i.test(u)) return true
   // Disguised chunk paths: /v/<hash>/style/chunk-0.js|image-2.webp|page-3.html
   if (/\/v\/[a-f0-9]{16,}\/style\/(?:chunk|image|page|vec)-/i.test(u)) return true
+  // Extensionless Movy media paths (/r6/s/…, /vd/…).
+  if (/\/(?:r\d+|vd|res)\/(?:s\/)?[A-Za-z0-9_-]{12,}/i.test(u)) return true
   return false
 }
 
@@ -538,7 +546,7 @@ function isIptvMediaUrl(url) {
   if (/vimeocdn\.com|player\.vimeo\.com/i.test(u)) return true
   // Movy / Atlantic / Cinecat / Streamo CDNs (Aphrodite uses /cdn-m3u8?payload= — no .m3u8).
   if (
-    /totallyacdn\.|cdn\.hls\.lol|stream\.hls\.lol|transcode\.cfd|zenoak|paleoak|wecollege\.net|shegu\.net/i.test(
+    /totallyacdn\.|cdn\.hls\.lol|stream\.hls\.lol|transcode\.cfd|zenoak|paleoak|wecollege\.net|shegu\.net|warmsquare\.top|goldenkite\.top|oceangate\.top/i.test(
       u,
     ) ||
     /\/cdn-m3u8(?:\?|$)/i.test(u)
@@ -9408,6 +9416,104 @@ ipcMain.handle('page:fetchJsonGet', async (_event, url, referer) => {
       status: 0,
       content: '',
       error: detail || (err instanceof Error ? err.message : String(err)),
+    }
+  }
+})
+
+/**
+ * Binary GET with optional Range (Movy HLS segment health probes). Returns a
+ * base64 body capped at maxBytes so slow CDNs are not fully downloaded as text.
+ */
+ipcMain.handle('page:fetchBytes', async (_event, options) => {
+  try {
+    const url = typeof options?.url === 'string' ? options.url.trim() : ''
+    if (!/^https?:\/\//i.test(url)) {
+      return { ok: false, status: 0, base64: '', contentType: '', error: 'Invalid URL' }
+    }
+    const ref =
+      typeof options?.referer === 'string' && options.referer.trim()
+        ? options.referer.trim()
+        : 'https://www.movy.sx/'
+    let origin = 'https://www.movy.sx'
+    try {
+      origin = new URL(ref).origin
+    } catch {
+      /* keep default */
+    }
+    const timeoutMs = Math.min(30_000, Math.max(1_500, Number(options?.timeoutMs) || 8_000))
+    const maxBytes = Math.min(256 * 1024, Math.max(512, Number(options?.maxBytes) || 4096))
+    const range =
+      typeof options?.range === 'string' && options.range.trim() ? options.range.trim() : ''
+    const headers = withDesktopChromeClientHints({
+      'User-Agent': BROWSER_UA,
+      Accept: '*/*',
+      Origin: origin,
+      Referer: ref,
+    })
+    if (range) headers.Range = range
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    try {
+      const init = {
+        method: 'GET',
+        redirect: 'follow',
+        signal: controller.signal,
+        headers,
+      }
+      let response
+      if (net && typeof net.fetch === 'function') {
+        try {
+          response = await net.fetch(url, init)
+        } catch (netErr) {
+          response = await fetch(url, init)
+          void netErr
+        }
+      } else {
+        response = await fetch(url, init)
+      }
+      const status = response.status
+      const contentType = String(response.headers.get('content-type') || '')
+      // Prefer streaming the first chunk so we never buffer a multi-MB segment.
+      const reader = response.body && typeof response.body.getReader === 'function'
+        ? response.body.getReader()
+        : null
+      let buf
+      if (reader) {
+        const chunks = []
+        let total = 0
+        while (total < maxBytes) {
+          const { done, value } = await reader.read()
+          if (done) break
+          if (!value || !value.length) continue
+          const take = Math.min(value.length, maxBytes - total)
+          chunks.push(Buffer.from(value.subarray(0, take)))
+          total += take
+          if (take < value.length) break
+        }
+        void reader.cancel().catch(() => {})
+        buf = Buffer.concat(chunks, total)
+      } else {
+        const full = Buffer.from(await response.arrayBuffer())
+        buf = full.length > maxBytes ? full.subarray(0, maxBytes) : full
+      }
+      const ok = status >= 200 && status < 400 && buf.length > 0
+      return {
+        ok,
+        status,
+        base64: buf.toString('base64'),
+        contentType,
+        error: ok ? '' : status ? `HTTP ${status}` : 'Empty body',
+      }
+    } finally {
+      clearTimeout(timer)
+    }
+  } catch (err) {
+    return {
+      ok: false,
+      status: 0,
+      base64: '',
+      contentType: '',
+      error: err instanceof Error ? err.message : String(err),
     }
   }
 })

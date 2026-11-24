@@ -391,6 +391,24 @@ function hlsHasInFlightMainFrag(hls: Hls | null | undefined): boolean {
   }
 }
 
+/** Stable id for the main in-flight fragment (resets hung-GET clock when the CDN moves on). */
+function hlsMainInFlightFragKey(hls: Hls | null | undefined): string {
+  if (!hls) return ''
+  try {
+    const frag = hls.inFlightFragments?.main?.frag as
+      | { sn?: number | string; level?: number; url?: string; relurl?: string }
+      | null
+      | undefined
+    if (!frag) return ''
+    const sn = frag.sn != null ? String(frag.sn) : ''
+    const level = Number.isFinite(frag.level) ? String(frag.level) : ''
+    const url = String(frag.url || frag.relurl || '').slice(0, 160)
+    return `${level}:${sn}:${url}`
+  } catch {
+    return ''
+  }
+}
+
 /**
  * Soft stall heal: never abort an in-flight fragment fetch. When Auto ABR is on,
  * tighten the ladder cap so the next segment can be 720p (etc.) instead of
@@ -5932,6 +5950,9 @@ export function Player({
       let bufferedAtOrigin = -1
       let lastMovingPlayhead = -1
       let hlsHealTicks = 0
+      /** Same in-flight frag key + when it first appeared — hung CDNs only. */
+      let inFlightSince = 0
+      let inFlightKey = ''
       stallTimer = window.setInterval(() => {
         if (cancelled || !waitingSince || !waitingOrigin) return
         // User scrub / ±10s — heal with startLoad, don't remount (that was
@@ -5947,13 +5968,6 @@ export function Player({
           }
           return
         }
-        // Fragment still downloading — don't treat slow CDN as a stall, and
-        // never reset the loader (that aborts the segment and freezes ABR).
-        if (hlsHasInFlightMainFrag(hlsInstanceRef.current)) {
-          waitingSince = Date.now()
-          setStatus('Buffering…')
-          return
-        }
         const videoEl = videoRef.current
         if (!videoEl) return
         const t = videoEl.currentTime
@@ -5966,6 +5980,8 @@ export function Player({
         // Playhead moving means this is not a stall — HAVE_FUTURE_DATA was often
         // false during normal HLS playback and the watch then reloaded from 0.
         if (!videoEl.paused && playheadMoving) {
+          inFlightSince = 0
+          inFlightKey = ''
           clearStallWatch()
           setError(null)
           setStatus('Playing')
@@ -5980,6 +5996,51 @@ export function Player({
           /* ignore */
         }
         if (bufferedAtOrigin < 0) bufferedAtOrigin = bufferedEnd
+        const playhead = Number.isFinite(t) ? t : 0
+        let bufferedLead = 0
+        try {
+          const b = videoEl.buffered
+          for (let i = 0; i < b.length; i++) {
+            if (b.start(i) <= playhead + 0.35 && b.end(i) > playhead) {
+              bufferedLead = b.end(i) - playhead
+              break
+            }
+          }
+        } catch {
+          /* ignore */
+        }
+        // Fragment still downloading — don't treat slow CDN as a stall, and
+        // never reset the loader (that aborts the segment and freezes ABR).
+        // Exception: the *same* frag hung with ~0 lead and a stuck playhead
+        // (warmsquare-style 0-byte GET) — then age clocks so remint can run.
+        const fragKey = hlsMainInFlightFragKey(hlsInstanceRef.current)
+        if (fragKey) {
+          if (fragKey !== inFlightKey) {
+            inFlightKey = fragKey
+            inFlightSince = Date.now()
+          }
+          const healthyProgress =
+            playheadMoving || bufferedLead > 0.5 || bufferedEnd > lastBufferedEnd + 0.35
+          if (healthyProgress) {
+            // Still filling or playing — keep soft clock fresh; do not remint.
+            waitingSince = Date.now()
+            if (bufferedEnd > lastBufferedEnd + 0.35) lastBufferedEnd = bufferedEnd
+            setStatus('Buffering…')
+            return
+          }
+          const hungMs = Date.now() - (inFlightSince || Date.now())
+          if (hungMs < 18_000) {
+            waitingSince = Date.now()
+            setStatus('Buffering…')
+            return
+          }
+          // Same frag stuck ~18s with no lead / no playhead motion → remint path.
+          waitingSince = Date.now() - stallLimitMs - 1
+          waitingOrigin = Math.min(waitingOrigin || Date.now(), Date.now() - hardCapMs - 1)
+        } else {
+          inFlightSince = 0
+          inFlightKey = ''
+        }
         // Swarm/remux/HLS still downloading — reset soft stall so we don't remount-loop
         // a slow but healthy VOD (One Piece anime was restarting every ~14s).
         // Movy→Atlantic path still ignores buffer blips (want a real source swap).
