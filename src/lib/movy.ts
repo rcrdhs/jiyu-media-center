@@ -657,6 +657,23 @@ async function fetchProviderSources(
  */
 /** Soft probe budget — paleoak masters often need ~6s; Auto cities answer in <500ms. */
 const MOVY_PROBE_TIMEOUT_MS = 7_500
+/** First-segment byte probe — keep short so hung CDNs (warmsquare) fail fast. */
+const MOVY_SEG_PROBE_TIMEOUT_MS = 5_500
+/** Bytes to pull from the first segment (Range) — enough to reject HTML/403 stubs. */
+const MOVY_SEG_PROBE_BYTES = 2_048
+
+/**
+ * CDN hosts that currently answer m3u8 but never deliver media segments
+ * (Referer hang / bare 403). Reject until they serve real media again.
+ */
+function isBlacklistedMovyCdnHost(url: string | undefined | null): boolean {
+  return /warmsquare\.top/i.test(String(url || ''))
+}
+
+/** Prefer these when several cities pass the segment probe. */
+function isPreferredMovyCdnHost(url: string | undefined | null): boolean {
+  return /goldenkite\.top|oceangate\.top/i.test(String(url || ''))
+}
 
 export type MovyProbeResult = { ok: boolean; ms: number; abrMaster?: boolean }
 
@@ -671,24 +688,26 @@ function classifyMovyPlaylistBody(body: string): { ok: boolean; abrMaster: boole
   return { ok: true, abrMaster: /#EXT-X-STREAM-INF/i.test(text) }
 }
 
-/**
- * Probe a Movy HLS URL. Returns latency so resolvers can prefer website-fast
- * Auto CDNs over multi-second paleoak masters that stall anime playback.
- */
-export async function probeMovyHlsUrlDetailed(
-  url: string,
-  referer: string = MOVY_PLAY_REFERER,
-): Promise<MovyProbeResult> {
-  if (!url) return { ok: false, ms: 0 }
-  const headers: Record<string, string> = {
+function movyProbeHeaders(
+  referer: string,
+  extra?: Record<string, string>,
+): Record<string, string> {
+  return {
     Accept: '*/*',
     Referer: referer,
     Origin: 'https://www.movy.sx',
     'User-Agent':
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    ...(extra || {}),
   }
-  const started = Date.now()
-  const elapsed = () => Date.now() - started
+}
+
+async function fetchMovyProbePlaylist(
+  url: string,
+  referer: string,
+  timeoutMs: number,
+): Promise<{ ok: boolean; status: number; text: string }> {
+  const headers = movyProbeHeaders(referer)
   try {
     if (typeof window !== 'undefined') {
       try {
@@ -698,12 +717,14 @@ export async function probeMovyHlsUrlDetailed(
             url,
             headers,
             responseType: 'text',
-            connectTimeout: MOVY_PROBE_TIMEOUT_MS,
-            readTimeout: MOVY_PROBE_TIMEOUT_MS,
+            connectTimeout: timeoutMs,
+            readTimeout: timeoutMs,
           })
-          if (res.status < 200 || res.status >= 300) return { ok: false, ms: elapsed() }
-          const classified = classifyMovyPlaylistBody(String(res.data ?? ''))
-          return { ...classified, ms: elapsed() }
+          return {
+            ok: res.status >= 200 && res.status < 300,
+            status: res.status,
+            text: String(res.data ?? ''),
+          }
         }
       } catch {
         /* fall through */
@@ -714,21 +735,207 @@ export async function probeMovyHlsUrlDetailed(
       const r = await Promise.race([
         window.signalDesktop.fetchJsonGet(url, referer),
         new Promise<{ ok: false; status: number; content: string }>((resolve) =>
-          setTimeout(() => resolve({ ok: false, status: 0, content: '' }), MOVY_PROBE_TIMEOUT_MS),
+          setTimeout(() => resolve({ ok: false, status: 0, content: '' }), timeoutMs),
         ),
       ])
-      if (!r.ok && !(Number(r.status) >= 200)) return { ok: false, ms: elapsed() }
-      if (Number(r.status) >= 400) return { ok: false, ms: elapsed() }
-      const classified = classifyMovyPlaylistBody(String(r.content || ''))
-      return { ...classified, ms: elapsed() }
+      if (Number(r.status) >= 400) {
+        return { ok: false, status: Number(r.status) || 0, text: String(r.content || '') }
+      }
+      if (!r.ok && !(Number(r.status) >= 200)) {
+        return { ok: false, status: Number(r.status) || 0, text: '' }
+      }
+      return { ok: true, status: Number(r.status) || 200, text: String(r.content || '') }
     }
 
     const res = await fetch(url, {
       headers,
-      signal: AbortSignal.timeout(MOVY_PROBE_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     })
-    if (!res.ok) return { ok: false, ms: elapsed() }
-    const classified = classifyMovyPlaylistBody(await res.text().catch(() => ''))
+    return { ok: res.ok, status: res.status, text: await res.text().catch(() => '') }
+  } catch {
+    return { ok: false, status: 0, text: '' }
+  }
+}
+
+function looksLikeMediaSegmentHead(bytes: Uint8Array, contentType: string): boolean {
+  if (!bytes.length) return false
+  if (/text\/html|application\/json|text\/plain/i.test(contentType) && bytes.length < 512) {
+    return false
+  }
+  const head = String.fromCharCode(...Array.from(bytes.subarray(0, Math.min(64, bytes.length))))
+  if (/^\s*(<(!doctype|html|head|body)|\{|please wait)/i.test(head)) return false
+  // MPEG-TS sync, fMP4 (ftyp/moof/mdat), or opaque binary of reasonable size.
+  if (bytes[0] === 0x47) return true
+  if (head.includes('ftyp') || head.includes('moof') || head.includes('mdat')) return true
+  return bytes.length >= 256
+}
+
+async function fetchMovyProbeSegmentHead(
+  url: string,
+  referer: string,
+  timeoutMs: number,
+): Promise<{ ok: boolean; status: number; bytes: Uint8Array; contentType: string }> {
+  const headers = movyProbeHeaders(referer, {
+    Range: `bytes=0-${MOVY_SEG_PROBE_BYTES - 1}`,
+  })
+  const empty = { ok: false, status: 0, bytes: new Uint8Array(), contentType: '' }
+  try {
+    if (typeof window !== 'undefined') {
+      try {
+        const { Capacitor, CapacitorHttp } = await import('@capacitor/core')
+        if (Capacitor.isNativePlatform()) {
+          const res = await CapacitorHttp.get({
+            url,
+            headers,
+            responseType: 'arraybuffer',
+            connectTimeout: timeoutMs,
+            readTimeout: timeoutMs,
+          })
+          const raw = res.data
+          let bytes = new Uint8Array()
+          if (raw instanceof ArrayBuffer) bytes = new Uint8Array(raw)
+          else if (ArrayBuffer.isView(raw)) {
+            bytes = new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength)
+          } else if (typeof raw === 'string' && raw) {
+            // Some bridges base64-encode arraybuffer responses.
+            try {
+              const bin = atob(raw)
+              bytes = new Uint8Array(bin.length)
+              for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+            } catch {
+              bytes = new TextEncoder().encode(raw)
+            }
+          }
+          const status = Number(res.status) || 0
+          const contentType = String(
+            (res.headers &&
+              (res.headers['Content-Type'] ||
+                res.headers['content-type'] ||
+                res.headers['CONTENT-TYPE'])) ||
+              '',
+          )
+          return {
+            ok: status >= 200 && status < 400 && bytes.length > 0,
+            status,
+            bytes,
+            contentType,
+          }
+        }
+      } catch {
+        /* fall through */
+      }
+    }
+
+    // Desktop main-process text fetch: Range still returns a short body; reject HTML stubs.
+    if (typeof window !== 'undefined' && window.signalDesktop?.fetchJsonGet) {
+      const r = await Promise.race([
+        window.signalDesktop.fetchJsonGet(url, referer),
+        new Promise<{ ok: false; status: number; content: string }>((resolve) =>
+          setTimeout(() => resolve({ ok: false, status: 0, content: '' }), timeoutMs),
+        ),
+      ])
+      const status = Number(r.status) || 0
+      const content = String(r.content || '')
+      const bytes = new TextEncoder().encode(content.slice(0, MOVY_SEG_PROBE_BYTES))
+      if (status >= 400 || status === 0 || !content) {
+        return { ok: false, status, bytes, contentType: '' }
+      }
+      return { ok: bytes.length > 0, status, bytes, contentType: '' }
+    }
+
+    const res = await fetch(url, {
+      headers,
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+    const contentType = res.headers.get('content-type') || ''
+    if (!(res.status >= 200 && res.status < 400)) {
+      return { ok: false, status: res.status, bytes: new Uint8Array(), contentType }
+    }
+    const reader = res.body?.getReader()
+    if (reader) {
+      const { value } = await reader.read()
+      void reader.cancel().catch(() => {})
+      const bytes = value ? new Uint8Array(value) : new Uint8Array()
+      return {
+        ok: bytes.length > 0,
+        status: res.status,
+        bytes: bytes.subarray(0, MOVY_SEG_PROBE_BYTES),
+        contentType,
+      }
+    }
+    const buf = new Uint8Array(await res.arrayBuffer())
+    return {
+      ok: buf.length > 0,
+      status: res.status,
+      bytes: buf.subarray(0, MOVY_SEG_PROBE_BYTES),
+      contentType,
+    }
+  } catch {
+    return empty
+  }
+}
+
+function firstPlaylistUri(playlist: string): string {
+  return (
+    playlist
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .find((l) => l && !l.startsWith('#')) || ''
+  )
+}
+
+/**
+ * After a playlist answers, confirm the first media segment is reachable media
+ * (not a hung warmsquare GET / HTML 403). Rejects blacklisted CDN hosts.
+ */
+async function verifyMovyPlaylistHasMediaSegment(
+  masterUrl: string,
+  masterBody: string,
+  referer: string,
+): Promise<boolean> {
+  let playlistUrl = masterUrl
+  let body = masterBody
+  if (/#EXT-X-STREAM-INF/i.test(body)) {
+    const variant = firstPlaylistUri(body)
+    if (!variant) return false
+    playlistUrl = new URL(variant, masterUrl).href
+    if (isBlacklistedMovyCdnHost(playlistUrl)) return false
+    const media = await fetchMovyProbePlaylist(playlistUrl, referer, MOVY_PROBE_TIMEOUT_MS)
+    if (!media.ok || !classifyMovyPlaylistBody(media.text).ok) return false
+    body = media.text
+  }
+  if (!/#EXTINF/i.test(body)) return false
+  const segment = firstPlaylistUri(body)
+  if (!segment) return false
+  const segUrl = new URL(segment, playlistUrl).href
+  // Blacklist before fetch — warmsquare hangs ~20s with Referer.
+  if (isBlacklistedMovyCdnHost(masterUrl) || isBlacklistedMovyCdnHost(segUrl)) return false
+  const seg = await fetchMovyProbeSegmentHead(segUrl, referer, MOVY_SEG_PROBE_TIMEOUT_MS)
+  if (!seg.ok) return false
+  return looksLikeMediaSegmentHead(seg.bytes, seg.contentType)
+}
+
+/**
+ * Probe a Movy HLS URL. Returns latency so resolvers can prefer website-fast
+ * Auto CDNs over multi-second paleoak masters that stall anime playback.
+ * Playlist-only success is not enough — the first media segment must also load.
+ */
+export async function probeMovyHlsUrlDetailed(
+  url: string,
+  referer: string = MOVY_PLAY_REFERER,
+): Promise<MovyProbeResult> {
+  if (!url) return { ok: false, ms: 0 }
+  const started = Date.now()
+  const elapsed = () => Date.now() - started
+  // Fast-fail known-dead playlist hosts (phoenix warmsquare masters).
+  if (isBlacklistedMovyCdnHost(url)) return { ok: false, ms: elapsed() }
+  try {
+    const playlist = await fetchMovyProbePlaylist(url, referer, MOVY_PROBE_TIMEOUT_MS)
+    if (!playlist.ok) return { ok: false, ms: elapsed() }
+    const classified = classifyMovyPlaylistBody(playlist.text)
+    if (!classified.ok) return { ok: false, ms: elapsed() }
+    const segmentOk = await verifyMovyPlaylistHasMediaSegment(url, playlist.text, referer)
+    if (!segmentOk) return { ok: false, ms: elapsed() }
     return { ...classified, ms: elapsed() }
   } catch {
     return { ok: false, ms: elapsed() }
@@ -1077,11 +1284,20 @@ export async function resolveMovyPlay(options: MovyResolveOptions): Promise<Movy
       const candidates = isTizenTv() && tsAlive.length > 0 ? tsAlive : englishAlive
       const minRank = Math.min(...candidates.map((c) => c.languageRank))
       let pool = candidates.filter((c) => c.languageRank === minRank)
+      // Drop any city whose playlist/CDN host is still on the warmsquare blacklist
+      // (segment probe should already reject these; belt-and-suspenders).
+      pool = pool.filter((c) => !isBlacklistedMovyCdnHost(c.best.url))
+      if (pool.length === 0) return null
       // Prefer website-fast Auto CDNs (majorplay ~200ms) over paleoak (~6s masters
       // + 9s segments) that buffer/stall anime on desktop and Android.
-      const fast = pool.filter((c) => c.probeMs > 0 && c.probeMs <= 2_000)
+      // Segment-verified probes take longer (~playlist+seg), so allow a wider "fast" band.
+      const fast = pool.filter((c) => c.probeMs > 0 && c.probeMs <= 5_000)
       if (fast.length > 0) pool = fast
       pool = [...pool].sort((a, b) => {
+        // Prefer goldenkite / oceangate when they passed the segment probe.
+        const aPref = isPreferredMovyCdnHost(a.best.url) ? 0 : 1
+        const bPref = isPreferredMovyCdnHost(b.best.url) ? 0 : 1
+        if (aPref !== bPref) return aPref - bPref
         // Prefer real ABR masters (incl. paleoak "1080p" labels that are ladders).
         const aAbr = a.abrMaster || isAutoQualityLabel(a.best) ? 0 : 1
         const bAbr = b.abrMaster || isAutoQualityLabel(b.best) ? 0 : 1

@@ -474,11 +474,19 @@ let activePlaybackReferrer = ''
 function isMovyStylePlaybackUrl(url) {
   const u = String(url || '')
   if (!u) return false
-  if (/paleoak|zenoak|majorplay\.net|wecollege\.net/i.test(u)) return true
+  if (
+    /paleoak|zenoak|majorplay\.net|wecollege\.net|warmsquare\.top|goldenkite\.top|oceangate\.top|sun\d*\./i.test(
+      u,
+    )
+  ) {
+    return true
+  }
   if (/[?&]type=m3u8\b/i.test(u)) return true
   if (/workers\.dev\/video\.m3u8/i.test(u)) return true
   // Disguised chunk paths: /v/<hash>/style/chunk-0.js|image-2.webp|page-3.html
   if (/\/v\/[a-f0-9]{16,}\/style\/(?:chunk|image|page|vec)-/i.test(u)) return true
+  // Extensionless Movy media paths (/r6/s/…, /vd/…).
+  if (/\/(?:r\d+|vd|res)\/(?:s\/)?[A-Za-z0-9_-]{12,}/i.test(u)) return true
   return false
 }
 
@@ -538,7 +546,7 @@ function isIptvMediaUrl(url) {
   if (/vimeocdn\.com|player\.vimeo\.com/i.test(u)) return true
   // Movy / Atlantic / Cinecat / Streamo CDNs (Aphrodite uses /cdn-m3u8?payload= — no .m3u8).
   if (
-    /totallyacdn\.|cdn\.hls\.lol|stream\.hls\.lol|transcode\.cfd|zenoak|paleoak|wecollege\.net|shegu\.net/i.test(
+    /totallyacdn\.|cdn\.hls\.lol|stream\.hls\.lol|transcode\.cfd|zenoak|paleoak|wecollege\.net|shegu\.net|warmsquare\.top|goldenkite\.top|oceangate\.top/i.test(
       u,
     ) ||
     /\/cdn-m3u8(?:\?|$)/i.test(u)

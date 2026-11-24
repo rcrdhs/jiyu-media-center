@@ -5932,6 +5932,8 @@ export function Player({
       let bufferedAtOrigin = -1
       let lastMovingPlayhead = -1
       let hlsHealTicks = 0
+      /** When the current in-flight frag started — hung CDNs must not block remint forever. */
+      let inFlightSince = 0
       stallTimer = window.setInterval(() => {
         if (cancelled || !waitingSince || !waitingOrigin) return
         // User scrub / ±10s — heal with startLoad, don't remount (that was
@@ -5949,10 +5951,21 @@ export function Player({
         }
         // Fragment still downloading — don't treat slow CDN as a stall, and
         // never reset the loader (that aborts the segment and freezes ABR).
+        // Exception: a hung in-flight GET (0-byte warmsquare-style) that never
+        // completes would reset waitingSince forever and strand Buffering….
         if (hlsHasInFlightMainFrag(hlsInstanceRef.current)) {
-          waitingSince = Date.now()
-          setStatus('Buffering…')
-          return
+          if (!inFlightSince) inFlightSince = Date.now()
+          const hungMs = Date.now() - inFlightSince
+          if (hungMs < 18_000) {
+            waitingSince = Date.now()
+            setStatus('Buffering…')
+            return
+          }
+          // Age clocks so soft/hard stall remint below can rotate the city.
+          waitingSince = Date.now() - stallLimitMs - 1
+          waitingOrigin = Math.min(waitingOrigin || Date.now(), Date.now() - hardCapMs - 1)
+        } else {
+          inFlightSince = 0
         }
         const videoEl = videoRef.current
         if (!videoEl) return
